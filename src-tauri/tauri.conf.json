@@ -35,9 +35,6 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser"
-      },
-      "wix": {
-        "installMode": "perUser"
       }
     }
   },
