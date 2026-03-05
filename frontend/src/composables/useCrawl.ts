@@ -1,14 +1,14 @@
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CrawlResult } from "../types/crawl";
+import type { CrawlResult, CrawlConfig } from "../types/crawl";
 
 export function useCrawl() {
   const results = ref<CrawlResult[]>([]);
   const crawling = ref(false);
   let unlisten: (() => void) | null = null;
 
-  async function startCrawl(url: string, maxRequests: number, concurrency: number) {
+  async function startCrawl(url: string, config: CrawlConfig) {
     results.value = [];
     crawling.value = true;
 
@@ -22,7 +22,19 @@ export function useCrawl() {
     });
 
     try {
-      await invoke("start_crawl", { url, maxRequests, concurrency });
+      await invoke("start_crawl", {
+        url,
+        maxRequests: config.maxRequests,
+        concurrency: config.concurrency,
+        userAgent: config.userAgent || null,
+        respectRobots: config.respectRobots,
+        delay: config.delay,
+        customHeaders: Object.keys(config.customHeaders).length
+          ? JSON.stringify(config.customHeaders)
+          : null,
+        mode: config.mode,
+        urls: config.urls.length ? config.urls : null,
+      });
     } catch (e) {
       console.error("Crawl failed:", e);
       crawling.value = false;
@@ -40,6 +52,14 @@ export function useCrawl() {
     cleanup();
   }
 
+  function clearResults() {
+    results.value = [];
+  }
+
+  function setResults(data: CrawlResult[]) {
+    results.value = data;
+  }
+
   function cleanup() {
     if (unlisten) {
       unlisten();
@@ -47,5 +67,5 @@ export function useCrawl() {
     }
   }
 
-  return { results, crawling, startCrawl, stopCrawl };
+  return { results, crawling, startCrawl, stopCrawl, clearResults, setResults };
 }

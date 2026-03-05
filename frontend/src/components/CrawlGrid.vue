@@ -34,7 +34,17 @@ onMounted(() => {
       { title: "Int. Links", field: "internalLinks", width: 90, hozAlign: "center" },
       { title: "Ext. Links", field: "externalLinks", width: 90, hozAlign: "center" },
       { title: "Time (ms)", field: "responseTime", width: 100, hozAlign: "right" },
-      { title: "Type", field: "contentType", width: 120 },
+      { title: "Resource", field: "resourceType", width: 100 },
+      { title: "Size", field: "size", width: 90, hozAlign: "right",
+        formatter(cell: any) {
+          const val = cell.getValue() as number;
+          if (!val) return "";
+          if (val < 1024) return `${val} B`;
+          if (val < 1048576) return `${(val / 1024).toFixed(1)} KB`;
+          return `${(val / 1048576).toFixed(1)} MB`;
+        }
+      },
+      { title: "Content-Type", field: "contentType", width: 140 },
     ],
   });
 });

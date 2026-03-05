@@ -9,6 +9,8 @@
     "shell:allow-stdin-write",
     "shell:allow-kill",
     "sql:default",
+    "dialog:default",
+    "fs:default",
     {
       "identifier": "shell:allow-spawn",
       "allow": [

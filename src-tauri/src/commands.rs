@@ -17,29 +17,71 @@ pub async fn start_crawl(
     url: String,
     max_requests: u32,
     concurrency: u32,
+    user_agent: Option<String>,
+    respect_robots: Option<bool>,
+    delay: Option<u32>,
+    custom_headers: Option<String>,
+    mode: Option<String>,
+    urls: Option<Vec<String>>,
 ) -> Result<(), String> {
-    // Manage state on first call
     if app.try_state::<CrawlChild>().is_none() {
         app.manage(CrawlChild::default());
     }
 
     let shell = app.shell();
 
+    let mut args = vec![
+        "crawl".to_string(),
+        url,
+        "--max-requests".to_string(),
+        max_requests.to_string(),
+        "--concurrency".to_string(),
+        concurrency.to_string(),
+    ];
+
+    if let Some(ua) = user_agent {
+        args.push("--user-agent".to_string());
+        args.push(ua);
+    }
+
+    if let Some(false) = respect_robots {
+        args.push("--respect-robots".to_string());
+        args.push("false".to_string());
+    }
+
+    if let Some(d) = delay {
+        if d > 0 {
+            args.push("--delay".to_string());
+            args.push(d.to_string());
+        }
+    }
+
+    if let Some(headers) = custom_headers {
+        args.push("--custom-headers".to_string());
+        args.push(headers);
+    }
+
+    if let Some(m) = mode {
+        args.push("--mode".to_string());
+        args.push(m);
+    }
+
+    if let Some(url_list) = urls {
+        if !url_list.is_empty() {
+            args.push("--urls".to_string());
+            args.push(url_list.join(","));
+        }
+    }
+
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
     let (mut rx, child) = shell
         .sidecar("fera-crawler")
         .map_err(|e| format!("Failed to create sidecar command: {e}"))?
-        .args([
-            "crawl",
-            &url,
-            "--max-requests",
-            &max_requests.to_string(),
-            "--concurrency",
-            &concurrency.to_string(),
-        ])
+        .args(&args_refs)
         .spawn()
         .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
 
-    // Store child for stop_crawl
     let state: State<CrawlChild> = app.state();
     *state.0.lock().unwrap() = Some(child);
 
@@ -68,7 +110,6 @@ pub async fn start_crawl(
             }
         }
 
-        // Clear child reference
         if let Some(state) = app_handle.try_state::<CrawlChild>() {
             *state.0.lock().unwrap() = None;
         }
