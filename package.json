@@ -7,6 +7,7 @@
     "sidecar"
   ],
   "scripts": {
+    "tauri": "tauri",
     "dev": "npx tauri dev",
     "build": "npx tauri build",
     "dev:frontend": "npm run dev --workspace=frontend",
