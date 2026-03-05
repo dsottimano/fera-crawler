@@ -28,30 +28,55 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
-      - name: Bundle Chromium into resources
-        shell: pwsh
-        run: |
-          $exePath = node -e "console.log(require('playwright').chromium.executablePath())"
-          $chromiumDir = Split-Path $exePath -Parent
-          New-Item -ItemType Directory -Force -Path "src-tauri/resources/chromium"
-          Copy-Item -Recurse -Force "$chromiumDir\*" "src-tauri/resources/chromium/"
-          Write-Host "Bundled Chromium from $chromiumDir"
-          Get-ChildItem "src-tauri/resources/chromium" -Recurse -File | Measure-Object | Select-Object Count
-          Get-ChildItem "src-tauri/resources/chromium/chrome.exe" -ErrorAction SilentlyContinue | Select-Object FullName, Length
-          if (-not (Test-Path "src-tauri/resources/chromium/chrome.exe")) { Write-Error "chrome.exe not found!"; exit 1 }
-
       - name: Build sidecar binary
         run: |
           npm run build --workspace=sidecar
           npx @yao-pkg/pkg sidecar/dist/index.cjs --targets node22-win-x64 --output src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        run: npx tauri build
+        env:
+          CI: true
+
+      - name: Create portable distribution with Chromium
+        shell: pwsh
+        run: |
+          $exePath = node -e "console.log(require('playwright').chromium.executablePath())"
+          $chromiumSrc = Split-Path $exePath -Parent
+
+          # Create distribution directory
+          $dist = "dist/Fera"
+          New-Item -ItemType Directory -Force -Path $dist
+
+          # Copy the main exe and sidecar from the release build
+          Copy-Item "src-tauri/target/release/fera.exe" "$dist/Fera.exe"
+          Copy-Item "src-tauri/target/release/fera-crawler-x86_64-pc-windows-msvc.exe" "$dist/fera-crawler.exe"
+
+          # Copy Chromium
+          $chromiumDest = "$dist/chromium"
+          New-Item -ItemType Directory -Force -Path $chromiumDest
+          Copy-Item -Recurse -Force "$chromiumSrc\*" "$chromiumDest\"
+
+          # Copy WebView2Loader if present
+          Get-ChildItem "src-tauri/target/release/WebView2Loader.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination $dist
+
+          Write-Host "Distribution contents:"
+          Get-ChildItem $dist | Format-Table Name, Length
+          Write-Host "Chromium files: $((Get-ChildItem $chromiumDest -Recurse -File).Count)"
+
+          # Create zip
+          Compress-Archive -Path "$dist\*" -DestinationPath "dist/Fera-portable-x64.zip" -Force
+          $zipSize = [math]::Round((Get-Item "dist/Fera-portable-x64.zip").Length / 1MB, 1)
+          Write-Host "Created Fera-portable-x64.zip ($zipSize MB)"
+
+      - name: Upload to release
+        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Fera ${{ github.ref_name }}"
-          releaseBody: "SEO Crawler release"
-          releaseDraft: true
-          prerelease: false
+        run: |
+          $tag = if ($env:GITHUB_REF_NAME -match '^v') { $env:GITHUB_REF_NAME } else { "main" }
+          gh release create $tag --draft --title "Fera $tag" --notes "SEO Crawler release — portable zip, no install needed" 2>$null
+          gh release upload $tag "dist/Fera-portable-x64.zip" --clobber
+          # Also upload the NSIS installer if it exists
+          $nsis = Get-ChildItem -Recurse -Path "src-tauri/target/release/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($nsis) { gh release upload $tag $nsis.FullName --clobber }
