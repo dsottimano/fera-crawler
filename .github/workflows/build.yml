@@ -55,7 +55,7 @@ jobs:
       - name: Build sidecar binary
         run: |
           npm run build --workspace=sidecar
-          npx --workspace=sidecar @yao-pkg/pkg sidecar/dist/index.cjs --targets ${{ matrix.pkg_target }} --output src-tauri/binaries/fera-crawler-${{ matrix.target }}
+          npx @yao-pkg/pkg sidecar/dist/index.cjs --targets ${{ matrix.pkg_target }} --output src-tauri/binaries/fera-crawler-${{ matrix.target }}
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
