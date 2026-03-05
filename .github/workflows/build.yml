@@ -1,0 +1,92 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev libgtk-3-dev \
+            libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright
+        run: npx playwright install chromium
+
+      - name: Generate icons
+        run: npx tauri icon app-icon.png
+
+      - name: Create sidecar wrapper (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p src-tauri/binaries
+          TRIPLE="${{ matrix.target }}"
+          cat > "src-tauri/binaries/fera-crawler-${TRIPLE}" << 'SCRIPT'
+          #!/bin/sh
+          SIDECAR_DIR="$(cd "$(dirname "$0")" && pwd)"
+          if [ -d "$SIDECAR_DIR/../../sidecar/src" ]; then
+            ROOT="$(cd "$SIDECAR_DIR/../../sidecar" && pwd)"
+          else
+            ROOT="$(cd "$SIDECAR_DIR/../../../sidecar" && pwd)"
+          fi
+          exec npx --prefix "$ROOT" tsx "$ROOT/src/index.ts" "$@"
+          SCRIPT
+          chmod +x "src-tauri/binaries/fera-crawler-${TRIPLE}"
+
+      - name: Create sidecar wrapper (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries
+          $script = @'
+          @echo off
+          set "SIDECAR_DIR=%~dp0"
+          set "ROOT=%SIDECAR_DIR%..\..\..\sidecar"
+          if not exist "%ROOT%\src" set "ROOT=%SIDECAR_DIR%..\..\sidecar"
+          npx --prefix "%ROOT%" tsx "%ROOT%\src\index.ts" %*
+          '@
+          $script | Out-File -FilePath "src-tauri/binaries/fera-crawler-${{ matrix.target }}.exe" -Encoding ascii
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Fera ${{ github.ref_name }}"
+          releaseBody: "SEO Crawler release"
+          releaseDraft: true
+          prerelease: false

@@ -1,0 +1,19 @@
+{
+  "name": "fera",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "sidecar"
+  ],
+  "scripts": {
+    "dev": "npx tauri dev",
+    "build": "npx tauri build",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "dev:sidecar": "npm run dev --workspace=sidecar",
+    "build:sidecar": "npm run build --workspace=sidecar"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1"
+  }
+}

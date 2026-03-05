@@ -1,0 +1,23 @@
+{
+  "name": "fera-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "node esbuild.config.mjs",
+    "build:binary": "npm run build && pkg dist/index.cjs --targets node22-linux-x64 --output ../src-tauri/binaries/fera-crawler"
+  },
+  "dependencies": {
+    "crawlee": "^3.12.3",
+    "@crawlee/playwright": "^3.12.3",
+    "playwright": "^1.50.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.3",
+    "@yao-pkg/pkg": "^6.3.0",
+    "@types/node": "^22.12.0"
+  }
+}

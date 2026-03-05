@@ -1,0 +1,26 @@
+node_modules/
+dist/
+target/
+*.db
+*.db-journal
+app-icon.png
+
+# Tauri generated icons (can be regenerated)
+src-tauri/icons/
+
+# Sidecar placeholder (built per-platform)
+src-tauri/binaries/fera-crawler-*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Crawlee storage (runtime data)
+storage/
+src-tauri/storage/
+
+# OS
+.DS_Store
+Thumbs.db
