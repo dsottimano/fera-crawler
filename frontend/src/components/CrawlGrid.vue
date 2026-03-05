@@ -21,7 +21,7 @@ onMounted(() => {
     columns: [
       { title: "URL", field: "url", widthGrow: 3, tooltip: true },
       { title: "Status", field: "status", width: 80, hozAlign: "center",
-        formatter(cell) {
+        formatter(cell: any) {
           const val = cell.getValue() as number;
           const color = val >= 200 && val < 300 ? "#4caf50" : val >= 300 && val < 400 ? "#ff9800" : "#f44336";
           return `<span style="color:${color};font-weight:600">${val}</span>`;
