@@ -21,9 +21,6 @@ jobs:
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             pkg_target: node22-win-x64
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            pkg_target: node22-macos-arm64
 
     runs-on: ${{ matrix.platform }}
 
