@@ -5,8 +5,7 @@ target/
 *.db-journal
 # app-icon.png is tracked — needed for CI icon generation
 
-# Tauri generated icons (can be regenerated)
-src-tauri/icons/
+# Tauri generated icons are tracked for CI
 
 # Sidecar placeholder (built per-platform)
 src-tauri/binaries/fera-crawler-*

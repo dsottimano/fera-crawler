@@ -46,9 +46,6 @@ jobs:
       - name: Install Playwright
         run: npx playwright install chromium
 
-      - name: Generate icons
-        run: npx tauri icon app-icon.png
-
       - name: Create sidecar wrapper (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
