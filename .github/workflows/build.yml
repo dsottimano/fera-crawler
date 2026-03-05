@@ -77,6 +77,3 @@ jobs:
           $tag = if ($env:GITHUB_REF_NAME -match '^v') { $env:GITHUB_REF_NAME } else { "main" }
           gh release create $tag --draft --title "Fera $tag" --notes "SEO Crawler release — portable zip, no install needed" 2>$null
           gh release upload $tag "dist/Fera-portable-x64.zip" --clobber
-          # Also upload the NSIS installer if it exists
-          $nsis = Get-ChildItem -Recurse -Path "src-tauri/target/release/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($nsis) { gh release upload $tag $nsis.FullName --clobber }
