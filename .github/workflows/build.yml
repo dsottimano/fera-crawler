@@ -11,31 +11,10 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            pkg_target: node22-linux-x64
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            pkg_target: node22-win-x64
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev libgtk-3-dev \
-            libpango1.0-dev libcairo2-dev libgdk-pixbuf2.0-dev \
-            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
 
       - uses: actions/setup-node@v4
         with:
@@ -46,13 +25,24 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Install Playwright
+      - name: Install Playwright Chromium
         run: npx playwright install chromium
+
+      - name: Bundle Chromium into resources
+        shell: pwsh
+        run: |
+          $exePath = node -e "console.log(require('playwright').chromium.executablePath())"
+          $chromiumDir = Split-Path $exePath -Parent
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources/chromium"
+          Copy-Item -Recurse -Force "$chromiumDir\*" "src-tauri/resources/chromium/"
+          Write-Host "Bundled Chromium from $chromiumDir"
+          Write-Host "Chrome exe: $exePath"
+          Get-ChildItem "src-tauri/resources/chromium/chrome.exe" | Select-Object FullName, Length
 
       - name: Build sidecar binary
         run: |
           npm run build --workspace=sidecar
-          npx @yao-pkg/pkg sidecar/dist/index.cjs --targets ${{ matrix.pkg_target }} --output src-tauri/binaries/fera-crawler-${{ matrix.target }}
+          npx @yao-pkg/pkg sidecar/dist/index.cjs --targets node22-win-x64 --output src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0

@@ -107,6 +107,7 @@ async function handleMenuAction(menu: string, item: string) {
   <div class="app">
     <MenuBar @action="handleMenuAction" />
     <header class="toolbar">
+      <img src="/logo.png" alt="Fera" class="logo-img" />
       <h1 class="logo">Fera</h1>
       <div class="controls">
         <input
@@ -155,6 +156,11 @@ async function handleMenuAction(menu: string, item: string) {
   padding: 12px 16px;
   background: #16213e;
   border-bottom: 1px solid #0f3460;
+}
+
+.logo-img {
+  width: 28px;
+  height: 28px;
 }
 
 .logo {

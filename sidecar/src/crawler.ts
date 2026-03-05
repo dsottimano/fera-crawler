@@ -1,9 +1,26 @@
+import path from "node:path";
+import fs from "node:fs";
 import { PlaywrightCrawler, type PlaywrightCrawlingContext } from "@crawlee/playwright";
 import { writeLine } from "./pipeline.js";
 import { classifyResource } from "./utils.js";
 import type { CrawlConfig, CrawlResult } from "./types.js";
 
+function findBundledChromium(): string | undefined {
+  // When running as a bundled sidecar, Chromium is in a sibling 'chromium' directory
+  const candidates = [
+    path.join(path.dirname(process.execPath), "chromium", "chrome.exe"),
+    path.join(path.dirname(process.execPath), "resources", "chromium", "chrome.exe"),
+    path.join(path.dirname(process.execPath), "..", "chromium", "chrome.exe"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return undefined;
+}
+
 export async function runCrawler(config: CrawlConfig): Promise<void> {
+  const bundledChromium = findBundledChromium();
+
   const crawler = new PlaywrightCrawler({
     maxRequestsPerCrawl: config.maxRequests,
     maxConcurrency: config.concurrency,
@@ -17,6 +34,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     launchContext: {
       launchOptions: {
         args: ["--no-sandbox"],
+        ...(bundledChromium ? { executablePath: bundledChromium } : {}),
       },
       ...(config.userAgent ? { userAgent: config.userAgent } : {}),
     },

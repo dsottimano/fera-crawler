@@ -32,6 +32,7 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/fera-crawler"],
+    "resources": ["resources/chromium/**"],
     "windows": {
       "nsis": {
         "installMode": "currentUser"
