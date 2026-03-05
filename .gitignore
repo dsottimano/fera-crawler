@@ -3,7 +3,7 @@ dist/
 target/
 *.db
 *.db-journal
-app-icon.png
+# app-icon.png is tracked — needed for CI icon generation
 
 # Tauri generated icons (can be regenerated)
 src-tauri/icons/
