@@ -17,10 +17,13 @@ jobs:
         include:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            pkg_target: node22-linux-x64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            pkg_target: node22-win-x64
           - platform: macos-latest
             target: aarch64-apple-darwin
+            pkg_target: node22-macos-arm64
 
     runs-on: ${{ matrix.platform }}
 
@@ -49,36 +52,10 @@ jobs:
       - name: Install Playwright
         run: npx playwright install chromium
 
-      - name: Create sidecar wrapper (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Build sidecar binary
         run: |
-          mkdir -p src-tauri/binaries
-          TRIPLE="${{ matrix.target }}"
-          cat > "src-tauri/binaries/fera-crawler-${TRIPLE}" << 'SCRIPT'
-          #!/bin/sh
-          SIDECAR_DIR="$(cd "$(dirname "$0")" && pwd)"
-          if [ -d "$SIDECAR_DIR/../../sidecar/src" ]; then
-            ROOT="$(cd "$SIDECAR_DIR/../../sidecar" && pwd)"
-          else
-            ROOT="$(cd "$SIDECAR_DIR/../../../sidecar" && pwd)"
-          fi
-          exec npx --prefix "$ROOT" tsx "$ROOT/src/index.ts" "$@"
-          SCRIPT
-          chmod +x "src-tauri/binaries/fera-crawler-${TRIPLE}"
-
-      - name: Create sidecar wrapper (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path src-tauri/binaries
-          $script = @'
-          @echo off
-          set "SIDECAR_DIR=%~dp0"
-          set "ROOT=%SIDECAR_DIR%..\..\..\sidecar"
-          if not exist "%ROOT%\src" set "ROOT=%SIDECAR_DIR%..\..\sidecar"
-          npx --prefix "%ROOT%" tsx "%ROOT%\src\index.ts" %*
-          '@
-          $script | Out-File -FilePath "src-tauri/binaries/fera-crawler-${{ matrix.target }}.exe" -Encoding ascii
+          npm run build --workspace=sidecar
+          npx --workspace=sidecar @yao-pkg/pkg sidecar/dist/index.cjs --targets ${{ matrix.pkg_target }} --output src-tauri/binaries/fera-crawler-${{ matrix.target }}
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
