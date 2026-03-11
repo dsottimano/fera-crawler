@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { PlaywrightCrawler, type PlaywrightCrawlingContext } from "@crawlee/playwright";
+import { chromium } from "playwright";
 import { writeLine } from "./pipeline.js";
 import { classifyResource } from "./utils.js";
 import type { CrawlConfig, CrawlResult } from "./types.js";
@@ -32,6 +33,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     // robots.txt checking in a future update.
 
     launchContext: {
+      launcher: chromium,
       launchOptions: {
         args: ["--no-sandbox"],
         ...(bundledChromium ? { executablePath: bundledChromium } : {}),
