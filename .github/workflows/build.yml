@@ -32,7 +32,10 @@ jobs:
         run: npm run build --workspace=sidecar
 
       - name: Build sidecar launcher
-        run: rustc sidecar-launcher/main.rs -o src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc.exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "src-tauri/binaries"
+          rustc sidecar-launcher/main.rs -o src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc.exe
 
       - name: Download portable Node.js
         shell: pwsh
