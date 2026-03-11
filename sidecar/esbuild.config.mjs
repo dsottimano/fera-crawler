@@ -7,7 +7,7 @@ await build({
   target: "node22",
   format: "cjs",
   outfile: "dist/index.cjs",
-  external: [],
+  external: ["chromium-bidi"],
   sourcemap: false,
   minify: true,
 });
