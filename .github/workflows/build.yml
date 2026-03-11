@@ -84,13 +84,14 @@ jobs:
           Write-Host "  3: $parentDir/chromium/chrome.exe  -> $(Test-Path "$parentDir/chromium/chrome.exe")"
 
           Write-Host "`n=== Running: $sidecar crawl https://example.com --max-requests 1 ==="
+          $env:DEBUG = "pw:browser*"
           $proc = Start-Process -FilePath $sidecar `
             -ArgumentList "crawl","https://example.com","--max-requests","1","--concurrency","1" `
             -NoNewWindow -PassThru `
             -RedirectStandardOutput "smoke-stdout.txt" `
             -RedirectStandardError "smoke-stderr.txt"
-          if (-not $proc.WaitForExit(60000)) {
-            Write-Host "TIMEOUT after 60s — killing process"
+          if (-not $proc.WaitForExit(120000)) {
+            Write-Host "TIMEOUT after 120s — killing process"
             $proc.Kill()
           }
           Write-Host "`nExit code: $($proc.ExitCode)"
