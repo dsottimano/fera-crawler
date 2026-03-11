@@ -27,6 +27,9 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     maxConcurrency: config.concurrency,
     headless: true,
     requestHandlerTimeoutSecs: 30,
+    browserPoolOptions: {
+      useFingerprints: false,
+    },
 
     // TODO: Crawlee's PlaywrightCrawler does not natively support robots.txt.
     // config.respectRobots is accepted but not yet enforced. Implement custom
