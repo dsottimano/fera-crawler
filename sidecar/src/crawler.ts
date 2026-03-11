@@ -7,10 +7,13 @@ import { classifyResource } from "./utils.js";
 import type { CrawlConfig, CrawlResult } from "./types.js";
 
 function findBundledChromium(): string | undefined {
-  // When running as a bundled sidecar, Chromium is in a sibling 'chromium' directory
+  // The launcher sets FERA_RESOURCES_DIR to the app install directory
+  const resourcesDir = process.env.FERA_RESOURCES_DIR;
   const candidates = [
+    // Production: launcher sets FERA_RESOURCES_DIR to the Tauri install dir
+    ...(resourcesDir ? [path.join(resourcesDir, "chromium", "chrome.exe")] : []),
+    // Fallback: relative to the executable (legacy/dev paths)
     path.join(path.dirname(process.execPath), "chromium", "chrome.exe"),
-    path.join(path.dirname(process.execPath), "resources", "chromium", "chrome.exe"),
     path.join(path.dirname(process.execPath), "..", "chromium", "chrome.exe"),
   ];
   for (const p of candidates) {

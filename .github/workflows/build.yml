@@ -22,16 +22,49 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: oven-sh/setup-bun@v2
-
       - name: Install dependencies
         run: npm install
 
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
-      - name: Build sidecar binary
-        run: bun build --compile --external chromium-bidi --external electron sidecar/src/index.ts --outfile src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc
+      - name: Build sidecar (tsc)
+        run: npm run build --workspace=sidecar
+
+      - name: Build sidecar launcher
+        run: rustc sidecar-launcher/main.rs -o src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc.exe
+
+      - name: Download portable Node.js
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "src-tauri/node"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.14.0/win-x64/node.exe" -OutFile "src-tauri/node/node.exe"
+          Write-Host "Downloaded node.exe ($([math]::Round((Get-Item 'src-tauri/node/node.exe').Length / 1MB, 1)) MB)"
+
+      - name: Stage sidecar runtime
+        shell: pwsh
+        run: |
+          $dest = "src-tauri/sidecar-bundle"
+          New-Item -ItemType Directory -Force -Path $dest
+
+          # Copy compiled JS files
+          Copy-Item "sidecar/dist/*.js" "$dest/"
+
+          # Install production dependencies for the sidecar
+          $pkg = @{
+            name = "fera-sidecar-runtime"
+            version = "0.1.0"
+            private = $true
+            type = "module"
+            dependencies = @{
+              crawlee = "^3.12.3"
+              "@crawlee/playwright" = "^3.12.3"
+              playwright = "^1.50.0"
+            }
+          }
+          $pkg | ConvertTo-Json -Depth 5 | Set-Content "$dest/package.json"
+          npm install --prefix $dest --omit=dev
+          Write-Host "Sidecar runtime: $((Get-ChildItem $dest -Recurse -File).Count) files"
 
       - name: Copy Chromium and patch tauri.conf.json
         shell: pwsh
@@ -45,74 +78,39 @@ jobs:
           Copy-Item -Recurse -Force "$chromiumDir\*" "$dest\"
           Write-Host "Copied $((Get-ChildItem $dest -Recurse -File).Count) Chromium files"
 
-          # Build resource list: every file in chromium/ as explicit paths
-          $files = Get-ChildItem "$dest" -Recurse -File | ForEach-Object {
-            $rel = $_.FullName.Replace("$PWD\src-tauri\", "").Replace("\", "/")
-            $rel
+          # Collect ALL resource files: chromium + node + sidecar-bundle
+          $files = @()
+          foreach ($dir in @("src-tauri/chromium", "src-tauri/node", "src-tauri/sidecar-bundle")) {
+            if (Test-Path $dir) {
+              Get-ChildItem $dir -Recurse -File | ForEach-Object {
+                $rel = $_.FullName.Replace("$PWD\src-tauri\", "").Replace("\", "/")
+                $files += $rel
+              }
+            }
           }
-          Write-Host "Resource entries: $($files.Count)"
+          Write-Host "Total resource entries: $($files.Count)"
 
-          # Patch tauri.conf.json to add resources array
+          # Patch tauri.conf.json
           $conf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
           $conf.bundle | Add-Member -NotePropertyName "resources" -NotePropertyValue @($files) -Force
           $conf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json" -Encoding UTF8
-          Write-Host "Patched tauri.conf.json with $($files.Count) resource files"
 
-      - name: Smoke test with Node.js (baseline)
-        shell: pwsh
-        continue-on-error: true
-        timeout-minutes: 3
-        run: |
-          Write-Host "=== Testing crawler with plain Node.js (npx tsx) ==="
-          $proc = Start-Process -FilePath "cmd.exe" `
-            -ArgumentList "/c","npx tsx sidecar/src/index.ts crawl https://example.com --max-requests 1 --concurrency 1" `
-            -NoNewWindow -PassThru `
-            -RedirectStandardOutput "node-stdout.txt" `
-            -RedirectStandardError "node-stderr.txt"
-          if (-not $proc.WaitForExit(60000)) {
-            Write-Host "TIMEOUT after 60s"
-            $proc.Kill()
-          }
-          Write-Host "Exit code: $($proc.ExitCode)"
-          Write-Host "`n=== STDOUT ==="
-          if (Test-Path node-stdout.txt) { Get-Content node-stdout.txt }
-          Write-Host "`n=== STDERR ==="
-          if (Test-Path node-stderr.txt) { Get-Content node-stderr.txt }
-
-      - name: Smoke test sidecar (Bun compiled)
+      - name: Smoke test sidecar
         shell: pwsh
         continue-on-error: true
         run: |
-          Write-Host "=== Sidecar exe ==="
           $sidecar = "src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc.exe"
-          if (Test-Path $sidecar) {
-            Write-Host "Found: $sidecar ($([math]::Round((Get-Item $sidecar).Length / 1MB, 1)) MB)"
-          } else {
-            Write-Host "NOT FOUND: $sidecar"; exit 1
-          }
+          Write-Host "=== Sidecar: $sidecar ==="
+          Write-Host "Size: $([math]::Round((Get-Item $sidecar).Length / 1KB, 1)) KB"
 
-          Write-Host "`n=== Chromium check ==="
-          $chromePath = "src-tauri/chromium/chrome.exe"
-          if (Test-Path $chromePath) { Write-Host "Found chrome.exe" }
-          else { Write-Host "chrome.exe NOT FOUND" }
-          Get-ChildItem "src-tauri/chromium" -Depth 0 | ForEach-Object { Write-Host "  $_" }
-
-          Write-Host "`n=== Sidecar search paths (relative to exe) ==="
-          $exeDir = Split-Path $sidecar -Parent
-          Write-Host "  1: $exeDir/chromium/chrome.exe  -> $(Test-Path "$exeDir/chromium/chrome.exe")"
-          Write-Host "  2: $exeDir/resources/chromium/chrome.exe  -> $(Test-Path "$exeDir/resources/chromium/chrome.exe")"
-          $parentDir = Split-Path $exeDir -Parent
-          Write-Host "  3: $parentDir/chromium/chrome.exe  -> $(Test-Path "$parentDir/chromium/chrome.exe")"
-
-          Write-Host "`n=== Running: $sidecar crawl https://example.com --max-requests 1 ==="
-          $env:DEBUG = "pw:browser*"
+          Write-Host "`n=== Running smoke test ==="
           $proc = Start-Process -FilePath $sidecar `
             -ArgumentList "crawl","https://example.com","--max-requests","1","--concurrency","1" `
             -NoNewWindow -PassThru `
             -RedirectStandardOutput "smoke-stdout.txt" `
             -RedirectStandardError "smoke-stderr.txt"
-          if (-not $proc.WaitForExit(120000)) {
-            Write-Host "TIMEOUT after 120s — killing process"
+          if (-not $proc.WaitForExit(60000)) {
+            Write-Host "TIMEOUT after 60s — killing process"
             $proc.Kill()
           }
           Write-Host "`nExit code: $($proc.ExitCode)"

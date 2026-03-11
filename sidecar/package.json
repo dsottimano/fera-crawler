@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "node esbuild.config.mjs",
-    "build:binary": "npm run build && pkg dist/index.cjs --targets node22-linux-x64 --output ../src-tauri/binaries/fera-crawler"
+    "build": "tsc"
   },
   "dependencies": {
     "crawlee": "^3.12.3",

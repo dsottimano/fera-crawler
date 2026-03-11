@@ -27,7 +27,7 @@ await build({
   target: "node22",
   format: "cjs",
   outfile: "dist/index.cjs",
-  external: ["chromium-bidi"],
+  external: ["chromium-bidi", "@crawlee/memory-storage"],
   sourcemap: false,
   minify: true,
   plugins: [patchPlaywrightResolves],
