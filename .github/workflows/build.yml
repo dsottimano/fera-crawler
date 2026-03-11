@@ -58,6 +58,47 @@ jobs:
           $conf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json" -Encoding UTF8
           Write-Host "Patched tauri.conf.json with $($files.Count) resource files"
 
+      - name: Smoke test sidecar
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "=== Sidecar exe ==="
+          $sidecar = "src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc.exe"
+          if (Test-Path $sidecar) {
+            Write-Host "Found: $sidecar ($([math]::Round((Get-Item $sidecar).Length / 1MB, 1)) MB)"
+          } else {
+            Write-Host "NOT FOUND: $sidecar"; exit 1
+          }
+
+          Write-Host "`n=== Chromium check ==="
+          $chromePath = "src-tauri/chromium/chrome.exe"
+          if (Test-Path $chromePath) { Write-Host "Found chrome.exe" }
+          else { Write-Host "chrome.exe NOT FOUND" }
+          Get-ChildItem "src-tauri/chromium" -Depth 0 | ForEach-Object { Write-Host "  $_" }
+
+          Write-Host "`n=== Sidecar search paths (relative to exe) ==="
+          $exeDir = Split-Path $sidecar -Parent
+          Write-Host "  1: $exeDir/chromium/chrome.exe  -> $(Test-Path "$exeDir/chromium/chrome.exe")"
+          Write-Host "  2: $exeDir/resources/chromium/chrome.exe  -> $(Test-Path "$exeDir/resources/chromium/chrome.exe")"
+          $parentDir = Split-Path $exeDir -Parent
+          Write-Host "  3: $parentDir/chromium/chrome.exe  -> $(Test-Path "$parentDir/chromium/chrome.exe")"
+
+          Write-Host "`n=== Running: $sidecar crawl https://example.com --max-requests 1 ==="
+          $proc = Start-Process -FilePath $sidecar `
+            -ArgumentList "crawl","https://example.com","--max-requests","1","--concurrency","1" `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput "smoke-stdout.txt" `
+            -RedirectStandardError "smoke-stderr.txt"
+          if (-not $proc.WaitForExit(60000)) {
+            Write-Host "TIMEOUT after 60s — killing process"
+            $proc.Kill()
+          }
+          Write-Host "`nExit code: $($proc.ExitCode)"
+          Write-Host "`n=== STDOUT ==="
+          if (Test-Path smoke-stdout.txt) { Get-Content smoke-stdout.txt }
+          Write-Host "`n=== STDERR ==="
+          if (Test-Path smoke-stderr.txt) { Get-Content smoke-stderr.txt }
+
       - name: Build Tauri app
         run: npx tauri build
         env:
