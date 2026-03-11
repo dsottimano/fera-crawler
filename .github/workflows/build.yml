@@ -31,7 +31,7 @@ jobs:
         run: npx playwright install chromium
 
       - name: Build sidecar binary
-        run: bun build --compile --external chromium-bidi sidecar/src/index.ts --outfile src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc
+        run: bun build --compile --external chromium-bidi --external electron sidecar/src/index.ts --outfile src-tauri/binaries/fera-crawler-x86_64-pc-windows-msvc
 
       - name: Copy Chromium and patch tauri.conf.json
         shell: pwsh
