@@ -64,8 +64,8 @@ jobs:
         timeout-minutes: 3
         run: |
           Write-Host "=== Testing crawler with plain Node.js (npx tsx) ==="
-          $proc = Start-Process -FilePath "npx" `
-            -ArgumentList "tsx","sidecar/src/index.ts","crawl","https://example.com","--max-requests","1","--concurrency","1" `
+          $proc = Start-Process -FilePath "cmd.exe" `
+            -ArgumentList "/c","npx tsx sidecar/src/index.ts crawl https://example.com --max-requests 1 --concurrency 1" `
             -NoNewWindow -PassThru `
             -RedirectStandardOutput "node-stdout.txt" `
             -RedirectStandardError "node-stderr.txt"
