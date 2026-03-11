@@ -7,7 +7,7 @@ await build({
   target: "node22",
   format: "cjs",
   outfile: "dist/index.cjs",
-  external: ["playwright", "playwright-core"],
+  external: [],
   sourcemap: false,
   minify: true,
 });
