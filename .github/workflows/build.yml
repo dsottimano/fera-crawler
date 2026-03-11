@@ -58,7 +58,28 @@ jobs:
           $conf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json" -Encoding UTF8
           Write-Host "Patched tauri.conf.json with $($files.Count) resource files"
 
-      - name: Smoke test sidecar
+      - name: Smoke test with Node.js (baseline)
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          Write-Host "=== Testing crawler with plain Node.js (npx tsx) ==="
+          $proc = Start-Process -FilePath "npx" `
+            -ArgumentList "tsx","sidecar/src/index.ts","crawl","https://example.com","--max-requests","1","--concurrency","1" `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput "node-stdout.txt" `
+            -RedirectStandardError "node-stderr.txt"
+          if (-not $proc.WaitForExit(60000)) {
+            Write-Host "TIMEOUT after 60s"
+            $proc.Kill()
+          }
+          Write-Host "Exit code: $($proc.ExitCode)"
+          Write-Host "`n=== STDOUT ==="
+          if (Test-Path node-stdout.txt) { Get-Content node-stdout.txt }
+          Write-Host "`n=== STDERR ==="
+          if (Test-Path node-stderr.txt) { Get-Content node-stderr.txt }
+
+      - name: Smoke test sidecar (Bun compiled)
         shell: pwsh
         continue-on-error: true
         run: |
