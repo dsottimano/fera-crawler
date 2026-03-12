@@ -10,6 +10,9 @@ target/
 # Sidecar placeholder (built per-platform)
 src-tauri/binaries/fera-crawler-*
 
+# Bundled Chromium (downloaded at build time via scripts/download-chromium.mjs)
+src-tauri/chromium/
+
 # IDE
 .vscode/
 .idea/

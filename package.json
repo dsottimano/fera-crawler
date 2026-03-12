@@ -10,11 +10,15 @@
     "tauri": "tauri",
     "dev": "npx tauri dev",
     "build": "npx tauri build",
+    "download:chromium": "node scripts/download-chromium.mjs",
     "dev:frontend": "npm run dev --workspace=frontend",
     "dev:sidecar": "npm run dev --workspace=sidecar",
-    "build:sidecar": "npm run build --workspace=sidecar"
+    "build:sidecar": "npm run build --workspace=sidecar",
+    "test": "npm run test --workspace=sidecar",
+    "test:server": "npm run test:server --workspace=sidecar"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.10.1"
+    "@tauri-apps/cli": "^2.10.1",
+    "playwright": "^1.50.0"
   }
 }

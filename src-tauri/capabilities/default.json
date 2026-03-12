@@ -9,6 +9,8 @@
     "shell:allow-stdin-write",
     "shell:allow-kill",
     "sql:default",
+    "sql:allow-execute",
+    "sql:allow-select",
     "dialog:default",
     "fs:default",
     {

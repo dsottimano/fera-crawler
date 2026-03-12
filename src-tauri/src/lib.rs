@@ -32,6 +32,13 @@ pub fn run() {
             );",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 2,
+            description: "add resource_type and size columns",
+            sql: "ALTER TABLE crawl_results ADD COLUMN resource_type TEXT DEFAULT 'Other';
+                  ALTER TABLE crawl_results ADD COLUMN size INTEGER DEFAULT 0;",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -47,6 +54,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::start_crawl,
             commands::stop_crawl,
+            commands::open_browser,
+            commands::close_browser,
+            commands::dump_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

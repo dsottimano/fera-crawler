@@ -14,6 +14,9 @@ export interface CrawlResult {
   resourceType: ResourceType;
   size: number;
   error?: string;
+  responseHeaders?: Record<string, string>;
+  redirectUrl?: string;
+  serverHeader?: string;
 }
 
 export interface CrawlConfig {
@@ -25,6 +28,7 @@ export interface CrawlConfig {
   customHeaders: Record<string, string>;
   mode: "spider" | "list";
   urls: string[];
+  headless: boolean;
 }
 
 export const defaultConfig: CrawlConfig = {
@@ -36,4 +40,5 @@ export const defaultConfig: CrawlConfig = {
   customHeaders: {},
   mode: "spider",
   urls: [],
+  headless: true,
 };
