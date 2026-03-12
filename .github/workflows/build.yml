@@ -50,7 +50,7 @@ jobs:
           $dest = "src-tauri/sidecar-bundle"
           New-Item -ItemType Directory -Force -Path $dest
           Copy-Item "sidecar/dist/index.cjs" "$dest/index.js"
-          Write-Host "Sidecar bundle: $([math]::Round((Get-Item '$dest/index.js').Length / 1KB, 1)) KB"
+          Write-Host "Sidecar bundle: $([math]::Round((Get-Item "$dest/index.js").Length / 1KB, 1)) KB"
 
       - name: Copy Chromium and patch tauri.conf.json
         shell: pwsh
