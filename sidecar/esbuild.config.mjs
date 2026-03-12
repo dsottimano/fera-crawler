@@ -1,18 +1,15 @@
 import { build } from "esbuild";
 import { readFile } from "node:fs/promises";
 
-// Patch playwright-core files that use require.resolve() for paths
-// that don't exist inside a pkg'd binary. These are non-essential
-// (stack trace filtering, electron support, app icons).
+// Patch playwright-core require.resolve() calls that reference files
+// not needed at runtime (package.json path, electron support, app icons)
 const patchPlaywrightResolves = {
   name: "patch-playwright-resolves",
   setup(b) {
     b.onLoad({ filter: /playwright-core[/\\]lib[/\\].*\.js$/ }, async (args) => {
       let contents = await readFile(args.path, "utf8");
-      // Replace require.resolve("../../../package.json") → __dirname
-      // Used only for stack trace prefix filtering, not browser launching
       contents = contents.replace(
-        /require\.resolve\(["']\.\.\/\.\.\/\.\.\/package\.json["']\)/g,
+        /require\.resolve\([\"']\.\.\/(\.\.\/)*package\.json[\"']\)/g,
         "__dirname",
       );
       return { contents, loader: "js" };
@@ -27,7 +24,7 @@ await build({
   target: "node22",
   format: "cjs",
   outfile: "dist/index.cjs",
-  external: ["chromium-bidi", "@crawlee/memory-storage"],
+  external: ["chromium-bidi"],
   sourcemap: false,
   minify: true,
   plugins: [patchPlaywrightResolves],

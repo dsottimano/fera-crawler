@@ -28,7 +28,7 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
-      - name: Build sidecar (tsc)
+      - name: Build sidecar (esbuild)
         run: npm run build --workspace=sidecar
 
       - name: Build sidecar launcher
@@ -44,44 +44,26 @@ jobs:
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.14.0/win-x64/node.exe" -OutFile "src-tauri/node/node.exe"
           Write-Host "Downloaded node.exe ($([math]::Round((Get-Item 'src-tauri/node/node.exe').Length / 1MB, 1)) MB)"
 
-      - name: Stage sidecar runtime
+      - name: Stage sidecar bundle
         shell: pwsh
         run: |
           $dest = "src-tauri/sidecar-bundle"
           New-Item -ItemType Directory -Force -Path $dest
-
-          # Copy compiled JS files
-          Copy-Item "sidecar/dist/*.js" "$dest/"
-
-          # Install production dependencies for the sidecar
-          $pkg = @{
-            name = "fera-sidecar-runtime"
-            version = "0.1.0"
-            private = $true
-            type = "module"
-            dependencies = @{
-              crawlee = "^3.12.3"
-              "@crawlee/playwright" = "^3.12.3"
-              playwright = "^1.50.0"
-            }
-          }
-          $pkg | ConvertTo-Json -Depth 5 | Set-Content "$dest/package.json"
-          npm install --prefix $dest --omit=dev
-          Write-Host "Sidecar runtime: $((Get-ChildItem $dest -Recurse -File).Count) files"
+          Copy-Item "sidecar/dist/index.cjs" "$dest/index.js"
+          Write-Host "Sidecar bundle: $([math]::Round((Get-Item '$dest/index.js').Length / 1KB, 1)) KB"
 
       - name: Copy Chromium and patch tauri.conf.json
         shell: pwsh
         run: |
-          $exePath = node -e "console.log(require('playwright').chromium.executablePath())"
+          $exePath = node -e "console.log(require('playwright-core').chromium.executablePath())"
           $chromiumDir = Split-Path $exePath -Parent
 
-          # Copy Chromium into src-tauri
           $dest = "src-tauri/chromium"
           New-Item -ItemType Directory -Force -Path $dest
           Copy-Item -Recurse -Force "$chromiumDir\*" "$dest\"
           Write-Host "Copied $((Get-ChildItem $dest -Recurse -File).Count) Chromium files"
 
-          # Collect ALL resource files: chromium + node + sidecar-bundle
+          # Collect ALL resource files
           $files = @()
           foreach ($dir in @("src-tauri/chromium", "src-tauri/node", "src-tauri/sidecar-bundle")) {
             if (Test-Path $dir) {
@@ -93,7 +75,6 @@ jobs:
           }
           Write-Host "Total resource entries: $($files.Count)"
 
-          # Patch tauri.conf.json
           $conf = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
           $conf.bundle | Add-Member -NotePropertyName "resources" -NotePropertyValue @($files) -Force
           $conf | ConvertTo-Json -Depth 10 | Set-Content "src-tauri/tauri.conf.json" -Encoding UTF8
