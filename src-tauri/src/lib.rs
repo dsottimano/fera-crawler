@@ -42,6 +42,8 @@ pub fn run() {
     ];
 
     tauri::Builder::default()
+        .manage(commands::CrawlChild::default())
+        .manage(commands::BrowserChild::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

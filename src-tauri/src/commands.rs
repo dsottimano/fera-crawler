@@ -1,21 +1,34 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
 
-pub struct CrawlChild(pub Mutex<Option<CommandChild>>);
+pub struct CrawlChild {
+    pub child: Mutex<Option<CommandChild>>,
+    pub generation: AtomicU64,
+}
 
 impl Default for CrawlChild {
     fn default() -> Self {
-        Self(Mutex::new(None))
+        Self {
+            child: Mutex::new(None),
+            generation: AtomicU64::new(0),
+        }
     }
 }
 
-pub struct BrowserChild(pub Mutex<Option<CommandChild>>);
+pub struct BrowserChild {
+    pub child: Mutex<Option<CommandChild>>,
+    pub generation: AtomicU64,
+}
 
 impl Default for BrowserChild {
     fn default() -> Self {
-        Self(Mutex::new(None))
+        Self {
+            child: Mutex::new(None),
+            generation: AtomicU64::new(0),
+        }
     }
 }
 
@@ -35,24 +48,39 @@ fn browser_profile_dir(app: &AppHandle) -> String {
 fn kill_chrome_for_profile(profile_dir: &str) {
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("sh")
-            .args([
-                "-c",
-                &format!(
-                    "ps ax -o pid,args | grep -- '--user-data-dir={}' | grep -v grep | awk '{{print $1}}' | xargs -r kill -9 2>/dev/null",
-                    profile_dir
-                ),
-            ])
+        // Use Command with args to avoid shell injection
+        let output = std::process::Command::new("ps")
+            .args(["ax", "-o", "pid,args"])
             .output();
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let needle = format!("--user-data-dir={}", profile_dir);
+            for line in stdout.lines() {
+                if !line.contains(&needle) {
+                    continue;
+                }
+                if let Some(pid_str) = line.trim().split_whitespace().next() {
+                    if let Ok(pid) = pid_str.parse::<i32>() {
+                        if pid > 0 && pid != std::process::id() as i32 {
+                            let _ = std::process::Command::new("kill")
+                                .args(["-9", &pid.to_string()])
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
     }
     #[cfg(windows)]
     {
-        let escaped = profile_dir.replace('\\', "\\\\");
-        let _ = std::process::Command::new("cmd")
+        // Use PowerShell (wmic is removed in Windows 11 24H2+)
+        let escaped = profile_dir.replace('\'', "''");
+        let _ = std::process::Command::new("powershell")
             .args([
-                "/C",
+                "-NoProfile",
+                "-Command",
                 &format!(
-                    "wmic process where \"CommandLine like '%--user-data-dir={}%'\" call terminate >nul 2>&1",
+                    "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*--user-data-dir={}*' }} | ForEach-Object {{ $_.Terminate() }}",
                     escaped
                 ),
             ])
@@ -65,6 +93,11 @@ fn resource_dir(app: &AppHandle) -> Option<String> {
         .resource_dir()
         .ok()
         .map(|p| p.to_string_lossy().to_string())
+}
+
+/// Helper to lock a mutex, recovering from poison.
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[tauri::command]
@@ -81,9 +114,16 @@ pub async fn start_crawl(
     urls: Option<Vec<String>>,
     headless: Option<bool>,
 ) -> Result<(), String> {
-    if app.try_state::<CrawlChild>().is_none() {
-        app.manage(CrawlChild::default());
+    let state: State<CrawlChild> = app.state();
+
+    // Kill any existing crawl and bump generation so the old task won't emit crawl-complete
+    {
+        let mut guard = lock_or_recover(&state.child);
+        if let Some(old_child) = guard.take() {
+            let _ = old_child.kill();
+        }
     }
+    let gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
     let shell = app.shell();
     let profile = browser_profile_dir(&app);
@@ -154,8 +194,7 @@ pub async fn start_crawl(
         .spawn()
         .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
 
-    let state: State<CrawlChild> = app.state();
-    *state.0.lock().unwrap() = Some(child);
+    *lock_or_recover(&state.child) = Some(child);
 
     let app_handle = app.clone();
 
@@ -175,15 +214,18 @@ pub async fn start_crawl(
                     eprintln!("[sidecar stderr] {}", line_str);
                 }
                 CommandEvent::Terminated(_) => {
-                    let _ = app_handle.emit("crawl-complete", ());
                     break;
                 }
                 _ => {}
             }
         }
 
+        // Only emit crawl-complete if this crawl wasn't replaced by a newer one
         if let Some(state) = app_handle.try_state::<CrawlChild>() {
-            *state.0.lock().unwrap() = None;
+            if state.generation.load(Ordering::SeqCst) == gen {
+                let _ = app_handle.emit("crawl-complete", ());
+                *lock_or_recover(&state.child) = None;
+            }
         }
     });
 
@@ -192,10 +234,9 @@ pub async fn start_crawl(
 
 #[tauri::command]
 pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
-    if let Some(state) = app.try_state::<CrawlChild>() {
-        if let Some(child) = state.0.lock().unwrap().take() {
-            child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
-        }
+    let state: State<CrawlChild> = app.state();
+    if let Some(child) = lock_or_recover(&state.child).take() {
+        child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
     }
     // Also kill any Chrome processes using our profile dir
     let profile = browser_profile_dir(&app);
@@ -205,9 +246,16 @@ pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
-    if app.try_state::<BrowserChild>().is_none() {
-        app.manage(BrowserChild::default());
+    let state: State<BrowserChild> = app.state();
+
+    // Kill any existing browser and bump generation
+    {
+        let mut guard = lock_or_recover(&state.child);
+        if let Some(old_child) = guard.take() {
+            let _ = old_child.kill();
+        }
     }
+    let gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
     let shell = app.shell();
     let profile = browser_profile_dir(&app);
@@ -232,8 +280,7 @@ pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("Failed to spawn browser: {e}"))?;
 
-    let state: State<BrowserChild> = app.state();
-    *state.0.lock().unwrap() = Some(child);
+    *lock_or_recover(&state.child) = Some(child);
 
     let app_handle = app.clone();
 
@@ -245,8 +292,6 @@ pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
                 CommandEvent::Stdout(line) => {
                     let line_str = String::from_utf8_lossy(&line);
                     if let Ok(result) = serde_json::from_str::<serde_json::Value>(&line_str) {
-                        // Route profile-data events to their own Tauri event
-                        // so the frontend listener picks them up
                         if result.get("event").and_then(|v| v.as_str()) == Some("profile-data") {
                             let _ = app_handle.emit("profile-data", &result);
                         } else {
@@ -259,15 +304,18 @@ pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
                     eprintln!("[browser stderr] {}", line_str);
                 }
                 CommandEvent::Terminated(_) => {
-                    let _ = app_handle.emit("browser-closed", ());
                     break;
                 }
                 _ => {}
             }
         }
 
+        // Only emit browser-closed if this browser wasn't replaced by a newer one
         if let Some(state) = app_handle.try_state::<BrowserChild>() {
-            *state.0.lock().unwrap() = None;
+            if state.generation.load(Ordering::SeqCst) == gen {
+                let _ = app_handle.emit("browser-closed", ());
+                *lock_or_recover(&state.child) = None;
+            }
         }
     });
 
@@ -276,10 +324,9 @@ pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn close_browser(app: AppHandle) -> Result<(), String> {
-    if let Some(state) = app.try_state::<BrowserChild>() {
-        if let Some(child) = state.0.lock().unwrap().take() {
-            child.kill().map_err(|e| format!("Failed to close browser: {e}"))?;
-        }
+    let state: State<BrowserChild> = app.state();
+    if let Some(child) = lock_or_recover(&state.child).take() {
+        child.kill().map_err(|e| format!("Failed to close browser: {e}"))?;
     }
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
@@ -307,14 +354,17 @@ pub async fn dump_profile(app: AppHandle, url: String) -> Result<(), String> {
         cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
     }
 
-    let (mut rx, _child) = cmd
+    let (mut rx, child) = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn profile dump: {e}"))?;
 
     let app_handle = app.clone();
 
+    // Move `child` into the async task so it lives until output is fully read
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;
+
+        let _child = child; // prevent drop until task completes
 
         while let Some(event) = rx.recv().await {
             match event {

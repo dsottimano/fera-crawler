@@ -56,6 +56,8 @@ const activeReport = ref<string | null>(null);
 const showAbout = ref(false);
 const activeCategory = ref("Internal");
 const selectedResult = ref<CrawlResult | null>(null);
+const searchQuery = ref("");
+const filterType = ref("All");
 
 const modeLabel = computed(() => {
   return activeMode.value === "crawler" ? "Crawler Mode" : "Settings Finder";
@@ -211,7 +213,7 @@ async function handleMenuAction(menu: string, item: string) {
           <button class="btn-pill btn-reset" @click="handleClear">CLEAR</button>
           <button
             class="btn-pill btn-signin"
-            :disabled="crawling || !url.trim()"
+            :disabled="crawling || (!browserOpen && !url.trim())"
             @click="browserOpen ? closeBrowser() : openBrowser(normalizeUrl(url))"
           >
             {{ browserOpen ? '&#x2715; CLOSE' : '&#x1F511; SIGN IN' }}
@@ -238,7 +240,13 @@ async function handleMenuAction(menu: string, item: string) {
     <!-- ── Crawler Mode ── -->
     <template v-if="activeMode === 'crawler'">
       <CategoryTabs :active="activeCategory" @select="activeCategory = $event" />
-      <FilterBar :total-results="results.length" :filtered-count="results.length" />
+      <FilterBar
+        :total-results="results.length"
+        :filtered-count="results.length"
+        @search="searchQuery = $event"
+        @filter-type="filterType = $event"
+        @export="exportCsv(results)"
+      />
 
       <div class="main-content">
         <div class="left-panels">

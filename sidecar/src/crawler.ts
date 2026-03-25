@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { chromium, type BrowserContext, type Page } from "playwright-core";
 import { writeLine } from "./pipeline.js";
 import { classifyResource } from "./utils.js";
@@ -17,21 +17,26 @@ function ensureProtocol(url: string): string {
   return url;
 }
 
-function killChromeForProfile(profileDir: string): void {
+async function killChromeForProfile(profileDir: string): Promise<void> {
   try {
     if (process.platform === "win32") {
-      // Windows: use wmic to find and kill
-      execSync(
-        `wmic process where "CommandLine like '%--user-data-dir=${profileDir.replace(/\\/g, "\\\\")}%'" call terminate`,
-        { stdio: "ignore", timeout: 5000 },
-      );
+      // Windows: use PowerShell (wmic is removed in Win 11 24H2+)
+      execFileSync("powershell", [
+        "-NoProfile", "-Command",
+        `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*--user-data-dir=${profileDir.replace(/'/g, "''")}*' } | ForEach-Object { $_.Terminate() }`,
+      ], { stdio: "ignore", timeout: 5000 });
     } else {
       // Linux/macOS: find PIDs matching our profile dir, kill them
-      const result = execSync(
-        `ps ax -o pid,args | grep -- "--user-data-dir=${profileDir}" | grep -v grep`,
-        { encoding: "utf8", timeout: 5000 },
-      );
+      // Use execFileSync to avoid shell injection
+      let result: string;
+      try {
+        result = execFileSync("ps", ["ax", "-o", "pid,args"], { encoding: "utf8", timeout: 5000 });
+      } catch {
+        return;
+      }
+      const needle = `--user-data-dir=${profileDir}`;
       for (const line of result.trim().split("\n")) {
+        if (!line.includes(needle)) continue;
         const pid = parseInt(line.trim(), 10);
         if (pid && pid !== process.pid) {
           try { process.kill(pid, "SIGKILL"); } catch {}
@@ -49,8 +54,7 @@ function killChromeForProfile(profileDir: string): void {
   }
 
   // Brief pause to let the OS release file handles
-  const start = Date.now();
-  while (Date.now() - start < 500) { /* spin */ }
+  await new Promise((r) => setTimeout(r, 500));
 }
 
 /**
@@ -108,9 +112,16 @@ export function findChromium(): string | undefined {
       .sort();
     if (entries.length > 0) {
       const latest = entries[entries.length - 1];
-      const subdir = isWindows ? "chrome-win" : isMac ? "chrome-mac" : "chrome-linux";
-      const cacheBinary = path.join(cacheDir, latest, subdir, binaryName);
-      if (fs.existsSync(cacheBinary)) return cacheBinary;
+      // Playwright changed directory names across versions — check both
+      const subdirs = isWindows
+        ? ["chrome-win64", "chrome-win"]
+        : isMac
+          ? ["chrome-mac", "chrome-mac-arm64", "chrome-mac-x64"]
+          : ["chrome-linux64", "chrome-linux"];
+      for (const subdir of subdirs) {
+        const cacheBinary = path.join(cacheDir, latest, subdir, binaryName);
+        if (fs.existsSync(cacheBinary)) return cacheBinary;
+      }
     }
   }
 
@@ -176,8 +187,8 @@ async function crawlPage(page: Page, url: string): Promise<{ result: CrawlResult
       contentType = responseHeaders["content-type"] ?? "";
       serverHeader = responseHeaders["server"] ?? undefined;
 
-      // Detect redirects: if final URL differs from requested URL
-      const finalUrl = response.url();
+      // Detect redirects: use page.url() for the final landed URL after redirects
+      const finalUrl = page.url();
       if (finalUrl !== url) {
         redirectUrl = finalUrl;
       }
@@ -268,7 +279,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   const headless = config.headless !== false;  // default true
 
   // Kill any Chrome processes still holding onto this profile directory
-  killChromeForProfile(userDataDir);
+  await killChromeForProfile(userDataDir);
 
   const launchOpts = {
     headless,
@@ -287,7 +298,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   } catch (err: any) {
     if (err.message?.includes("existing browser session") || err.message?.includes("Target page, context or browser has been closed")) {
       await new Promise((r) => setTimeout(r, 2000));
-      killChromeForProfile(userDataDir);
+      await killChromeForProfile(userDataDir);
       context = await chromium.launchPersistentContext(userDataDir, launchOpts);
     } else {
       throw err;
@@ -399,7 +410,7 @@ export async function openBrowser(rawUrl: string, profileDir?: string): Promise<
   const userDataDir = getBrowserProfileDir(profileDir);
 
   fs.mkdirSync(userDataDir, { recursive: true });
-  killChromeForProfile(userDataDir);
+  await killChromeForProfile(userDataDir);
 
   writeLine({ event: "browser-opened", url } as any);
 
@@ -439,7 +450,7 @@ export async function openBrowser(rawUrl: string, profileDir?: string): Promise<
   context.on("page", (p) => {
     p.on("close", async () => {
       const remaining = context.pages();
-      if (remaining.length <= 1) {
+      if (remaining.length === 0) {
         await dumpCookiesBeforeClose();
       }
     });
@@ -448,7 +459,7 @@ export async function openBrowser(rawUrl: string, profileDir?: string): Promise<
   // Also handle the initial page
   page.on("close", async () => {
     const remaining = context.pages();
-    if (remaining.length <= 1) {
+    if (remaining.length === 0) {
       await dumpCookiesBeforeClose();
     }
   });
@@ -475,7 +486,7 @@ export async function dumpProfile(rawUrl: string, profileDir?: string): Promise<
     return;
   }
 
-  killChromeForProfile(userDataDir);
+  await killChromeForProfile(userDataDir);
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: true,

@@ -21,9 +21,14 @@ export function useFileOps() {
       directory: false,
     });
     if (!path) return null;
-    const text = await readTextFile(path as string);
-    const data = JSON.parse(text);
-    return data.results ?? [];
+    try {
+      const text = await readTextFile(path as string);
+      const data = JSON.parse(text);
+      return data.results ?? [];
+    } catch (e) {
+      console.error("Failed to open crawl file:", e);
+      return null;
+    }
   }
 
   async function exportCsv(results: CrawlResult[]): Promise<void> {

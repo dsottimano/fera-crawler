@@ -1,13 +1,13 @@
 import Database from "@tauri-apps/plugin-sql";
 import type { CrawlResult } from "../types/crawl";
 
-let db: Database | null = null;
+let dbPromise: Promise<Database> | null = null;
 
-async function getDb(): Promise<Database> {
-  if (!db) {
-    db = await Database.load("sqlite:fera.db");
+function getDb(): Promise<Database> {
+  if (!dbPromise) {
+    dbPromise = Database.load("sqlite:fera.db");
   }
-  return db;
+  return dbPromise;
 }
 
 export interface CrawlSession {

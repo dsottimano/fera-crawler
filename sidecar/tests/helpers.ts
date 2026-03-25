@@ -58,7 +58,7 @@ export async function runCrawlerProcess(args: string[]): Promise<CrawlResult[]> 
     });
 
     proc.on("close", (code) => {
-      if (code !== 0 && stdout.trim() === "") {
+      if (code !== 0) {
         reject(new Error(`Crawler exited with code ${code}: ${stderr}`));
         return;
       }

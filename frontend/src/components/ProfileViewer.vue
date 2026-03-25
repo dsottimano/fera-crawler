@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { ProfileData } from "../composables/useBrowser";
 
 const props = defineProps<{ data: ProfileData }>();
@@ -20,12 +20,13 @@ const domains = computed(() => {
   return Array.from(map.entries()).sort((a, b) => b[1].length - a[1].length);
 });
 
-// Auto-expand the first 3 domains
-if (domains.value.length > 0) {
-  for (let i = 0; i < Math.min(3, domains.value.length); i++) {
-    expandedDomains.value.add(domains.value[i][0]);
+// Auto-expand the first 3 domains reactively
+watch(domains, (newDomains) => {
+  expandedDomains.value = new Set();
+  for (let i = 0; i < Math.min(3, newDomains.length); i++) {
+    expandedDomains.value.add(newDomains[i][0]);
   }
-}
+}, { immediate: true });
 
 function toggleDomain(domain: string) {
   if (expandedDomains.value.has(domain)) {
@@ -142,9 +143,9 @@ function truncate(val: string, max: number): string {
 }
 .pv-header h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: 1px;
 }
 .pv-stats { display: flex; gap: 8px; flex: 1; }
 .pv-badge {
@@ -152,7 +153,7 @@ function truncate(val: string, max: number): string {
   background: rgba(86,156,214,0.15);
   border: 1px solid rgba(86,156,214,0.3);
   border-radius: 14px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: #7ab8e8;
 }
@@ -196,7 +197,7 @@ function truncate(val: string, max: number): string {
   cursor: pointer;
   text-align: left;
   font-family: inherit;
-  font-size: 14px;
+  font-size: 12px;
   transition: background 0.15s;
 }
 .pv-domain-header:hover {
@@ -224,7 +225,7 @@ function truncate(val: string, max: number): string {
 }
 
 .pv-domain-count {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   color: rgba(255,255,255,0.35);
 }
@@ -249,7 +250,7 @@ function truncate(val: string, max: number): string {
 }
 
 .pv-cookie-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   color: #fff;
   flex-shrink: 0;
@@ -287,7 +288,7 @@ function truncate(val: string, max: number): string {
 }
 
 .pv-cookie-val {
-  font-size: 12px;
+  font-size: 11px;
   font-family: 'Ubuntu Mono', monospace;
   color: rgba(255,255,255,0.5);
   word-break: break-all;
@@ -299,6 +300,6 @@ function truncate(val: string, max: number): string {
   text-align: center;
   padding: 48px;
   color: rgba(255,255,255,0.3);
-  font-size: 14px;
+  font-size: 11px;
 }
 </style>

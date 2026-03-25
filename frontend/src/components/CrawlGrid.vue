@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { TabulatorFull as Tabulator } from "tabulator-tables";
 import type { CrawlResult } from "../types/crawl";
 import "tabulator-tables/dist/css/tabulator_midnight.min.css";
@@ -172,6 +172,13 @@ onMounted(() => {
 
   table.on("rowSelected", (row: any) => { emit("rowSelect", row.getData() as CrawlResult); });
   table.on("rowDeselected", () => { emit("rowSelect", null); });
+});
+
+onUnmounted(() => {
+  if (table) {
+    table.destroy();
+    table = null;
+  }
 });
 
 // When results change, refresh data with current tab filter

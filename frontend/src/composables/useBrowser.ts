@@ -22,7 +22,16 @@ export function useBrowser() {
   const browserOpen = ref(false);
   const profileData = ref<ProfileData | null>(null);
 
+  // Track active listeners so we can clean up on both manual and auto close
+  let cleanupListeners: (() => void) | null = null;
+
   async function openBrowser(url: string) {
+    // Clean up any prior listeners first
+    if (cleanupListeners) {
+      cleanupListeners();
+      cleanupListeners = null;
+    }
+
     browserOpen.value = true;
     profileData.value = null;
 
@@ -41,15 +50,24 @@ export function useBrowser() {
       unlistenClose();
       // Keep profile listener a bit longer for late arrivals
       setTimeout(() => unlistenProfile(), 2000);
+      cleanupListeners = null;
     });
+
+    // Store cleanup so closeBrowser() can also release listeners
+    cleanupListeners = () => {
+      unlistenClose();
+      unlistenProfile();
+    };
 
     try {
       await invoke("open_browser", { url });
     } catch (e) {
       console.error("Open browser failed:", e);
       browserOpen.value = false;
-      unlistenClose();
-      unlistenProfile();
+      if (cleanupListeners) {
+        cleanupListeners();
+        cleanupListeners = null;
+      }
     }
   }
 
@@ -60,6 +78,11 @@ export function useBrowser() {
       console.error("Close browser failed:", e);
     }
     browserOpen.value = false;
+    // Clean up listeners that won't fire since we killed the process
+    if (cleanupListeners) {
+      cleanupListeners();
+      cleanupListeners = null;
+    }
   }
 
   async function fetchProfileData(url: string) {

@@ -177,32 +177,37 @@ function backToConfig() {
 }
 
 async function discoverPages(url: string, max: number): Promise<string[]> {
-  return new Promise(async (resolve) => {
-    const results: string[] = [];
-    const unlisten = await listen<CrawlResult>("crawl-result", (event) => {
-      results.push(event.payload.url);
-    });
-    const unlistenDone = await listen<void>("crawl-complete", () => {
-      unlisten();
-      unlistenDone();
-      resolve(results);
-    });
-
-    try {
-      await invoke("start_crawl", {
-        url,
-        maxRequests: max,
-        concurrency: 1,
-        delay: 500,
-        mode: "spider",
-        respectRobots: respectRobots.value,
-      });
-    } catch (e) {
-      unlisten();
-      unlistenDone();
-      resolve(results);
-    }
+  const results: string[] = [];
+  const unlisten = await listen<CrawlResult>("crawl-result", (event) => {
+    results.push(event.payload.url);
   });
+
+  const done = new Promise<void>((resolve) => {
+    listen<void>("crawl-complete", () => {
+      resolve();
+    }).then((unlistenDone) => {
+      // Store so we can clean up after done resolves
+      done.then(() => unlistenDone());
+    });
+  });
+
+  try {
+    await invoke("start_crawl", {
+      url,
+      maxRequests: max,
+      concurrency: 1,
+      delay: 500,
+      mode: "spider",
+      respectRobots: respectRobots.value,
+      headless: true,
+    });
+    await done;
+  } catch (e) {
+    // Crawl failed or was stopped
+  }
+
+  unlisten();
+  return results;
 }
 
 async function runSingleTest(
@@ -213,72 +218,63 @@ async function runSingleTest(
 ): Promise<TestResult> {
   const ua = uaKey === "custom" ? customUa.value : (UA_MAP[uaKey] || "");
 
-  return new Promise(async (resolve) => {
-    const timings: number[] = [];
-    let errors = 0;
-    let blocked = false;
+  const timings: number[] = [];
+  let errors = 0;
+  let blocked = false;
 
-    const unlisten = await listen<CrawlResult>("crawl-result", (event) => {
-      const r = event.payload;
-      if (r.responseTime > 0) timings.push(r.responseTime);
-      if (BLOCKED_STATUSES.has(r.status)) blocked = true;
-      if (r.status >= 400 || r.status === 0 || r.error) errors++;
-    });
-
-    const unlistenDone = await listen<void>("crawl-complete", () => {
-      unlisten();
-      unlistenDone();
-
-      const avg = timings.length ? Math.round(timings.reduce((a, b) => a + b, 0) / timings.length) : 0;
-      const max = timings.length ? Math.max(...timings) : 0;
-      const min = timings.length ? Math.min(...timings) : 0;
-      const total = urls.length;
-      const successRate = total > 0 ? Math.round(((total - errors) / total) * 100) : 0;
-
-      resolve({
-        concurrency,
-        delay,
-        userAgent: uaKey,
-        respectRobots: respectRobots.value,
-        avgResponseTime: avg,
-        maxResponseTime: max,
-        minResponseTime: min,
-        successRate,
-        blocked,
-        totalRequests: total,
-        errors,
-      });
-    });
-
-    try {
-      await invoke("start_crawl", {
-        url: urls[0],
-        maxRequests: urls.length,
-        concurrency,
-        delay: delay > 0 ? delay : null,
-        userAgent: ua || null,
-        respectRobots: respectRobots.value,
-        mode: "list",
-        urls,
-      });
-    } catch (e) {
-      unlisten();
-      unlistenDone();
-      resolve({
-        concurrency,
-        delay,
-        userAgent: uaKey,
-        respectRobots: respectRobots.value,
-        avgResponseTime: 0,
-        maxResponseTime: 0,
-        minResponseTime: 0,
-        successRate: 0,
-        blocked: false,
-        totalRequests: urls.length,
-        errors: urls.length,
-      });
-    }
+  const unlisten = await listen<CrawlResult>("crawl-result", (event) => {
+    const r = event.payload;
+    if (r.responseTime > 0) timings.push(r.responseTime);
+    if (BLOCKED_STATUSES.has(r.status)) blocked = true;
+    if (r.status >= 400 || r.status === 0 || r.error) errors++;
   });
+
+  const done = new Promise<void>((resolve) => {
+    listen<void>("crawl-complete", () => {
+      resolve();
+    }).then((unlistenDone) => {
+      done.then(() => unlistenDone());
+    });
+  });
+
+  try {
+    await invoke("start_crawl", {
+      url: urls[0],
+      maxRequests: urls.length,
+      concurrency,
+      delay: delay > 0 ? delay : null,
+      userAgent: ua || null,
+      respectRobots: respectRobots.value,
+      mode: "list",
+      urls,
+      headless: true,
+    });
+    await done;
+  } catch (e) {
+    // Crawl failed
+  }
+
+  unlisten();
+
+  const avg = timings.length ? Math.round(timings.reduce((a, b) => a + b, 0) / timings.length) : 0;
+  const maxTime = timings.length ? Math.max(...timings) : 0;
+  const minTime = timings.length ? Math.min(...timings) : 0;
+  const total = urls.length;
+  const successRate = total > 0 ? Math.round(((total - errors) / total) * 100) : 0;
+
+  return {
+    concurrency,
+    delay,
+    userAgent: uaKey,
+    respectRobots: respectRobots.value,
+    avgResponseTime: avg,
+    maxResponseTime: maxTime,
+    minResponseTime: minTime,
+    successRate,
+    blocked,
+    totalRequests: total,
+    errors,
+  };
 }
 </script>
 

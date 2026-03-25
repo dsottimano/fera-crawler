@@ -8,7 +8,8 @@ export function useCrawl() {
   const results = ref<CrawlResult[]>([]);
   const crawling = ref(false);
   const currentSessionId = ref<number | null>(null);
-  let unlisten: (() => void) | null = null;
+  let unlistenResult: (() => void) | null = null;
+  let unlistenComplete: (() => void) | null = null;
 
   const {
     createSession,
@@ -25,6 +26,9 @@ export function useCrawl() {
     // Give Chromium a moment to fully release the profile lock
     await new Promise((r) => setTimeout(r, 500));
 
+    // Clean up any prior listeners before registering new ones
+    cleanup();
+
     results.value = [];
     crawling.value = true;
 
@@ -32,7 +36,7 @@ export function useCrawl() {
     const sessionId = await createSession(url);
     currentSessionId.value = sessionId;
 
-    unlisten = await listen<CrawlResult>("crawl-result", async (event) => {
+    unlistenResult = await listen<CrawlResult>("crawl-result", async (event) => {
       results.value.push(event.payload);
       // Persist each result to SQLite as it arrives
       try {
@@ -42,7 +46,7 @@ export function useCrawl() {
       }
     });
 
-    await listen<void>("crawl-complete", async () => {
+    unlistenComplete = await listen<void>("crawl-complete", async () => {
       crawling.value = false;
       try {
         await completeSession(sessionId);
@@ -113,9 +117,13 @@ export function useCrawl() {
   }
 
   function cleanup() {
-    if (unlisten) {
-      unlisten();
-      unlisten = null;
+    if (unlistenResult) {
+      unlistenResult();
+      unlistenResult = null;
+    }
+    if (unlistenComplete) {
+      unlistenComplete();
+      unlistenComplete = null;
     }
   }
 
