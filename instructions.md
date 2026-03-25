@@ -51,8 +51,10 @@ User clicks START
 │    open_browser() ──►  sidecar open-browser mode         │
 │    close_browser()──►  child.kill() + kill Chrome        │
 │    dump_profile() ──►  sidecar dump-profile mode         │
+│    CrawlChild/BrowserChild: generation-counted state     │
 │                                                          │
 │  lib.rs:                                                 │
+│    .manage(CrawlChild) + .manage(BrowserChild) at init   │
 │    SQLite migrations (crawl_sessions, crawl_results)     │
 │    Plugin registration (shell, sql, dialog, fs, opener)  │
 └──────────────────────┬───────────────────────────────────┘
@@ -296,7 +298,7 @@ On startup, the app closes any orphaned sessions (where `completed_at IS NULL`) 
 1. `FERA_CHROMIUM_PATH` env var (explicit override)
 2. Bundled: `FERA_RESOURCES_DIR/chromium/<binary>`
 3. Next to sidecar binary: `../chromium/<binary>`
-4. Playwright cache: `~/.cache/ms-playwright/chromium-*/chrome-linux/chrome`
+4. Playwright cache: `~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome` (checks multiple dir names for cross-version compat: `chrome-linux64`/`chrome-linux`, `chrome-win64`/`chrome-win`, `chrome-mac`/`chrome-mac-arm64`/`chrome-mac-x64`)
 
 ### Browser profile
 
@@ -314,10 +316,10 @@ The same profile is shared between the sign-in browser and the crawler, so sessi
 
 Killing the Node.js sidecar does NOT kill its Chrome child process. Both `stop_crawl` and `close_browser` (Rust) call `kill_chrome_for_profile()` which:
 
-- **Linux/macOS**: `ps ax | grep --user-data-dir=<path> | kill -9`
-- **Windows**: `wmic process where "CommandLine like '%--user-data-dir=<path>%'" call terminate`
+- **Linux/macOS**: `Command::new("ps").args(["ax", "-o", "pid,args"])` then filters by `--user-data-dir=<path>` and kills matching PIDs (no shell — prevents injection)
+- **Windows**: PowerShell `Get-CimInstance Win32_Process` filtered by CommandLine (replaced deprecated `wmic` for Windows 11 24H2+ compatibility)
 
-The sidecar also calls `killChromeForProfile()` (Node.js version) before launching to clean up stale processes.
+The sidecar also calls `killChromeForProfile()` (async Node.js version using `execFileSync` with args array) before launching to clean up stale processes.
 
 ---
 
@@ -502,10 +504,18 @@ The UI follows a SpaceX Dragon-inspired dark theme. See `frontend/designrules.md
 
 6. **Two CrawlConfig types**: Same situation — sidecar has `browserProfile` and `startUrl` fields that the frontend version doesn't (those are added at the invoke boundary in `useCrawl.ts`).
 
-7. **Process orphans**: Killing the Node.js sidecar does NOT kill Chrome. Always use `kill_chrome_for_profile()` / `killChromeForProfile()` when stopping.
+7. **Process orphans**: Killing the Node.js sidecar does NOT kill Chrome. Always use `kill_chrome_for_profile()` / `killChromeForProfile()` when stopping. These use `execFileSync`/`Command::new` with argument arrays — never shell interpolation — to prevent injection.
 
 8. **Persistent context lock**: Only one Chromium instance can use a `--user-data-dir` at a time. The crawler auto-closes the sign-in browser before starting, and removes stale `SingletonLock` files.
 
 9. **Response headers are not persisted**: `responseHeaders` flows through the NDJSON pipeline to the UI but is NOT stored in SQLite (too large/variable). They're available during the crawl session but lost when reloading from DB.
 
 10. **HMR and Tauri**: Vite HMR works for the frontend. Sidecar changes require restarting `npm run dev`. Rust changes trigger a Tauri rebuild automatically.
+
+11. **Generation-counted state**: `CrawlChild` and `BrowserChild` use an `AtomicU64` generation counter. When a new crawl/browser is started, the generation increments. The old async task checks the generation before emitting `crawl-complete` / `browser-closed` — stale events from killed children are suppressed, preventing race conditions where a new crawl's listeners would be cleaned up by a stale event.
+
+12. **Mutex poison recovery**: All mutex locks use `lock_or_recover()` which calls `unwrap_or_else(|e| e.into_inner())`. This prevents cascading panics if a prior lock-holder panicked.
+
+13. **Tauri event listener cleanup**: Frontend composables (`useCrawl`, `useBrowser`) track all registered listeners and clean them up symmetrically. `CrawlGrid` destroys its Tabulator instance in `onUnmounted`. Failing to clean up listeners causes accumulation across crawl restarts and memory leaks on mode switches.
+
+14. **findChromium cross-version compat**: Playwright changed cache directory names across versions (e.g., `chrome-linux` → `chrome-linux64`). `findChromium()` checks multiple directory names per platform to work with any Playwright version.
