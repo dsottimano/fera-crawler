@@ -39,6 +39,36 @@ pub fn run() {
                   ALTER TABLE crawl_results ADD COLUMN size INTEGER DEFAULT 0;",
             kind: MigrationKind::Up,
         },
+        // seo_json stores overflow fields as JSON: metaGooglebot, xRobotsTag,
+        // ogType, ogUrl, datePublishedTime, dateModifiedTime, outlinks[],
+        // metaTags[], responseHeaders{}. Kept in JSON to avoid excessive columns.
+        Migration {
+            version: 3,
+            description: "add SEO columns for full crawl data",
+            sql: "ALTER TABLE crawl_results ADD COLUMN h2 TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN word_count INTEGER DEFAULT 0;
+                  ALTER TABLE crawl_results ADD COLUMN meta_robots TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN is_indexable INTEGER DEFAULT 1;
+                  ALTER TABLE crawl_results ADD COLUMN is_noindex INTEGER DEFAULT 0;
+                  ALTER TABLE crawl_results ADD COLUMN is_nofollow INTEGER DEFAULT 0;
+                  ALTER TABLE crawl_results ADD COLUMN og_title TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN og_description TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN og_image TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN og_image_width INTEGER DEFAULT 0;
+                  ALTER TABLE crawl_results ADD COLUMN og_image_height INTEGER DEFAULT 0;
+                  ALTER TABLE crawl_results ADD COLUMN date_published TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN date_modified TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN redirect_url TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN server_header TEXT DEFAULT '';
+                  ALTER TABLE crawl_results ADD COLUMN seo_json TEXT DEFAULT '{}';",
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 4,
+            description: "add config_json to crawl_sessions",
+            sql: "ALTER TABLE crawl_sessions ADD COLUMN config_json TEXT DEFAULT '{}';",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -59,6 +89,7 @@ pub fn run() {
             commands::open_browser,
             commands::close_browser,
             commands::dump_profile,
+            commands::open_inspector,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,24 +1,35 @@
-import { ref } from "vue";
+import { ref, triggerRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useDatabase } from "./useDatabase";
 import type { CrawlResult, CrawlConfig } from "../types/crawl";
 
-export function useCrawl() {
-  const results = ref<CrawlResult[]>([]);
-  const crawling = ref(false);
-  const currentSessionId = ref<number | null>(null);
-  let unlistenResult: (() => void) | null = null;
-  let unlistenComplete: (() => void) | null = null;
+const results = ref<CrawlResult[]>([]);
+const crawling = ref(false);
+const stopped = ref(false);
+const currentSessionId = ref<number | null>(null);
+let unlistenResult: (() => void) | null = null;
+let unlistenComplete: (() => void) | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
+function scheduleRefresh() {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    triggerRef(results);
+  }, 500);
+}
+
+export function useCrawl() {
   const {
     createSession,
     completeSession,
     insertResult,
     loadSessionResults,
+    loadSessionConfig,
   } = useDatabase();
 
-  async function startCrawl(url: string, config: CrawlConfig) {
+  async function startCrawl(url: string, config: CrawlConfig, resume = false) {
     // Kill any sign-in browser first — can't share the profile directory
     try {
       await invoke("close_browser");
@@ -29,16 +40,35 @@ export function useCrawl() {
     // Clean up any prior listeners before registering new ones
     cleanup();
 
-    results.value = [];
+    // On resume, keep existing results and build a set of already-visited URLs
+    // to deduplicate incoming results (sidecar restarts from scratch).
+    const visitedUrls = new Set<string>();
+    if (resume) {
+      for (const r of results.value) {
+        visitedUrls.add(r.url);
+      }
+    } else {
+      results.value = [];
+    }
     crawling.value = true;
+    stopped.value = false;
 
-    // Create a DB session for this crawl
-    const sessionId = await createSession(url);
-    currentSessionId.value = sessionId;
+    // Create a DB session (or reuse current for resume)
+    let sessionId: number;
+    if (resume && currentSessionId.value) {
+      sessionId = currentSessionId.value;
+    } else {
+      sessionId = await createSession(url, config);
+      currentSessionId.value = sessionId;
+    }
 
     unlistenResult = await listen<CrawlResult>("crawl-result", async (event) => {
+      // Skip URLs already crawled (happens during resume)
+      if (visitedUrls.has(event.payload.url)) return;
+      visitedUrls.add(event.payload.url);
+
       results.value.push(event.payload);
-      // Persist each result to SQLite as it arrives
+      scheduleRefresh();
       try {
         await insertResult(sessionId, event.payload);
       } catch (e) {
@@ -48,6 +78,8 @@ export function useCrawl() {
 
     unlistenComplete = await listen<void>("crawl-complete", async () => {
       crawling.value = false;
+      if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
+      triggerRef(results);
       try {
         await completeSession(sessionId);
       } catch (e) {
@@ -70,6 +102,10 @@ export function useCrawl() {
         mode: config.mode,
         urls: config.urls.length ? config.urls : null,
         headless: config.headless,
+        downloadOgImage: config.downloadOgImage || null,
+        scraperRules: config.scraperRules.length
+          ? JSON.stringify(config.scraperRules)
+          : null,
       });
     } catch (e) {
       console.error("Crawl failed:", e);
@@ -84,14 +120,9 @@ export function useCrawl() {
     } catch (e) {
       console.error("Stop failed:", e);
     }
-    if (currentSessionId.value) {
-      try {
-        await completeSession(currentSessionId.value);
-      } catch (e) {
-        console.error("DB session complete failed:", e);
-      }
-    }
+    // Don't complete session on stop — allow resume
     crawling.value = false;
+    stopped.value = true;
     cleanup();
   }
 
@@ -105,15 +136,19 @@ export function useCrawl() {
     }
     results.value = [];
     currentSessionId.value = null;
+    stopped.value = false;
   }
 
   function setResults(data: CrawlResult[]) {
     results.value = data;
   }
 
-  async function loadSession(sessionId: number) {
-    results.value = await loadSessionResults(sessionId);
+  async function loadSession(sessionId: number): Promise<CrawlConfig | null> {
+    const loaded = await loadSessionResults(sessionId);
+    results.value = loaded;
     currentSessionId.value = sessionId;
+    const savedConfig = await loadSessionConfig(sessionId);
+    return savedConfig;
   }
 
   function cleanup() {
@@ -130,6 +165,7 @@ export function useCrawl() {
   return {
     results,
     crawling,
+    stopped,
     currentSessionId,
     startCrawl,
     stopCrawl,

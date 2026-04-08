@@ -8,8 +8,8 @@ const emit = defineEmits<{
 const openMenu = ref<string | null>(null);
 
 const menus: Record<string, string[]> = {
-  File: ["New Crawl", "Open...", "Save", "-", "Export CSV", "Export Excel", "-", "Exit"],
-  Configuration: ["Spider", "Robots.txt", "Speed", "User-Agent", "Custom Headers"],
+  File: ["New Crawl", "-", "Saved Crawls...", "-", "Open...", "Save As...", "-", "Export CSV", "Export Excel", "-", "Exit"],
+  Configuration: ["Settings", "Scraper"],
   Mode: ["Spider", "List"],
   Export: ["Internal HTML", "All Links", "Response Codes", "Page Titles", "Redirects"],
   Reports: ["Crawl Overview", "Redirect Chains", "Duplicate Content", "Orphan Pages"],
@@ -72,7 +72,15 @@ function handleItem(menu: string, item: string) { close(); emit("action", menu, 
   box-shadow: 0 12px 40px rgba(0,0,0,0.5);
   z-index: 100;
   padding: 4px;
-  margin-top: 2px;
+  margin-top: 0;
+}
+.dropdown::before {
+  content: "";
+  position: absolute;
+  top: -14px;
+  left: -8px;
+  right: -8px;
+  height: 14px;
 }
 .dropdown-item {
   display: block;

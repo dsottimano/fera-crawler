@@ -1,21 +1,26 @@
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
-import type { CrawlResult } from "../types/crawl";
+import { homeDir } from "@tauri-apps/api/path";
+import type { CrawlResult, CrawlConfig } from "../types/crawl";
 
 export function useFileOps() {
-  async function saveCrawl(results: CrawlResult[]): Promise<void> {
+  async function saveCrawl(results: CrawlResult[], config?: CrawlConfig): Promise<boolean> {
+    const home = await homeDir();
     const path = await save({
       title: "Save Crawl",
-      defaultPath: "crawl.fera",
+      defaultPath: home + "/crawl.fera",
       filters: [{ name: "Fera Crawl", extensions: ["fera"] }],
     });
-    if (!path) return;
-    await writeTextFile(path, JSON.stringify({ version: 1, results }, null, 2));
+    if (!path) return false;
+    await writeTextFile(path, JSON.stringify({ version: 2, config: config ?? {}, results }, null, 2));
+    return true;
   }
 
-  async function openCrawl(): Promise<CrawlResult[] | null> {
+  async function openCrawl(): Promise<{ results: CrawlResult[]; config?: CrawlConfig } | null> {
+    const home = await homeDir();
     const path = await open({
       title: "Open Crawl",
+      defaultPath: home,
       filters: [{ name: "Fera Crawl", extensions: ["fera"] }],
       multiple: false,
       directory: false,
@@ -24,7 +29,7 @@ export function useFileOps() {
     try {
       const text = await readTextFile(path as string);
       const data = JSON.parse(text);
-      return data.results ?? [];
+      return { results: data.results ?? [], config: data.config };
     } catch (e) {
       console.error("Failed to open crawl file:", e);
       return null;
@@ -48,9 +53,10 @@ export function useFileOps() {
       ),
     ];
 
+    const home = await homeDir();
     const path = await save({
       title: "Export CSV",
-      defaultPath: "crawl.csv",
+      defaultPath: home + "/crawl.csv",
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;
@@ -79,9 +85,10 @@ export function useFileOps() {
       ),
     ];
 
+    const home = await homeDir();
     const path = await save({
       title: `Export ${defaultName}`,
-      defaultPath: `${defaultName}.csv`,
+      defaultPath: `${home}/${defaultName}.csv`,
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;

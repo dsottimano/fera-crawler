@@ -1,12 +1,41 @@
 import { reactive } from "vue";
 import { type CrawlConfig, defaultConfig } from "../types/crawl";
 
-const config = reactive<CrawlConfig>({ ...defaultConfig });
+const STORAGE_KEY = "fera-config-defaults";
+
+function loadSaved(): Partial<CrawlConfig> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+const config = reactive<CrawlConfig>({ ...defaultConfig, ...loadSaved() });
 
 export function useConfig() {
   function reset() {
     Object.assign(config, defaultConfig);
+    localStorage.removeItem(STORAGE_KEY);
   }
 
-  return { config, reset };
+  function saveDefaults() {
+    const toSave: Partial<CrawlConfig> = {
+      maxRequests: config.maxRequests,
+      concurrency: config.concurrency,
+      userAgent: config.userAgent,
+      respectRobots: config.respectRobots,
+      delay: config.delay,
+      headless: config.headless,
+      downloadOgImage: config.downloadOgImage,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+  }
+
+  function applyConfig(incoming: Partial<CrawlConfig>) {
+    Object.assign(config, { ...defaultConfig, ...incoming });
+  }
+
+  return { config, reset, saveDefaults, applyConfig };
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import MenuBar from "./components/MenuBar.vue";
 import CategoryTabs from "./components/CategoryTabs.vue";
@@ -8,24 +8,26 @@ import CrawlGrid from "./components/CrawlGrid.vue";
 import RightSidebar from "./components/RightSidebar.vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import ConfigModal from "./components/ConfigModal.vue";
+import ScraperModal from "./components/ScraperModal.vue";
 import ReportPanel from "./components/ReportPanel.vue";
 import AboutModal from "./components/AboutModal.vue";
 import ProfileViewer from "./components/ProfileViewer.vue";
+import CrawlManager from "./components/CrawlManager.vue";
 import SettingsFinder from "./components/SettingsFinder.vue";
 import { useCrawl } from "./composables/useCrawl";
 import { useConfig } from "./composables/useConfig";
 import { useFileOps } from "./composables/useFileOps";
 import { useBrowser } from "./composables/useBrowser";
 import { useDatabase } from "./composables/useDatabase";
-import type { CrawlResult } from "./types/crawl";
+import type { CrawlResult, CrawlConfig } from "./types/crawl";
 
 const url = ref("");
 const crawlScope = ref("Subdomain");
-const { config } = useConfig();
-const { results, crawling, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
+const { config, applyConfig } = useConfig();
+const { results, crawling, stopped, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
 const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
 const { browserOpen, profileData, openBrowser, closeBrowser, fetchProfileData } = useBrowser();
-const { closeOrphanedSessions, getLatestSession } = useDatabase();
+const { closeOrphanedSessions } = useDatabase();
 
 // Auto-show profile viewer when cookies arrive after sign-in
 watch(profileData, (data) => {
@@ -34,15 +36,10 @@ watch(profileData, (data) => {
   }
 });
 
-// On startup: close any orphaned sessions, then reload the last crawl
+// On startup: close any orphaned sessions (but don't auto-load — start clean)
 onMounted(async () => {
   try {
     await closeOrphanedSessions();
-    const latest = await getLatestSession();
-    if (latest && latest.result_count && latest.result_count > 0) {
-      await loadSession(latest.id);
-      url.value = latest.start_url;
-    }
   } catch (e) {
     console.error("DB startup error:", e);
   }
@@ -52,12 +49,53 @@ const activeMode = ref<"crawler" | "settings-finder">("crawler");
 const showModeMenu = ref(false);
 const showProfile = ref(false);
 const configSection = ref<string | null>(null);
+const scraperOpen = ref(false);
 const activeReport = ref<string | null>(null);
 const showAbout = ref(false);
+const showCrawlManager = ref(false);
 const activeCategory = ref("Internal");
 const selectedResult = ref<CrawlResult | null>(null);
 const searchQuery = ref("");
 const filterType = ref("All");
+const selectAllTrigger = ref(0);
+const filteredCount = ref(0);
+
+const bottomPanelHeight = ref(parseInt(localStorage.getItem('fera-bottom-height') || '200', 10));
+const sidebarWidth = ref(parseInt(localStorage.getItem('fera-sidebar-width') || '250', 10));
+let resizing: 'bottom' | 'sidebar' | null = null;
+let startPos = 0;
+let startSize = 0;
+
+function startResize(type: 'bottom' | 'sidebar', e: MouseEvent) {
+  resizing = type;
+  startPos = type === 'bottom' ? e.clientY : e.clientX;
+  startSize = type === 'bottom' ? bottomPanelHeight.value : sidebarWidth.value;
+  document.addEventListener('mousemove', onResize);
+  document.addEventListener('mouseup', stopResize);
+  document.body.style.cursor = type === 'bottom' ? 'row-resize' : 'col-resize';
+  document.body.style.userSelect = 'none';
+}
+
+function onResize(e: MouseEvent) {
+  if (!resizing) return;
+  if (resizing === 'bottom') {
+    const delta = startPos - e.clientY;
+    bottomPanelHeight.value = Math.max(80, Math.min(500, startSize + delta));
+  } else {
+    const delta = startPos - e.clientX;
+    sidebarWidth.value = Math.max(150, Math.min(500, startSize + delta));
+  }
+}
+
+function stopResize() {
+  if (resizing === 'bottom') localStorage.setItem('fera-bottom-height', String(bottomPanelHeight.value));
+  else if (resizing === 'sidebar') localStorage.setItem('fera-sidebar-width', String(sidebarWidth.value));
+  resizing = null;
+  document.removeEventListener('mousemove', onResize);
+  document.removeEventListener('mouseup', stopResize);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+}
 
 const modeLabel = computed(() => {
   return activeMode.value === "crawler" ? "Crawler Mode" : "Settings Finder";
@@ -70,6 +108,7 @@ function selectMode(mode: "crawler" | "settings-finder") {
 
 const statusText = computed(() => {
   if (crawling.value) return "CRAWLING";
+  if (stopped.value) return "STOPPED";
   if (results.value.length) return "COMPLETE";
   return "IDLE";
 });
@@ -81,19 +120,51 @@ function normalizeUrl(raw: string): string {
   return s;
 }
 
-function handleStart() {
-  if (!url.value.trim()) return;
-  url.value = normalizeUrl(url.value);
-  if (crawlScope.value === "Exact URL") {
-    config.mode = "list";
-    config.urls = [url.value];
-  } else {
-    config.mode = "spider";
-  }
-  startCrawl(url.value, config);
+function canStart(): boolean {
+  if (crawling.value) return false;
+  if (config.mode === "list") return config.urls.length > 0;
+  return !!url.value.trim();
 }
 
-function handleClear() {
+function handleStart() {
+  const isResume = stopped.value;
+  if (config.mode === "list") {
+    if (!config.urls.length) return;
+    startCrawl(config.urls[0], config, isResume);
+  } else {
+    if (!url.value.trim()) return;
+    url.value = normalizeUrl(url.value);
+    if (crawlScope.value === "Exact URL") {
+      config.mode = "list";
+      config.urls = [url.value];
+    }
+    startCrawl(url.value, config, isResume);
+  }
+}
+
+const showClearConfirm = ref(false);
+
+async function handleClear() {
+  if (results.value.length > 0) {
+    showClearConfirm.value = true;
+    return;
+  }
+  doClear();
+}
+
+async function handleSaveAndClear() {
+  const saved = await saveCrawl(results.value, config);
+  if (!saved) return; // user cancelled the save dialog
+  showClearConfirm.value = false;
+  doClear();
+}
+
+function handleClearWithoutSave() {
+  showClearConfirm.value = false;
+  doClear();
+}
+
+function doClear() {
   clearResults();
   url.value = "";
   selectedResult.value = null;
@@ -103,22 +174,46 @@ function onRowSelect(result: CrawlResult | null) {
   selectedResult.value = result;
 }
 
+async function handleRecrawl(urls: string[]) {
+  if (!urls.length || crawling.value) return;
+  // Remove old results for these URLs so they get replaced
+  const urlSet = new Set(urls);
+  results.value = results.value.filter(r => !urlSet.has(r.url));
+  // Build a strict list-only config for recrawl
+  const recrawlConfig: CrawlConfig = {
+    ...config,
+    mode: "list",
+    urls,
+    maxRequests: urls.length,
+  };
+  await startCrawl(urls[0], recrawlConfig, true);
+}
+
+function handleLoadSession(sessionUrl: string) {
+  url.value = sessionUrl;
+  showCrawlManager.value = false;
+}
+
+onUnmounted(() => {
+  if (resizing) stopResize();
+});
+
 async function handleMenuAction(menu: string, item: string) {
   if (menu === "File") {
     if (item === "New Crawl") { handleClear(); }
-    else if (item === "Open...") { const data = await openCrawl(); if (data) setResults(data); }
-    else if (item === "Save") { await saveCrawl(results.value); }
+    else if (item === "Saved Crawls...") { showCrawlManager.value = true; }
+    else if (item === "Open...") { const data = await openCrawl(); if (data) { setResults(data.results); if (data.config) applyConfig(data.config); } }
+    else if (item === "Save As...") { await saveCrawl(results.value, config); }
     else if (item === "Export CSV") { await exportCsv(results.value); }
     else if (item === "Export Excel") { await exportFilteredCsv(results.value, () => true, "crawl-export"); }
     else if (item === "Exit") { await getCurrentWindow().close(); }
   }
   if (menu === "Configuration") {
-    const m: Record<string, string> = { Spider: "spider", "Robots.txt": "robots", Speed: "speed", "User-Agent": "useragent", "Custom Headers": "headers" };
-    configSection.value = m[item] ?? null;
+    if (item === "Scraper") scraperOpen.value = true;
+    else configSection.value = "settings";
   }
   if (menu === "Mode") {
     config.mode = item === "List" ? "list" : "spider";
-    if (item === "List") configSection.value = "spider";
   }
   if (menu === "Export") {
     const f: Record<string, (r: CrawlResult) => boolean> = {
@@ -147,7 +242,7 @@ async function handleMenuAction(menu: string, item: string) {
     <header class="telemetry-bar">
       <!-- Logo + Mode switcher -->
       <div class="telem-logo" @click.stop="showModeMenu = !showModeMenu">
-        <img src="/logo.png" alt="Fera" class="logo-img" />
+        <img src="/logo.svg" alt="Fera" class="logo-img" />
         <div class="logo-label">
           <span class="logo-name">Fera</span>
           <span class="logo-mode">{{ modeLabel }} <span class="mode-chevron">&#x25BE;</span></span>
@@ -164,7 +259,7 @@ async function handleMenuAction(menu: string, item: string) {
         <!-- Status -->
         <div class="telem-stat">
           <span class="telem-label">STATUS</span>
-          <span class="telem-value" :class="{ 'val-active': crawling, 'val-done': !crawling && results.length }">
+          <span class="telem-value" :class="{ 'val-active': crawling, 'val-stopped': stopped, 'val-done': !crawling && !stopped && results.length }">
             <span class="status-dot"></span>
             {{ statusText }}
           </span>
@@ -173,7 +268,11 @@ async function handleMenuAction(menu: string, item: string) {
         <!-- URL input (compact) -->
         <div class="telem-url-group">
           <div class="telem-url-wrap">
+            <div v-if="config.mode === 'list'" class="telem-list-badge" @click="configSection = 'settings'">
+              LIST MODE — {{ config.urls.length }} URL{{ config.urls.length !== 1 ? 's' : '' }}
+            </div>
             <input
+              v-else
               v-model="url"
               type="url"
               placeholder="https://example.com/"
@@ -204,11 +303,11 @@ async function handleMenuAction(menu: string, item: string) {
 
         <!-- Actions -->
         <div class="telem-actions">
-          <button class="btn-pill btn-go" :disabled="crawling || !url.trim()" @click="handleStart">
-            &#x25B6; START
+          <button class="btn-pill btn-go" :class="{ 'btn-resume': stopped }" :disabled="!canStart()" @click="handleStart">
+            {{ stopped ? '&#x25B6; RESUME' : '&#x25B6; START' }}
           </button>
           <button v-if="crawling" class="btn-pill btn-stop" @click="stopCrawl">
-            &#x25A0; STOP
+            &#x25A0; PAUSE
           </button>
           <button class="btn-pill btn-reset" @click="handleClear">CLEAR</button>
           <button
@@ -227,12 +326,30 @@ async function handleMenuAction(menu: string, item: string) {
             {{ config.headless ? '&#x1F441; HEADLESS' : '&#x1F5A5; HEADED' }}
           </button>
           <button
+            class="btn-pill btn-ogimage"
+            :class="{ 'btn-ogimage--on': config.downloadOgImage }"
+            :disabled="crawling"
+            @click="config.downloadOgImage = !config.downloadOgImage"
+          >
+            {{ config.downloadOgImage ? '&#x2713; OG:IMAGE' : 'OG:IMAGE' }}
+          </button>
+          <button
             v-if="profileData"
             class="btn-pill btn-profile"
             @click="showProfile = true"
           >
             &#x1F36A; COOKIES
           </button>
+        </div>
+
+        <!-- Config indicators -->
+        <div class="telem-divider"></div>
+        <div class="config-badges">
+          <span v-if="config.userAgent" class="config-badge" title="Custom User-Agent set">UA</span>
+          <span v-if="config.delay > 0" class="config-badge" :title="'Delay: ' + config.delay + 'ms'">{{ config.delay }}ms</span>
+          <span v-if="!config.respectRobots" class="config-badge config-badge--warn" title="Ignoring robots.txt">NO ROBOTS</span>
+          <span v-if="config.scraperRules.length > 0" class="config-badge" :title="config.scraperRules.length + ' scraper rule(s)'">SCRAPER</span>
+          <span v-if="Object.keys(config.customHeaders).length > 0" class="config-badge" :title="Object.keys(config.customHeaders).length + ' custom header(s)'">HEADERS</span>
         </div>
       </template>
     </header>
@@ -242,24 +359,33 @@ async function handleMenuAction(menu: string, item: string) {
       <CategoryTabs :active="activeCategory" @select="activeCategory = $event" />
       <FilterBar
         :total-results="results.length"
-        :filtered-count="results.length"
+        :filtered-count="filteredCount"
+        :active-tab="activeCategory"
+        :results="results"
         @search="searchQuery = $event"
         @filter-type="filterType = $event"
         @export="exportCsv(results)"
+        @select-all="selectAllTrigger++"
       />
 
       <div class="main-content">
         <div class="left-panels">
           <div class="grid-area">
-            <CrawlGrid :results="results" :active-tab="activeCategory" @row-select="onRowSelect" />
+            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
           </div>
           <div class="grid-status-bar">
             <span>Selected Cells: 0</span>
-            <span>Filter Total: {{ results.length }}</span>
+            <span>Filter Total: {{ filteredCount }}</span>
           </div>
-          <BottomPanel :selected-result="selectedResult" />
+          <div class="resize-handle resize-handle--h" @mousedown="startResize('bottom', $event)"></div>
+          <div :style="{ height: bottomPanelHeight + 'px', flexShrink: 0, overflow: 'hidden' }">
+            <BottomPanel :selected-result="selectedResult" />
+          </div>
         </div>
-        <RightSidebar :results="results" />
+        <div class="resize-handle resize-handle--v" @mousedown="startResize('sidebar', $event)"></div>
+        <div :style="{ width: sidebarWidth + 'px', flexShrink: 0, overflow: 'hidden' }">
+          <RightSidebar :results="results" />
+        </div>
       </div>
     </template>
 
@@ -268,10 +394,29 @@ async function handleMenuAction(menu: string, item: string) {
       <SettingsFinder />
     </div>
 
-    <ConfigModal v-if="configSection" :section="configSection" @close="configSection = null" />
+    <ConfigModal v-if="configSection" @close="configSection = null" />
+    <ScraperModal v-if="scraperOpen" @close="scraperOpen = false" />
     <ReportPanel v-if="activeReport" :report="activeReport" :results="results" @close="activeReport = null" />
     <AboutModal v-if="showAbout" @close="showAbout = false" />
+    <CrawlManager
+      v-if="showCrawlManager"
+      @close="showCrawlManager = false"
+      @load="handleLoadSession"
+    />
     <ProfileViewer v-if="showProfile && profileData" :data="profileData" @close="showProfile = false" />
+
+    <!-- Clear confirm dialog -->
+    <div v-if="showClearConfirm" class="overlay" @click.self="showClearConfirm = false">
+      <div class="confirm-modal">
+        <div class="confirm-header">Clear Results</div>
+        <div class="confirm-body">Save crawl data before clearing?</div>
+        <div class="confirm-actions">
+          <button class="btn-pill btn-confirm-save" @click="handleSaveAndClear">SAVE &amp; CLEAR</button>
+          <button class="btn-pill btn-confirm-discard" @click="handleClearWithoutSave">DISCARD</button>
+          <button class="btn-pill btn-confirm-cancel" @click="showClearConfirm = false">CANCEL</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -408,6 +553,7 @@ async function handleMenuAction(menu: string, item: string) {
 }
 
 .val-active { color: #4ec9b0; }
+.val-stopped { color: #dcdcaa; }
 .val-done { color: #569cd6; }
 
 .status-dot {
@@ -421,6 +567,11 @@ async function handleMenuAction(menu: string, item: string) {
   background: #4ec9b0;
   box-shadow: 0 0 8px rgba(78, 201, 176, 0.6);
   animation: pulse 1.5s infinite;
+}
+
+.val-stopped .status-dot {
+  background: #dcdcaa;
+  box-shadow: 0 0 8px rgba(220, 220, 170, 0.5);
 }
 
 .val-done .status-dot {
@@ -465,6 +616,20 @@ async function handleMenuAction(menu: string, item: string) {
 
 .telem-url::placeholder {
   color: rgba(255,255,255,0.2);
+}
+
+.telem-list-badge {
+  padding: 6px 16px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #569cd6;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+.telem-list-badge:hover {
+  color: #7cb8e8;
 }
 
 /* Scope select — custom styled, appearance:none */
@@ -585,6 +750,28 @@ async function handleMenuAction(menu: string, item: string) {
   cursor: default;
 }
 
+.btn-ogimage {
+  color: rgba(255,255,255,0.4);
+  border-color: rgba(255,255,255,0.1);
+}
+.btn-ogimage:hover:not(:disabled) {
+  color: rgba(255,255,255,0.7);
+  border-color: rgba(255,255,255,0.25);
+}
+.btn-ogimage--on {
+  color: #c586c0;
+  border-color: rgba(197,134,192,0.3);
+}
+.btn-ogimage--on:hover:not(:disabled) {
+  background: rgba(197,134,192,0.1);
+  border-color: #c586c0;
+  box-shadow: 0 0 16px rgba(197,134,192,0.15);
+}
+.btn-ogimage:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
 .btn-profile {
   color: #c586c0;
   border-color: rgba(197,134,192,0.3);
@@ -625,5 +812,124 @@ async function handleMenuAction(menu: string, item: string) {
   border-bottom: 1px solid rgba(255,255,255,0.06);
   flex-shrink: 0;
   letter-spacing: 0.5px;
+}
+
+/* ── Resize handles ── */
+.resize-handle--h {
+  height: 4px;
+  cursor: row-resize;
+  background: transparent;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.resize-handle--h:hover { background: rgba(86,156,214,0.3); }
+
+.resize-handle--v {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.resize-handle--v:hover { background: rgba(86,156,214,0.3); }
+
+/* Resume button variant */
+.btn-resume {
+  color: #dcdcaa;
+  border-color: rgba(220,220,170,0.3);
+}
+.btn-resume:hover:not(:disabled) {
+  background: rgba(220,220,170,0.1);
+  border-color: #dcdcaa;
+  box-shadow: 0 0 16px rgba(220,220,170,0.15);
+}
+
+/* ── Clear confirm dialog ── */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  backdrop-filter: blur(6px);
+}
+.confirm-modal {
+  background: #141a2e;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 20px;
+  min-width: 340px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  color: #ffffff;
+}
+.confirm-header {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+.confirm-body {
+  font-size: 12px;
+  color: rgba(255,255,255,0.7);
+  margin-bottom: 20px;
+}
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.btn-confirm-save {
+  color: #4ec9b0;
+  border-color: rgba(78,201,176,0.3);
+}
+.btn-confirm-save:hover {
+  background: rgba(78,201,176,0.1);
+  border-color: #4ec9b0;
+}
+.btn-confirm-discard {
+  color: #f44747;
+  border-color: rgba(244,71,71,0.3);
+}
+.btn-confirm-discard:hover {
+  background: rgba(244,71,71,0.1);
+  border-color: #f44747;
+}
+.btn-confirm-cancel {
+  color: rgba(255,255,255,0.4);
+  border-color: rgba(255,255,255,0.1);
+}
+.btn-confirm-cancel:hover {
+  color: #ffffff;
+  border-color: rgba(255,255,255,0.25);
+}
+
+.config-badges {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  max-width: 200px;
+}
+
+.config-badge {
+  padding: 3px 8px;
+  border-radius: 14px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #569cd6;
+  border: 1px solid rgba(86,156,214,0.25);
+  background: rgba(86,156,214,0.06);
+  white-space: nowrap;
+}
+
+.config-badge--warn {
+  color: #dcdcaa;
+  border-color: rgba(220,220,170,0.25);
+  background: rgba(220,220,170,0.06);
 }
 </style>
