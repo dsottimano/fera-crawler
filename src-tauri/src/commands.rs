@@ -86,6 +86,11 @@ fn kill_chrome_for_profile(profile_dir: &str) {
             ])
             .output();
     }
+    // Remove stale singleton locks
+    for name in &["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+        let lock_path = std::path::Path::new(profile_dir).join(name);
+        let _ = std::fs::remove_file(lock_path);
+    }
 }
 
 fn resource_dir(app: &AppHandle) -> Option<String> {
@@ -113,6 +118,8 @@ pub async fn start_crawl(
     mode: Option<String>,
     urls: Option<Vec<String>>,
     headless: Option<bool>,
+    download_og_image: Option<bool>,
+    scraper_rules: Option<String>,
 ) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
 
@@ -168,8 +175,10 @@ pub async fn start_crawl(
 
     if let Some(url_list) = urls {
         if !url_list.is_empty() {
-            args.push("--urls".to_string());
-            args.push(url_list.join(","));
+            let tmp = std::env::temp_dir().join(format!("fera-urls-{}-{}.txt", std::process::id(), gen));
+            std::fs::write(&tmp, url_list.join("\n")).map_err(|e| format!("Failed to write urls file: {e}"))?;
+            args.push("--urls-file".to_string());
+            args.push(tmp.to_string_lossy().to_string());
         }
     }
 
@@ -177,6 +186,20 @@ pub async fn start_crawl(
         args.push("--headless".to_string());
         args.push("false".to_string());
     }
+
+    if let Some(true) = download_og_image {
+        args.push("--download-og-image".to_string());
+    }
+
+    if let Some(rules) = scraper_rules {
+        let tmp = std::env::temp_dir().join(format!("fera-scraper-rules-{}-{}.json", std::process::id(), gen));
+        std::fs::write(&tmp, &rules).map_err(|e| format!("Failed to write scraper rules: {e}"))?;
+        args.push("--scraper-rules-file".to_string());
+        args.push(tmp.to_string_lossy().to_string());
+    }
+
+    let urls_tmp = std::env::temp_dir().join(format!("fera-urls-{}-{}.txt", std::process::id(), gen));
+    let rules_tmp = std::env::temp_dir().join(format!("fera-scraper-rules-{}-{}.json", std::process::id(), gen));
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -227,6 +250,10 @@ pub async fn start_crawl(
                 *lock_or_recover(&state.child) = None;
             }
         }
+
+        // Clean up temp files
+        let _ = std::fs::remove_file(&urls_tmp);
+        let _ = std::fs::remove_file(&rules_tmp);
     });
 
     Ok(())
@@ -311,6 +338,77 @@ pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
         }
 
         // Only emit browser-closed if this browser wasn't replaced by a newer one
+        if let Some(state) = app_handle.try_state::<BrowserChild>() {
+            if state.generation.load(Ordering::SeqCst) == gen {
+                let _ = app_handle.emit("browser-closed", ());
+                *lock_or_recover(&state.child) = None;
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn open_inspector(app: AppHandle, url: String) -> Result<(), String> {
+    let state: State<BrowserChild> = app.state();
+
+    {
+        let mut guard = lock_or_recover(&state.child);
+        if let Some(old_child) = guard.take() {
+            let _ = old_child.kill();
+        }
+    }
+    let gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let shell = app.shell();
+    let profile = browser_profile_dir(&app);
+
+    let args = vec!["inspect", &url, "--browser-profile", &profile];
+
+    let mut cmd = shell
+        .sidecar("fera-crawler")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args(&args);
+
+    if let Some(res_dir) = resource_dir(&app) {
+        cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
+    }
+
+    let (mut rx, child) = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn inspector: {e}"))?;
+
+    *lock_or_recover(&state.child) = Some(child);
+
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_shell::process::CommandEvent;
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) => {
+                    let line_str = String::from_utf8_lossy(&line);
+                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&line_str) {
+                        if result.get("event").and_then(|v| v.as_str()) == Some("profile-data") {
+                            let _ = app_handle.emit("profile-data", &result);
+                        } else {
+                            let _ = app_handle.emit("browser-event", result);
+                        }
+                    }
+                }
+                CommandEvent::Stderr(line) => {
+                    let line_str = String::from_utf8_lossy(&line);
+                    eprintln!("[inspector stderr] {}", line_str);
+                }
+                CommandEvent::Terminated(_) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
         if let Some(state) = app_handle.try_state::<BrowserChild>() {
             if state.generation.load(Ordering::SeqCst) == gen {
                 let _ = app_handle.emit("browser-closed", ());

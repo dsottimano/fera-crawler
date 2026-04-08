@@ -1,5 +1,5 @@
 <script setup lang="ts">
-const props = defineProps<{ active: string }>();
+const props = defineProps<{ active: string; recrawlCount: number }>();
 const emit = defineEmits<{ select: [tab: string] }>();
 
 const tabs = [
@@ -7,6 +7,7 @@ const tabs = [
   "Page Titles", "Meta Description", "H1", "H2", "Content",
   "Images", "Canonicals", "Directives", "JavaScript", "Links",
   "Structured Data", "Overview", "Issues", "Site Structure", "Response Times",
+  "Recrawl Queue",
 ];
 </script>
 
@@ -20,6 +21,7 @@ const tabs = [
       @click="emit('select', tab)"
     >
       {{ tab }}
+      <span v-if="tab === 'Recrawl Queue' && recrawlCount > 0" class="queue-count">{{ recrawlCount }}</span>
     </button>
   </div>
 </template>
@@ -55,5 +57,14 @@ const tabs = [
   color: #569cd6;
   border-bottom-color: #569cd6;
   text-shadow: 0 0 12px rgba(86,156,214,0.3);
+}
+.queue-count {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 14px;
+  font-size: 8px;
+  font-weight: 700;
+  background: rgba(206,145,120,0.15);
+  color: #ce9178;
 }
 </style>

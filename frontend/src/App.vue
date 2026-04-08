@@ -59,6 +59,7 @@ const searchQuery = ref("");
 const filterType = ref("All");
 const selectAllTrigger = ref(0);
 const filteredCount = ref(0);
+const recrawlQueueAll = ref<string[]>([]);
 
 const bottomPanelHeight = ref(parseInt(localStorage.getItem('fera-bottom-height') || '200', 10));
 const sidebarWidth = ref(parseInt(localStorage.getItem('fera-sidebar-width') || '250', 10));
@@ -104,6 +105,13 @@ const modeLabel = computed(() => {
 function selectMode(mode: "crawler" | "settings-finder") {
   activeMode.value = mode;
   showModeMenu.value = false;
+}
+
+const hasRecrawlQueue = computed(() => config.recrawlQueue.length > 0);
+
+function handleResumeRecrawl() {
+  if (!config.recrawlQueue.length || crawling.value) return;
+  handleRecrawl([...config.recrawlQueue]);
 }
 
 const statusText = computed(() => {
@@ -176,21 +184,21 @@ function onRowSelect(result: CrawlResult | null) {
 
 async function handleRecrawl(urls: string[]) {
   if (!urls.length || crawling.value) return;
-  // Remove old results for these URLs so they get replaced
-  const urlSet = new Set(urls);
-  results.value = results.value.filter(r => !urlSet.has(r.url));
-  // Build a strict list-only config for recrawl
+  recrawlQueueAll.value = [...urls];
+  config.recrawlQueue = [...urls];
+  const replaceSet = new Set(urls);
   const recrawlConfig: CrawlConfig = {
     ...config,
     mode: "list",
     urls,
     maxRequests: urls.length,
   };
-  await startCrawl(urls[0], recrawlConfig, true);
+  await startCrawl(urls[0], recrawlConfig, true, replaceSet);
 }
 
 function handleLoadSession(sessionUrl: string) {
   url.value = sessionUrl;
+  if (config.recrawlQueue.length > 0) recrawlQueueAll.value = [...config.recrawlQueue];
   showCrawlManager.value = false;
 }
 
@@ -202,7 +210,16 @@ async function handleMenuAction(menu: string, item: string) {
   if (menu === "File") {
     if (item === "New Crawl") { handleClear(); }
     else if (item === "Saved Crawls...") { showCrawlManager.value = true; }
-    else if (item === "Open...") { const data = await openCrawl(); if (data) { setResults(data.results); if (data.config) applyConfig(data.config); } }
+    else if (item === "Open...") {
+      const data = await openCrawl();
+      if (data) {
+        setResults(data.results);
+        if (data.config) {
+          applyConfig(data.config);
+          if (config.recrawlQueue.length > 0) recrawlQueueAll.value = [...config.recrawlQueue];
+        }
+      }
+    }
     else if (item === "Save As...") { await saveCrawl(results.value, config); }
     else if (item === "Export CSV") { await exportCsv(results.value); }
     else if (item === "Export Excel") { await exportFilteredCsv(results.value, () => true, "crawl-export"); }
@@ -340,6 +357,13 @@ async function handleMenuAction(menu: string, item: string) {
           >
             &#x1F36A; COOKIES
           </button>
+          <button
+            v-if="hasRecrawlQueue && !crawling"
+            class="btn-pill btn-recrawl"
+            @click="handleResumeRecrawl"
+          >
+            &#x21BB; RESUME RECRAWL ({{ config.recrawlQueue.length }})
+          </button>
         </div>
 
         <!-- Config indicators -->
@@ -356,7 +380,7 @@ async function handleMenuAction(menu: string, item: string) {
 
     <!-- ── Crawler Mode ── -->
     <template v-if="activeMode === 'crawler'">
-      <CategoryTabs :active="activeCategory" @select="activeCategory = $event" />
+      <CategoryTabs :active="activeCategory" :recrawl-count="config.recrawlQueue.length" @select="activeCategory = $event" />
       <FilterBar
         :total-results="results.length"
         :filtered-count="filteredCount"
@@ -371,7 +395,7 @@ async function handleMenuAction(menu: string, item: string) {
       <div class="main-content">
         <div class="left-panels">
           <div class="grid-area">
-            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
+            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" :recrawl-queue-all="recrawlQueueAll" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
           </div>
           <div class="grid-status-bar">
             <span>Selected Cells: 0</span>
@@ -780,6 +804,15 @@ async function handleMenuAction(menu: string, item: string) {
   background: rgba(197,134,192,0.1);
   border-color: #c586c0;
   box-shadow: 0 0 16px rgba(197,134,192,0.15);
+}
+.btn-recrawl {
+  color: #ce9178;
+  border-color: rgba(206,145,120,0.3);
+}
+.btn-recrawl:hover {
+  background: rgba(206,145,120,0.1);
+  border-color: #ce9178;
+  box-shadow: 0 0 16px rgba(206,145,120,0.15);
 }
 
 /* ── Main layout ── */

@@ -58,6 +58,12 @@ export function useDatabase() {
       scraper: result.scraper || {},
     });
 
+    // Remove any existing row for this URL in this session (recrawl dedup)
+    await d.execute(
+      "DELETE FROM crawl_results WHERE session_id = $1 AND url = $2",
+      [sessionId, result.url]
+    );
+
     await d.execute(
       `INSERT INTO crawl_results
         (session_id, url, status, title, h1, h2, meta_description, canonical,
@@ -227,6 +233,14 @@ export function useDatabase() {
     }
   }
 
+  async function updateSessionConfig(sessionId: number, config: CrawlConfig): Promise<void> {
+    const d = await getDb();
+    await d.execute(
+      "UPDATE crawl_sessions SET config_json = $1 WHERE id = $2",
+      [JSON.stringify(config), sessionId]
+    );
+  }
+
   return {
     createSession,
     completeSession,
@@ -238,5 +252,6 @@ export function useDatabase() {
     closeOrphanedSessions,
     getLatestSession,
     loadSessionConfig,
+    updateSessionConfig,
   };
 }

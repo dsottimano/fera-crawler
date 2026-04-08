@@ -29,11 +29,14 @@ export function useConfig() {
       delay: config.delay,
       headless: config.headless,
       downloadOgImage: config.downloadOgImage,
+      mode: config.mode,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
   }
 
   function applyConfig(incoming: Partial<CrawlConfig>) {
+    // Skip empty config from old sessions (pre-config-save)
+    if (!incoming || Object.keys(incoming).length === 0) return;
     Object.assign(config, { ...defaultConfig, ...incoming });
   }
 

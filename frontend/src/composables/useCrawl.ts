@@ -2,6 +2,7 @@ import { ref, triggerRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useDatabase } from "./useDatabase";
+import { useConfig } from "./useConfig";
 import type { CrawlResult, CrawlConfig } from "../types/crawl";
 
 const results = ref<CrawlResult[]>([]);
@@ -27,9 +28,12 @@ export function useCrawl() {
     insertResult,
     loadSessionResults,
     loadSessionConfig,
+    updateSessionConfig,
   } = useDatabase();
 
-  async function startCrawl(url: string, config: CrawlConfig, resume = false) {
+  async function startCrawl(url: string, config: CrawlConfig, resume = false, replaceUrls?: Set<string>) {
+    const { config: appConfig } = useConfig();
+
     // Kill any sign-in browser first — can't share the profile directory
     try {
       await invoke("close_browser");
@@ -45,7 +49,10 @@ export function useCrawl() {
     const visitedUrls = new Set<string>();
     if (resume) {
       for (const r of results.value) {
-        visitedUrls.add(r.url);
+        // Don't mark recrawl targets as visited — we want fresh results
+        if (!replaceUrls?.has(r.url)) {
+          visitedUrls.add(r.url);
+        }
       }
     } else {
       results.value = [];
@@ -57,6 +64,7 @@ export function useCrawl() {
     let sessionId: number;
     if (resume && currentSessionId.value) {
       sessionId = currentSessionId.value;
+      await updateSessionConfig(sessionId, config);
     } else {
       sessionId = await createSession(url, config);
       currentSessionId.value = sessionId;
@@ -67,8 +75,23 @@ export function useCrawl() {
       if (visitedUrls.has(event.payload.url)) return;
       visitedUrls.add(event.payload.url);
 
-      results.value.push(event.payload);
+      // Replace in-place for recrawled URLs, otherwise append
+      const existingIdx = replaceUrls?.has(event.payload.url)
+        ? results.value.findIndex(r => r.url === event.payload.url)
+        : -1;
+      if (existingIdx >= 0) {
+        results.value[existingIdx] = event.payload;
+      } else {
+        results.value.push(event.payload);
+      }
       scheduleRefresh();
+
+      // Remove from recrawl queue if present
+      const queueIdx = appConfig.recrawlQueue.indexOf(event.payload.url);
+      if (queueIdx >= 0) {
+        appConfig.recrawlQueue.splice(queueIdx, 1);
+      }
+
       try {
         await insertResult(sessionId, event.payload);
       } catch (e) {
@@ -84,6 +107,10 @@ export function useCrawl() {
         await completeSession(sessionId);
       } catch (e) {
         console.error("DB session complete failed:", e);
+      }
+      // Clear recrawl queue — all done
+      if (appConfig.recrawlQueue.length > 0) {
+        appConfig.recrawlQueue = [];
       }
       cleanup();
     });
@@ -119,6 +146,15 @@ export function useCrawl() {
       await invoke("stop_crawl");
     } catch (e) {
       console.error("Stop failed:", e);
+    }
+    // Save current config (with updated recrawl queue) to DB
+    if (currentSessionId.value) {
+      const { config: appConfig } = useConfig();
+      try {
+        await updateSessionConfig(currentSessionId.value, appConfig);
+      } catch (e) {
+        console.error("Config save on stop failed:", e);
+      }
     }
     // Don't complete session on stop — allow resume
     crawling.value = false;
