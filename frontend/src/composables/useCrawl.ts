@@ -32,8 +32,21 @@ export function useCrawl() {
     updateSessionConfig,
   } = useDatabase();
 
-  async function startCrawl(url: string, config: CrawlConfig, resume = false, replaceUrls?: Set<string>) {
-    const { config: appConfig } = useConfig();
+  async function startCrawl(
+    url: string,
+    opts: {
+      resume?: boolean;
+      replaceUrls?: Set<string>;
+      // Per-call overrides of profile settings — for features like recrawl
+      // (mode=list, maxRequests=urls.length) and Exact-URL scope switching.
+      mode?: "spider" | "list";
+      urls?: string[];
+      maxRequests?: number;
+    } = {},
+  ) {
+    const { config } = useConfig();
+    const resume = opts.resume ?? false;
+    const replaceUrls = opts.replaceUrls;
 
     // Kill any sign-in browser first — can't share the profile directory
     try {
@@ -88,9 +101,9 @@ export function useCrawl() {
       scheduleRefresh();
 
       // Remove from recrawl queue if present
-      const queueIdx = appConfig.recrawlQueue.indexOf(event.payload.url);
+      const queueIdx = config.recrawlQueue.indexOf(event.payload.url);
       if (queueIdx >= 0) {
-        appConfig.recrawlQueue.splice(queueIdx, 1);
+        config.recrawlQueue.splice(queueIdx, 1);
       }
 
       try {
@@ -110,47 +123,46 @@ export function useCrawl() {
         console.error("DB session complete failed:", e);
       }
       // Clear recrawl queue — all done
-      if (appConfig.recrawlQueue.length > 0) {
-        appConfig.recrawlQueue = [];
+      if (config.recrawlQueue.length > 0) {
+        config.recrawlQueue = [];
       }
       cleanup();
     });
 
-    // Active profile settings. settings.value falls back to schema defaults
-    // (stealth on, perHost 500/2, warmup off) when no profile has loaded yet.
+    // Crawl knobs live in the active profile (persistent). Transient per-crawl
+    // state (list URLs, custom auth headers, live scraper rules, recrawl queue)
+    // stays in useConfig. Per-call overrides beat both.
     const { settings } = useSettings();
-    // userAgent is a sibling field, not a patch toggle — strip it out before
-    // serializing stealthConfig (sidecar expects only booleans in the patches blob).
-    const { userAgent: stealthUa, ...stealthPatches } = settings.value.stealth;
+    const s = settings.value;
+    const { userAgent: stealthUa, ...stealthPatches } = s.stealth;
     const stealthConfig = JSON.stringify(stealthPatches);
-    const perf = settings.value.performance;
 
-    // Legacy config.userAgent (from useConfig) takes precedence while P0.5 is
-    // in flight; then schema override; then fingerprint default in sidecar.
-    const effectiveUa = config.userAgent || stealthUa || "";
+    const mode = opts.mode ?? s.crawling.mode;
+    const urls = opts.urls ?? config.urls;
+    const maxRequests = opts.maxRequests ?? s.crawling.maxRequests;
 
     try {
       await invoke("start_crawl", {
         url,
-        maxRequests: config.maxRequests,
-        concurrency: config.concurrency,
-        userAgent: effectiveUa || null,
-        respectRobots: config.respectRobots,
-        delay: config.delay,
+        maxRequests,
+        concurrency: s.crawling.concurrency,
+        userAgent: stealthUa || null,
+        respectRobots: s.crawling.respectRobots,
+        delay: s.crawling.delay,
         customHeaders: Object.keys(config.customHeaders).length
           ? JSON.stringify(config.customHeaders)
           : null,
-        mode: config.mode,
-        urls: config.urls.length ? config.urls : null,
-        headless: config.headless,
-        downloadOgImage: config.downloadOgImage || null,
+        mode,
+        urls: urls.length ? urls : null,
+        headless: s.authentication.headless,
+        downloadOgImage: s.extraction.downloadOgImage || null,
         scraperRules: config.scraperRules.length
           ? JSON.stringify(config.scraperRules)
           : null,
         stealthConfig,
-        perHostDelay: perf.perHostDelay,
-        perHostConcurrency: perf.perHostConcurrency,
-        sessionWarmup: perf.sessionWarmup || null,
+        perHostDelay: s.performance.perHostDelay,
+        perHostConcurrency: s.performance.perHostConcurrency,
+        sessionWarmup: s.performance.sessionWarmup || null,
       });
     } catch (e) {
       console.error("Crawl failed:", e);
@@ -167,9 +179,9 @@ export function useCrawl() {
     }
     // Save current config (with updated recrawl queue) to DB
     if (currentSessionId.value) {
-      const { config: appConfig } = useConfig();
+      const { config } = useConfig();
       try {
-        await updateSessionConfig(currentSessionId.value, appConfig);
+        await updateSessionConfig(currentSessionId.value, config);
       } catch (e) {
         console.error("Config save on stop failed:", e);
       }

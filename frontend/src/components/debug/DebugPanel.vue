@@ -16,6 +16,7 @@ const {
   clearMetrics,
   refreshSnapshot,
   killSidecar,
+  wipeBrowserProfile,
 } = useDebug();
 
 type Tab = "logs" | "metrics" | "process";
@@ -127,6 +128,20 @@ function onKey(e: KeyboardEvent) {
 async function handleKill() {
   if (!confirm("Kill sidecar process? The current crawl will terminate.")) return;
   await killSidecar();
+}
+
+async function handleWipeProfile() {
+  if (!confirm(
+    "Wipe the browser profile?\n\n" +
+    "This kills the sidecar + Chrome and deletes all cookies, cache, and anti-bot tokens " +
+    "(Akamai _abck, Cloudflare __cf_bm) that may be poisoning your crawls. " +
+    "Sign-in sessions will be lost."
+  )) return;
+  try {
+    await wipeBrowserProfile();
+  } catch (e) {
+    alert(`Wipe failed: ${e}`);
+  }
 }
 </script>
 
@@ -303,13 +318,23 @@ async function handleKill() {
                 </template>
               </dl>
               <div v-else class="empty">Not running.</div>
-              <button
-                class="btn-pill btn-kill"
-                :disabled="!snapshot.sidecarPid"
-                @click="handleKill"
-              >
-                &#x25A0; KILL SIDECAR
-              </button>
+              <div class="proc-actions">
+                <button
+                  class="btn-pill btn-kill"
+                  :disabled="!snapshot.sidecarPid"
+                  @click="handleKill"
+                >
+                  &#x25A0; KILL SIDECAR
+                </button>
+                <button
+                  class="btn-pill btn-wipe"
+                  :disabled="!!snapshot.sidecarPid"
+                  title="Delete cookies, cache, and anti-bot tokens. Use when a site (thehill.com, bot-walled targets) starts instant-403ing."
+                  @click="handleWipeProfile"
+                >
+                  &#x1F9F9; WIPE PROFILE
+                </button>
+              </div>
             </div>
 
             <div class="proc-col">
@@ -734,6 +759,24 @@ async function handleKill() {
   transition: all 0.2s;
   background: transparent;
   align-self: flex-start;
+}
+.proc-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.btn-wipe {
+  color: #dcdcaa;
+  border-color: rgba(220, 220, 170, 0.3);
+}
+.btn-wipe:hover:not(:disabled) {
+  background: rgba(220, 220, 170, 0.08);
+  border-color: #dcdcaa;
+}
+.btn-wipe:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 .btn-kill {
   color: #f44747;

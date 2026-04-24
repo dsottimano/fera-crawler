@@ -13,6 +13,7 @@
     "test:server": "tsx test-server/server.ts"
   },
   "dependencies": {
+    "patchright": "1.59.4",
     "playwright-core": "1.50.0",
     "sharp": "0.34.5"
   },

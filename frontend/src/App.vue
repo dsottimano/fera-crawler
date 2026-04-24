@@ -23,7 +23,7 @@ import { useConfig } from "./composables/useConfig";
 import { useFileOps } from "./composables/useFileOps";
 import { useBrowser } from "./composables/useBrowser";
 import { useDatabase } from "./composables/useDatabase";
-import type { CrawlResult, CrawlConfig } from "./types/crawl";
+import type { CrawlResult } from "./types/crawl";
 
 const url = ref("");
 const crawlScope = ref("Subdomain");
@@ -33,7 +33,7 @@ const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
 const { browserOpen, profileData, openBrowser, closeBrowser, fetchProfileData } = useBrowser();
 const { closeOrphanedSessions } = useDatabase();
 const { start: startDebugListeners } = useDebug();
-const { init: initSettings } = useSettings();
+const { settings, init: initSettings, patch: patchSetting } = useSettings();
 
 // Auto-show profile viewer when cookies arrive after sign-in
 watch(profileData, (data) => {
@@ -149,23 +149,24 @@ function normalizeUrl(raw: string): string {
 
 function canStart(): boolean {
   if (crawling.value) return false;
-  if (config.mode === "list") return config.urls.length > 0;
+  if (settings.value.crawling.mode === "list") return config.urls.length > 0;
   return !!url.value.trim();
 }
 
 function handleStart() {
   const isResume = stopped.value;
-  if (config.mode === "list") {
+  if (settings.value.crawling.mode === "list") {
     if (!config.urls.length) return;
-    startCrawl(config.urls[0], config, isResume);
+    startCrawl(config.urls[0], { resume: isResume });
   } else {
     if (!url.value.trim()) return;
     url.value = normalizeUrl(url.value);
     if (crawlScope.value === "Exact URL") {
-      config.mode = "list";
-      config.urls = [url.value];
+      // Per-call override — don't mutate the profile's mode for a one-off scope.
+      startCrawl(url.value, { resume: isResume, mode: "list", urls: [url.value] });
+    } else {
+      startCrawl(url.value, { resume: isResume });
     }
-    startCrawl(url.value, config, isResume);
   }
 }
 
@@ -221,14 +222,13 @@ async function handleRecrawl(urls: string[]) {
   if (!urls.length || crawling.value) return;
   recrawlQueueAll.value = [...urls];
   config.recrawlQueue = [...urls];
-  const replaceSet = new Set(urls);
-  const recrawlConfig: CrawlConfig = {
-    ...config,
+  await startCrawl(urls[0], {
+    resume: true,
+    replaceUrls: new Set(urls),
     mode: "list",
     urls,
     maxRequests: urls.length,
-  };
-  await startCrawl(urls[0], recrawlConfig, true, replaceSet);
+  });
 }
 
 function handleLoadSession(sessionUrl: string) {
@@ -266,7 +266,7 @@ async function handleMenuAction(menu: string, item: string) {
     else showSettingsPanel.value = true;
   }
   if (menu === "Mode") {
-    config.mode = item === "List" ? "list" : "spider";
+    await patchSetting("crawling", "mode", item === "List" ? "list" : "spider");
   }
   if (menu === "Export") {
     const f: Record<string, (r: CrawlResult) => boolean> = {
@@ -321,7 +321,7 @@ async function handleMenuAction(menu: string, item: string) {
         <!-- URL input (compact) -->
         <div class="telem-url-group">
           <div class="telem-url-wrap">
-            <div v-if="config.mode === 'list'" class="telem-list-badge" @click="configSection = 'settings'">
+            <div v-if="settings.crawling.mode === 'list'" class="telem-list-badge" @click="configSection = 'settings'">
               LIST MODE — {{ config.urls.length }} URL{{ config.urls.length !== 1 ? 's' : '' }}
             </div>
             <input
@@ -372,19 +372,19 @@ async function handleMenuAction(menu: string, item: string) {
           </button>
           <button
             class="btn-pill btn-headless"
-            :class="{ 'btn-headless--off': !config.headless }"
+            :class="{ 'btn-headless--off': !settings.authentication.headless }"
             :disabled="crawling"
-            @click="config.headless = !config.headless"
+            @click="patchSetting('authentication', 'headless', !settings.authentication.headless)"
           >
-            {{ config.headless ? '&#x1F441; HEADLESS' : '&#x1F5A5; HEADED' }}
+            {{ settings.authentication.headless ? '&#x1F441; HEADLESS' : '&#x1F5A5; HEADED' }}
           </button>
           <button
             class="btn-pill btn-ogimage"
-            :class="{ 'btn-ogimage--on': config.downloadOgImage }"
+            :class="{ 'btn-ogimage--on': settings.extraction.downloadOgImage }"
             :disabled="crawling"
-            @click="config.downloadOgImage = !config.downloadOgImage"
+            @click="patchSetting('extraction', 'downloadOgImage', !settings.extraction.downloadOgImage)"
           >
-            {{ config.downloadOgImage ? '&#x2713; OG:IMAGE' : 'OG:IMAGE' }}
+            {{ settings.extraction.downloadOgImage ? '&#x2713; OG:IMAGE' : 'OG:IMAGE' }}
           </button>
           <button
             v-if="profileData"
@@ -411,9 +411,8 @@ async function handleMenuAction(menu: string, item: string) {
         <!-- Config indicators -->
         <div class="telem-divider"></div>
         <div class="config-badges">
-          <span v-if="config.userAgent" class="config-badge" title="Custom User-Agent set">UA</span>
-          <span v-if="config.delay > 0" class="config-badge" :title="'Delay: ' + config.delay + 'ms'">{{ config.delay }}ms</span>
-          <span v-if="!config.respectRobots" class="config-badge config-badge--warn" title="Ignoring robots.txt">NO ROBOTS</span>
+          <span v-if="settings.crawling.delay > 0" class="config-badge" :title="'Delay: ' + settings.crawling.delay + 'ms'">{{ settings.crawling.delay }}ms</span>
+          <span v-if="!settings.crawling.respectRobots" class="config-badge config-badge--warn" title="Ignoring robots.txt">NO ROBOTS</span>
           <span v-if="config.scraperRules.length > 0" class="config-badge" :title="config.scraperRules.length + ' scraper rule(s)'">SCRAPER</span>
           <span v-if="Object.keys(config.customHeaders).length > 0" class="config-badge" :title="Object.keys(config.customHeaders).length + ' custom header(s)'">HEADERS</span>
         </div>

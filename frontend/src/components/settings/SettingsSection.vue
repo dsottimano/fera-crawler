@@ -8,14 +8,12 @@ const props = defineProps<{
   sectionKey: string;
   values: Record<string, unknown>;
   search: string;
-  showAdvanced: boolean;
 }>();
 
 defineEmits<{ update: [itemKey: string, value: unknown] }>();
 
 function itemVisible(def: SettingDef, key: string): boolean {
   if (def.hidden) return false;
-  if (!props.showAdvanced && def.advanced) return false;
   if (!props.search) return true;
   const q = props.search.toLowerCase();
   return (

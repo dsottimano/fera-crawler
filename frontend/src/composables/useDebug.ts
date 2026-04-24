@@ -126,6 +126,10 @@ async function killSidecar(): Promise<void> {
   await invoke("kill_sidecar");
 }
 
+async function wipeBrowserProfile(): Promise<string> {
+  return await invoke<string>("wipe_browser_profile");
+}
+
 export function useDebug() {
   return {
     logs,
@@ -140,5 +144,6 @@ export function useDebug() {
     clearMetrics,
     refreshSnapshot,
     killSidecar,
+    wipeBrowserProfile,
   };
 }

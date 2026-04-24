@@ -70,33 +70,19 @@ export interface CrawlResult {
   scraper: Record<string, { value: string; appears: boolean }>;
 }
 
+// Transient per-crawl state. Persistent crawl knobs (concurrency, delay, mode,
+// headless, …) live in the active profile (useSettings / SettingsPanel).
 export interface CrawlConfig {
-  maxRequests: number;
-  concurrency: number;
-  userAgent: string;
-  respectRobots: boolean;
-  delay: number;
   customHeaders: Record<string, string>;
-  mode: "spider" | "list";
   urls: string[];
-  headless: boolean;
-  downloadOgImage: boolean;
   scraperRules: ScraperRule[];
   scraperUrl: string;
   recrawlQueue: string[];
 }
 
 export const defaultConfig: CrawlConfig = {
-  maxRequests: 0,
-  concurrency: 5,
-  userAgent: "",
-  respectRobots: true,
-  delay: 0,
   customHeaders: {},
-  mode: "spider",
   urls: [],
-  headless: true,
-  downloadOgImage: false,
   scraperRules: [],
   scraperUrl: "",
   recrawlQueue: [],

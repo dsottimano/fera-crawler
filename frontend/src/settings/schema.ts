@@ -24,6 +24,9 @@ export interface SettingDef<T = unknown> {
   max?: number;
   options?: readonly string[];
   unit?: string;
+  // String-type fields may expose named presets that populate the field on pick.
+  // The free-text input stays editable so users can supply a custom value.
+  presets?: readonly { label: string; value: string }[];
   validate?: (v: T) => string | null;
 }
 
@@ -149,9 +152,9 @@ export const SCHEMA: SettingsSchema = {
     items: {
       headless: {
         type: "boolean",
-        default: true,
+        default: false,
         label: "Headless mode",
-        help: "Turn off to see the browser",
+        help: "Headless is faster but easier for anti-bot systems to detect. Leave OFF against hardened targets (Akamai, Cloudflare, DataDome); flip ON for speed on permissive sites.",
       },
     },
   },
@@ -176,10 +179,10 @@ export const SCHEMA: SettingsSchema = {
     items: {
       enabled: {
         type: "boolean",
-        default: true,
+        default: false,
         advanced: true,
         label: "Enable stealth (master)",
-        help: "Master toggle. When off, no init script is installed and no fingerprint-derived HTTP headers are sent. Flip this to A/B test whether our stealth is helping or hurting against a specific site.",
+        help: "OFF (recommended) lets Patchright's binary-level patches do the work — no UA override, no custom headers, no init script. ON layers our custom fingerprint stack on top, which can actively hurt stealth against Akamai/DataDome. Flip ON only if you have a specific reason.",
       },
       userAgent: {
         type: "string",
@@ -187,6 +190,22 @@ export const SCHEMA: SettingsSchema = {
         advanced: true,
         label: "User-Agent override",
         help: "Leave empty to use the fingerprint's randomized Chrome UA. Paste a string to force that exact UA. Chrome UAs (containing 'Chrome/X.Y.Z.W') automatically realign Sec-CH-UA, Sec-CH-UA-Platform, and navigator.platform to match. Firefox/Safari UAs pass through verbatim and Sec-CH-UA headers are suppressed (those browsers don't send them).",
+        presets: [
+          { label: "Googlebot Desktop", value: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Googlebot/2.1; +http://www.google.com/bot.html) Chrome/131.0.6778.264 Safari/537.36" },
+          { label: "Googlebot Mobile", value: "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.264 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" },
+          { label: "Googlebot Smartphone", value: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" },
+          { label: "Bingbot", value: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Chrome/116.0.1938.76 Safari/537.36" },
+          { label: "Bingbot Mobile", value: "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.92 Mobile Safari/537.36 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)" },
+          { label: "DuckDuckBot", value: "Mozilla/5.0 (compatible; DuckDuckBot-Https/1.1; https://duckduckgo.com/duckduckbot)" },
+          { label: "YandexBot", value: "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)" },
+          { label: "Baiduspider", value: "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)" },
+          { label: "Applebot", value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)" },
+          { label: "Chrome Desktop (Win)", value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36" },
+          { label: "Chrome Desktop (macOS)", value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36" },
+          { label: "Chrome Mobile (Android)", value: "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36" },
+          { label: "Safari iPhone", value: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1" },
+          { label: "Firefox Desktop", value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0" },
+        ],
       },
       webdriver: {
         type: "boolean",

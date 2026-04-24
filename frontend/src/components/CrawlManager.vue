@@ -47,7 +47,10 @@ async function handleOpen(session: CrawlSession) {
   }
 }
 
-const infoConfig = computed<Partial<CrawlConfig>>(() => {
+// Historical session configs — older sessions may include schema-migrated
+// keys (mode, headless, delay, downloadOgImage) that are no longer on
+// CrawlConfig. Accept any shape for display purposes.
+const infoConfig = computed<Record<string, unknown> & Partial<CrawlConfig>>(() => {
   const json = infoSession.value?.config_json;
   if (!json) return {};
   try { return JSON.parse(json); }
@@ -135,7 +138,6 @@ function formatUrl(url: string): string {
               <template v-if="infoSession?.id === s.id && s.config_json && s.config_json !== '{}'">
                 <div class="info-row"><span class="info-label">MODE</span><span class="info-value">{{ infoConfig.mode ?? 'spider' }}</span></div>
                 <div class="info-row"><span class="info-label">HEADLESS</span><span class="info-value">{{ infoConfig.headless !== false ? 'Yes' : 'No' }}</span></div>
-                <div v-if="infoConfig.userAgent" class="info-row"><span class="info-label">USER AGENT</span><span class="info-value info-mono">{{ infoConfig.userAgent }}</span></div>
                 <div v-if="infoConfig.delay" class="info-row"><span class="info-label">DELAY</span><span class="info-value">{{ infoConfig.delay }}ms</span></div>
                 <div v-if="infoConfig.downloadOgImage" class="info-row"><span class="info-label">OG:IMAGE</span><span class="info-value">Downloading</span></div>
                 <div v-if="(infoConfig.scraperRules ?? []).length > 0" class="info-row"><span class="info-label">SCRAPER</span><span class="info-value">{{ infoConfig.scraperRules!.length }} rule(s)</span></div>

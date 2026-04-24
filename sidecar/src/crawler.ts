@@ -3,7 +3,7 @@ import os from "node:os";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chromium, type BrowserContext, type Page } from "playwright-core";
+import { chromium, type BrowserContext, type Page } from "patchright";
 import sharp from "sharp";
 import { writeLine } from "./pipeline.js";
 import {
@@ -803,8 +803,26 @@ function canEnqueue(queueLen: number, processed: number, maxRequests: number): b
   return maxRequests === 0 || queueLen + processed < maxRequests;
 }
 
+function findSystemChrome(): string | undefined {
+  const isWindows = process.platform === "win32";
+  const isMac = process.platform === "darwin";
+  const candidates = isWindows
+    ? [
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      ]
+    : isMac
+      ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/opt/google/chrome/chrome"];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return undefined;
+}
+
 export async function runCrawler(config: CrawlConfig): Promise<void> {
   const executablePath = findChromium();
+  const hasSystemChrome = findSystemChrome() !== undefined;
   const userDataDir = getBrowserProfileDir(config.browserProfile);
 
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -858,7 +876,12 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     chromium: executablePath ?? "(playwright-bundled)",
     profileDir: userDataDir,
   });
-  log("info", "crawler starting", { startUrl: config.startUrl, headless, stealth: stealthEnabled });
+  log("info", "crawler starting", {
+    startUrl: config.startUrl,
+    headless,
+    stealth: stealthEnabled,
+    engine: stealthEnabled ? "patchright+custom-stealth" : (hasSystemChrome ? "patchright+system-chrome" : "patchright+bundled-chromium"),
+  });
 
   await killChromeForProfile(userDataDir);
 
@@ -871,14 +894,27 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   // Resolve effective User-Agent: user-supplied wins, else fingerprint, else Playwright default.
   const effectiveUa = config.userAgent || fpUserAgent;
 
+  // Patchright best-practice mode: when our custom stealth is OFF we trust
+  // Patchright's binary-level patches entirely. Per upstream:
+  //   - use system Chrome (channel) over bundled Chromium when possible
+  //   - viewport: null (don't override window dimensions)
+  //   - do NOT inject userAgent or custom headers (breaks their stealth)
+  // When stealth is ON we keep our own full stack (UA + Sec-CH-UA + init script).
   const launchOpts = {
     headless,
-    executablePath,
+    ...(stealthEnabled ? { executablePath } : {}),
     args: headless ? STEALTH_ARGS : [...STEALTH_ARGS, "--start-maximized"],
     ignoreDefaultArgs: ["--enable-automation"] as string[],
-    ...(headless ? {} : { viewport: null as null }),
-    ...(effectiveUa ? { userAgent: effectiveUa } : {}),
-    ...(mergedHeaders ? { extraHTTPHeaders: mergedHeaders } : {}),
+    ...(stealthEnabled
+      ? (headless ? {} : { viewport: null as null })
+      : {
+          viewport: null as null,
+          // Prefer system Chrome (Patchright best practice) when available;
+          // fall back to Patchright's bundled patched Chromium otherwise.
+          ...(hasSystemChrome ? { channel: "chrome" } : {}),
+        }),
+    ...(stealthEnabled && effectiveUa ? { userAgent: effectiveUa } : {}),
+    ...(stealthEnabled && mergedHeaders ? { extraHTTPHeaders: mergedHeaders } : {}),
   };
 
   let context: BrowserContext;
@@ -953,9 +989,11 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
       log("info", "session warmup", { origin });
       const warmupPage = await context.newPage();
       try {
-        await warmupPage.goto(origin, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const resp = await warmupPage.goto(origin, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const status = resp?.status() ?? 0;
         await warmupPage.waitForTimeout(2500);
-        log("info", "warmup complete", { origin });
+        const blocked = status === 403 || status === 429 || status === 503;
+        log(blocked ? "warn" : "info", "warmup complete", { origin, status, blocked });
       } catch (err: any) {
         log("warn", "warmup navigation failed", { origin, error: String(err?.message ?? err) });
       } finally {
@@ -1052,8 +1090,21 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         log("warn", "server signaled rate limit but no Retry-After", { url, status });
       }
     } else if (status === 403) {
-      // Don't retry — just note the block signal.
-      log("warn", "403 block (not retrying)", { url });
+      // Don't retry — just note the block signal. Extract known block-vendor
+      // identifiers from the response body so we can tell which edge product
+      // (Akamai / Cloudflare / DataDome / PerimeterX) actually blocked us.
+      const h = outcome.result.responseHeaders ?? {};
+      const server = h["server"] ?? h["Server"] ?? "";
+      const akamaiRef = (outcome.result.error ?? "").match(/Reference[^#]*#([0-9a-f.]+)/i)?.[1];
+      const cfRay = h["cf-ray"] ?? h["CF-RAY"];
+      const dataDome = h["x-datadome"] ?? h["x-dd-b"];
+      log("warn", "403 block (not retrying)", {
+        url,
+        server: server || undefined,
+        cfRay: cfRay || undefined,
+        akamaiRef: akamaiRef || undefined,
+        dataDome: dataDome || undefined,
+      });
     }
     return outcome;
   }

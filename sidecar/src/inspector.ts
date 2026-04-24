@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { chromium, type Page } from "playwright-core";
+import { chromium, type Page } from "patchright";
 import { writeLine } from "./pipeline.js";
 import {
   findChromium,

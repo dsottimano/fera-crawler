@@ -46,6 +46,23 @@ export function useSettings() {
     await profilesApi.updateValues(p.id, values);
   }
 
+  // Immediate-save single-field patch. Used by toolbar buttons (headless,
+  // og:image, mode) that flip one knob at a time — bypasses the SettingsPanel
+  // draft/dirty/save cycle. No-op before init() completes.
+  async function patch<S extends keyof SettingsValues, K extends keyof SettingsValues[S]>(
+    section: S,
+    key: K,
+    value: SettingsValues[S][K],
+  ): Promise<void> {
+    const p = activeProfile.value;
+    if (!p) return;
+    const next = {
+      ...p.values,
+      [section]: { ...p.values[section], [key]: value },
+    } as SettingsValues;
+    await profilesApi.updateValues(p.id, next);
+  }
+
   return {
     settings,
     activeProfile,
@@ -54,5 +71,6 @@ export function useSettings() {
     init,
     switchProfile,
     save,
+    patch,
   };
 }

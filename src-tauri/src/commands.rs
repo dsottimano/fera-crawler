@@ -546,6 +546,48 @@ pub async fn debug_snapshot(app: AppHandle) -> Result<serde_json::Value, String>
     }))
 }
 
+/// Wipes the Chromium user-data-dir. Used to recover from poisoned anti-bot
+/// cookies (Akamai `_abck` stamped `~-1~`, Cloudflare `__cf_bm` invalidated)
+/// that persist across sessions and cause instant 403s on every subsequent
+/// crawl. Kills any running sidecar + chrome first so the directory isn't
+/// locked when we try to remove it.
+#[tauri::command]
+pub async fn wipe_browser_profile(app: AppHandle) -> Result<String, String> {
+    let crawl_state: State<CrawlChild> = app.state();
+    if let Some(child) = lock_or_recover(&crawl_state.child).take() {
+        let _ = child.kill();
+    }
+    crawl_state.pid.store(0, Ordering::SeqCst);
+
+    let browser_state: State<BrowserChild> = app.state();
+    if let Some(child) = lock_or_recover(&browser_state.child).take() {
+        let _ = child.kill();
+    }
+
+    let profile = browser_profile_dir(&app);
+    kill_chrome_for_profile(&profile);
+
+    // Brief pause so the OS releases file handles before we rm -rf.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let path = std::path::Path::new(&profile);
+    if path.exists() {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| format!("Failed to wipe profile at {}: {}", profile, e))?;
+    }
+
+    let _ = app.emit(
+        "sidecar-log",
+        serde_json::json!({
+            "ts": now_ms(),
+            "level": "warn",
+            "msg": "browser profile wiped",
+            "ctx": { "path": &profile },
+        }),
+    );
+    Ok(profile)
+}
+
 #[tauri::command]
 pub async fn kill_sidecar(app: AppHandle) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();

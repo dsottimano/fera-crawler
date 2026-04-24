@@ -110,6 +110,7 @@ pub fn run() {
             commands::open_inspector,
             commands::debug_snapshot,
             commands::kill_sidecar,
+            commands::wipe_browser_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

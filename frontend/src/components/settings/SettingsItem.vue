@@ -62,6 +62,7 @@ defineEmits<{ update: [value: unknown] }>();
         v-else
         :id="itemKey"
         :model-value="String(value ?? '')"
+        :presets="def.presets"
         @update:model-value="(v) => $emit('update', v)"
       />
     </div>
