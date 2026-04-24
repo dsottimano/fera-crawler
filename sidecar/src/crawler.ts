@@ -14,6 +14,11 @@ import {
   recordCompletion,
   recordError,
 } from "./observability.js";
+import {
+  buildStealthInitScript,
+  generateFingerprint,
+  fingerprintDigest,
+} from "./stealth.js";
 import { classifyResource } from "./utils.js";
 import { RobotsCache } from "./robots.js";
 import { discoverSitemapUrls } from "./sitemap.js";
@@ -845,8 +850,22 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     }
   }
 
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+  // Stealth fingerprint: deterministic per-crawl via the startUrl seed so a
+  // resumed crawl re-creates the same identity, but different crawls look
+  // like different users. Must install BEFORE the vitals script so our
+  // native-toString hook wraps every subsequent patch.
+  const stealthSeed = config.startUrl;
+  const fp = generateFingerprint({ seed: stealthSeed });
+  const fpDigest = fingerprintDigest(fp);
+  await context.addInitScript(buildStealthInitScript({ seed: stealthSeed }));
+  log("info", "stealth fingerprint applied", {
+    digest: fpDigest,
+    platform: fp.platform,
+    chrome: fp.chromeFullVersion,
+    screen: fp.screenWidth + "x" + fp.screenHeight,
+    cpu: fp.hardwareConcurrency,
+    memGB: fp.deviceMemory,
+    webglVendor: fp.webglVendor,
   });
 
   if (config.captureVitals) {
@@ -1040,9 +1059,7 @@ export async function openBrowser(rawUrl: string, profileDir?: string): Promise<
     viewport: null,
   });
 
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-  });
+  await context.addInitScript(buildStealthInitScript({ seed: url }));
 
   const pages = context.pages();
   const page = pages.length > 0 ? pages[0] : await context.newPage();
@@ -1097,6 +1114,8 @@ export async function dumpProfile(rawUrl: string, profileDir?: string): Promise<
     args: STEALTH_ARGS,
     ignoreDefaultArgs: ["--enable-automation"],
   });
+
+  await context.addInitScript(buildStealthInitScript({ seed: url }));
 
   try {
     const cookies = await context.cookies();

@@ -66,7 +66,11 @@ export async function runCrawlerProcess(args: string[]): Promise<CrawlResult[]> 
       for (const line of stdout.trim().split("\n")) {
         if (line.trim()) {
           try {
-            results.push(JSON.parse(line));
+            const obj = JSON.parse(line);
+            // Skip observability events (log/metric/phase) — they share stdout
+            // with CrawlResults but carry a `type` discriminator.
+            if (obj && typeof obj === "object" && "type" in obj) continue;
+            results.push(obj);
           } catch {
             // skip non-JSON lines
           }
