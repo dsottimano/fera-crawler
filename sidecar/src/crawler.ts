@@ -20,6 +20,7 @@ import {
   fingerprintDigest,
   buildHeaders,
   buildUserAgent,
+  parseUserAgent,
   DEFAULT_STEALTH_PATCHES,
   type StealthPatchConfig,
 } from "./stealth.js";
@@ -817,10 +818,28 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     ...DEFAULT_STEALTH_PATCHES,
     ...(config.stealthConfig as Partial<StealthPatchConfig> | undefined),
   };
-  const fp = generateFingerprint({ seed: stealthSeed });
+  // If the user supplied a UA override AND it parses as Chrome, realign the
+  // whole fingerprint to match it — same UA-CH brands, Sec-CH-UA-Platform,
+  // navigator.platform. Non-Chrome UAs (Firefox/Safari) return null: we'll
+  // pass them through verbatim but skip Chrome-specific HTTP headers.
+  const uaOverride = config.userAgent?.trim() || "";
+  const parsedUa = uaOverride ? parseUserAgent(uaOverride) : null;
+  const fp = generateFingerprint({
+    seed: stealthSeed,
+    ...(parsedUa
+      ? {
+          platform: parsedUa.platform,
+          chromeMajor: parsedUa.chromeMajor,
+          chromeFullVersion: parsedUa.chromeFullVersion,
+        }
+      : {}),
+  });
   const fpDigest = fingerprintDigest(fp);
   const stealthEnabled = patches.enabled !== false;
-  const fpHeaders = stealthEnabled ? buildHeaders(fp) : undefined;
+  // Non-Chrome override: skip Sec-CH-UA headers entirely (real Firefox/Safari
+  // don't send them). Chrome override or no override: derive from fingerprint.
+  const sendChromeHeaders = stealthEnabled && (!uaOverride || parsedUa !== null);
+  const fpHeaders = sendChromeHeaders ? buildHeaders(fp) : undefined;
   const fpUserAgent = stealthEnabled ? buildUserAgent(fp) : undefined;
 
   phase("startup", {

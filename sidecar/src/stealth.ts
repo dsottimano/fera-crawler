@@ -100,7 +100,50 @@ export const DEFAULT_STEALTH_PATCHES: StealthPatchConfig = {
 export interface StealthOpts {
   seed?: string | number;
   platform?: StealthPlatform;
+  /** Force a Chrome major version (e.g., from a parsed UA override). */
+  chromeMajor?: number;
+  /** Force the full Chrome version string (e.g., "145.0.7258.82"). */
+  chromeFullVersion?: string;
   patches?: Partial<StealthPatchConfig>;
+}
+
+/**
+ * Parse a User-Agent string to extract platform + Chrome version.
+ * Returns null for non-Chrome UAs (Firefox, Safari, etc.) so callers can
+ * decide to skip Chrome-specific patches and headers rather than spoof
+ * incoherently.
+ */
+export function parseUserAgent(ua: string): {
+  platform: StealthPlatform;
+  chromeMajor: number;
+  chromeFullVersion: string;
+} | null {
+  if (!ua) return null;
+  const chromeMatch = ua.match(/Chrome\/(\d+)\.(\d+)\.(\d+)\.(\d+)/);
+  if (!chromeMatch) return null;
+  // Reject Firefox/Safari/Edge which also contain "Chrome" only in some cases.
+  // Real Chrome/Chromium has no "Firefox/" or "Safari/" ahead of "Chrome/".
+  // (Safari DOES contain "Safari/" after Chrome in Chrome UAs — ignore it.)
+  if (/Firefox\//.test(ua)) return null;
+  // Edg, Brave, Opera all ship Chrome; accept them.
+
+  const [, majorS, , buildS, patchS] = chromeMatch;
+  const chromeMajor = parseInt(majorS, 10);
+  const chromeFullVersion = `${majorS}.0.${buildS}.${patchS}`;
+
+  let platform: StealthPlatform;
+  if (/Windows NT/i.test(ua)) {
+    platform = "Windows";
+  } else if (/Macintosh|Mac OS X/i.test(ua)) {
+    platform = "macOS";
+  } else if (/X11|Linux/i.test(ua)) {
+    platform = "Linux";
+  } else {
+    // Unknown platform token (Android, iOS, etc.) — we don't handle these yet.
+    return null;
+  }
+
+  return { platform, chromeMajor, chromeFullVersion };
 }
 
 export interface Fingerprint {
@@ -211,10 +254,15 @@ export function generateFingerprint(opts: StealthOpts = {}): Fingerprint {
   const chromeBottom = platform === "macOS" ? 25 : 40;
   const availHeight = screenHeight - chromeBottom;
 
-  const chromeMajor = pick(rng, [143, 144, 145] as const);
-  const chromeBuild = Math.floor(rng() * 8000) + 1000;
-  const chromePatch = Math.floor(rng() * 200);
-  const chromeFullVersion = `${chromeMajor}.0.${chromeBuild}.${chromePatch}`;
+  // Honor Chrome version overrides (e.g., from a parsed UA). We still consume
+  // the rng values so downstream picks stay deterministic regardless of whether
+  // the caller overrode these.
+  const rngChromeMajor = pick(rng, [143, 144, 145] as const);
+  const rngChromeBuild = Math.floor(rng() * 8000) + 1000;
+  const rngChromePatch = Math.floor(rng() * 200);
+  const chromeMajor = opts.chromeMajor ?? rngChromeMajor;
+  const chromeFullVersion =
+    opts.chromeFullVersion ?? `${chromeMajor}.0.${rngChromeBuild}.${rngChromePatch}`;
 
   // Users on macOS skew toward P3 + sometimes HDR displays.
   const colorGamutP3 = platform === "macOS" && rng() < 0.55;

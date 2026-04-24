@@ -181,6 +181,13 @@ export const SCHEMA: SettingsSchema = {
         label: "Enable stealth (master)",
         help: "Master toggle. When off, no init script is installed and no fingerprint-derived HTTP headers are sent. Flip this to A/B test whether our stealth is helping or hurting against a specific site.",
       },
+      userAgent: {
+        type: "string",
+        default: "",
+        advanced: true,
+        label: "User-Agent override",
+        help: "Leave empty to use the fingerprint's randomized Chrome UA. Paste a string to force that exact UA. Chrome UAs (containing 'Chrome/X.Y.Z.W') automatically realign Sec-CH-UA, Sec-CH-UA-Platform, and navigator.platform to match. Firefox/Safari UAs pass through verbatim and Sec-CH-UA headers are suppressed (those browsers don't send them).",
+      },
       webdriver: {
         type: "boolean",
         default: true,

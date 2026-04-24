@@ -7,6 +7,7 @@ import {
   DEFAULT_STEALTH_PATCHES,
   buildHeaders,
   buildUserAgent,
+  parseUserAgent,
 } from "../../src/stealth.js";
 
 describe("generateFingerprint", () => {
@@ -185,5 +186,99 @@ describe("buildHeaders", () => {
     // UA-CH platform in the script's baked FP must match the Sec-CH-UA-Platform header.
     expect(script).toContain(`"uaPlatform":"${fp.uaPlatform}"`);
     expect(headers["Sec-CH-UA-Platform"]).toBe(`"${fp.uaPlatform}"`);
+  });
+});
+
+describe("parseUserAgent", () => {
+  it("parses Chrome on Windows", () => {
+    const ua =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7258.82 Safari/537.36";
+    expect(parseUserAgent(ua)).toEqual({
+      platform: "Windows",
+      chromeMajor: 145,
+      chromeFullVersion: "145.0.7258.82",
+    });
+  });
+
+  it("parses Chrome on macOS", () => {
+    const ua =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.6900.42 Safari/537.36";
+    expect(parseUserAgent(ua)).toEqual({
+      platform: "macOS",
+      chromeMajor: 144,
+      chromeFullVersion: "144.0.6900.42",
+    });
+  });
+
+  it("parses Chrome on Linux", () => {
+    const ua =
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.6500.10 Safari/537.36";
+    expect(parseUserAgent(ua)).toEqual({
+      platform: "Linux",
+      chromeMajor: 143,
+      chromeFullVersion: "143.0.6500.10",
+    });
+  });
+
+  it("returns null for Firefox", () => {
+    expect(
+      parseUserAgent(
+        "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0",
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for Safari (no Chrome token)", () => {
+    expect(
+      parseUserAgent(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for empty / unparseable input", () => {
+    expect(parseUserAgent("")).toBeNull();
+    expect(parseUserAgent("not a ua")).toBeNull();
+  });
+
+  it("accepts Edge (Chromium under the hood)", () => {
+    const ua =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7258.82 Safari/537.36 Edg/145.0.2851.75";
+    const parsed = parseUserAgent(ua);
+    expect(parsed?.platform).toBe("Windows");
+    expect(parsed?.chromeMajor).toBe(145);
+  });
+});
+
+describe("fingerprint override via chromeMajor / chromeFullVersion", () => {
+  it("honors chromeMajor override", () => {
+    const fp = generateFingerprint({ seed: 1, chromeMajor: 99 });
+    expect(fp.chromeMajor).toBe(99);
+  });
+
+  it("honors chromeFullVersion override", () => {
+    const fp = generateFingerprint({
+      seed: 1,
+      chromeFullVersion: "145.0.7258.82",
+    });
+    expect(fp.chromeFullVersion).toBe("145.0.7258.82");
+  });
+
+  it("UA override end-to-end: parsed platform + version ripple through", () => {
+    const ua =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7258.82 Safari/537.36";
+    const parsed = parseUserAgent(ua)!;
+    const fp = generateFingerprint({
+      seed: "any-seed",
+      platform: parsed.platform,
+      chromeMajor: parsed.chromeMajor,
+      chromeFullVersion: parsed.chromeFullVersion,
+    });
+    expect(fp.platform).toBe("macOS");
+    expect(fp.uaPlatform).toBe("macOS");
+    expect(fp.navigatorPlatform).toBe("MacIntel");
+    expect(fp.chromeFullVersion).toBe("145.0.7258.82");
+    expect(buildHeaders(fp)["Sec-CH-UA-Platform"]).toBe('"macOS"');
+    expect(buildHeaders(fp)["Sec-CH-UA"]).toContain(`"Google Chrome";v="145"`);
   });
 });

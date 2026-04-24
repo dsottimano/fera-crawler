@@ -4,6 +4,7 @@ export type { ScraperRule };
 
 export interface StealthPatches {
   enabled: boolean;
+  userAgent: string;
   webdriver: boolean;
   plugins: boolean;
   languages: boolean;

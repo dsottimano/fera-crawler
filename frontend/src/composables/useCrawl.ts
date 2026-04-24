@@ -119,15 +119,22 @@ export function useCrawl() {
     // Active profile settings. settings.value falls back to schema defaults
     // (stealth on, perHost 500/2, warmup off) when no profile has loaded yet.
     const { settings } = useSettings();
-    const stealthConfig = JSON.stringify(settings.value.stealth);
+    // userAgent is a sibling field, not a patch toggle — strip it out before
+    // serializing stealthConfig (sidecar expects only booleans in the patches blob).
+    const { userAgent: stealthUa, ...stealthPatches } = settings.value.stealth;
+    const stealthConfig = JSON.stringify(stealthPatches);
     const perf = settings.value.performance;
+
+    // Legacy config.userAgent (from useConfig) takes precedence while P0.5 is
+    // in flight; then schema override; then fingerprint default in sidecar.
+    const effectiveUa = config.userAgent || stealthUa || "";
 
     try {
       await invoke("start_crawl", {
         url,
         maxRequests: config.maxRequests,
         concurrency: config.concurrency,
-        userAgent: config.userAgent || null,
+        userAgent: effectiveUa || null,
         respectRobots: config.respectRobots,
         delay: config.delay,
         customHeaders: Object.keys(config.customHeaders).length
