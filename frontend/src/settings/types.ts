@@ -2,6 +2,28 @@ import type { ScraperRule } from "../types/crawl";
 
 export type { ScraperRule };
 
+export interface StealthPatches {
+  webdriver: boolean;
+  plugins: boolean;
+  languages: boolean;
+  platform: boolean;
+  hardwareClaims: boolean;
+  permissions: boolean;
+  notification: boolean;
+  chromeStub: boolean;
+  screenMetrics: boolean;
+  outerDimensions: boolean;
+  webglVendor: boolean;
+  mediaDevices: boolean;
+  battery: boolean;
+  userAgentData: boolean;
+  eventIsTrusted: boolean;
+  automationMarkers: boolean;
+  nativeToString: boolean;
+  canvasNoise: boolean;
+  matchMedia: boolean;
+}
+
 export interface SettingsValues {
   crawling: {
     mode: "spider" | "list";
@@ -27,18 +49,11 @@ export interface SettingsValues {
     retentionDays: number;
   };
   aiMcp: Record<string, never>;
+  stealth: StealthPatches;
   advanced: {
-    stealthOverride: boolean;
-    stealthPerHostDelay: number;
-    stealthPerHostConcurrency: number;
+    perHostDelay: number;
+    perHostConcurrency: number;
     debugLog: boolean;
-  };
-  _stealth: {
-    rotateUa: boolean;
-    uaPool: string;
-    emitSecChUa: boolean;
-    applyInitPatches: boolean;
-    retry429: boolean;
   };
 }
 

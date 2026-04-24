@@ -17,6 +17,7 @@ import SettingsFinder from "./components/SettingsFinder.vue";
 import SettingsPanel from "./components/settings/SettingsPanel.vue";
 import DebugPanel from "./components/debug/DebugPanel.vue";
 import { useDebug } from "./composables/useDebug";
+import { useSettings } from "./composables/useSettings";
 import { useCrawl } from "./composables/useCrawl";
 import { useConfig } from "./composables/useConfig";
 import { useFileOps } from "./composables/useFileOps";
@@ -32,6 +33,7 @@ const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
 const { browserOpen, profileData, openBrowser, closeBrowser, fetchProfileData } = useBrowser();
 const { closeOrphanedSessions } = useDatabase();
 const { start: startDebugListeners } = useDebug();
+const { init: initSettings } = useSettings();
 
 // Auto-show profile viewer when cookies arrive after sign-in
 watch(profileData, (data) => {
@@ -52,6 +54,12 @@ onMounted(async () => {
     await startDebugListeners();
   } catch (e) {
     console.error("Debug listener error:", e);
+  }
+  // Load profiles + seed on first run so settings are ready before any crawl.
+  try {
+    await initSettings();
+  } catch (e) {
+    console.error("Settings init error:", e);
   }
   window.addEventListener("keydown", onGlobalKeydown);
 });

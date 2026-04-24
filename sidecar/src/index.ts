@@ -118,6 +118,20 @@ if (command === "open-browser") {
     }
   }
 
+  const stealthConfigRaw = getFlag("--stealth-config", "");
+  let stealthConfig: Record<string, boolean> | undefined;
+  if (stealthConfigRaw) {
+    try {
+      const parsed = JSON.parse(stealthConfigRaw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        stealthConfig = parsed;
+      }
+    } catch {
+      console.error("Error: --stealth-config must be valid JSON");
+      process.exit(1);
+    }
+  }
+
   const config: CrawlConfig = {
     startUrl: url,
     maxRequests,
@@ -133,6 +147,7 @@ if (command === "open-browser") {
     ...(downloadOgImage ? { downloadOgImage } : {}),
     ...(scraperRules ? { scraperRules } : {}),
     ...(captureVitals ? { captureVitals } : {}),
+    ...(stealthConfig ? { stealthConfig } : {}),
   };
 
   startMetricEmitter(1000);

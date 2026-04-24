@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useDatabase } from "./useDatabase";
 import { useConfig } from "./useConfig";
+import { useSettings } from "./useSettings";
 import type { CrawlResult, CrawlConfig } from "../types/crawl";
 
 const results = ref<CrawlResult[]>([]);
@@ -115,6 +116,11 @@ export function useCrawl() {
       cleanup();
     });
 
+    // Active profile's stealth toggles. settings.value falls back to schema
+    // defaults (all on) when no profile has been loaded yet.
+    const { settings } = useSettings();
+    const stealthConfig = JSON.stringify(settings.value.stealth);
+
     try {
       await invoke("start_crawl", {
         url,
@@ -133,6 +139,7 @@ export function useCrawl() {
         scraperRules: config.scraperRules.length
           ? JSON.stringify(config.scraperRules)
           : null,
+        stealthConfig,
       });
     } catch (e) {
       console.error("Crawl failed:", e);

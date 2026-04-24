@@ -18,6 +18,8 @@ import {
   buildStealthInitScript,
   generateFingerprint,
   fingerprintDigest,
+  DEFAULT_STEALTH_PATCHES,
+  type StealthPatchConfig,
 } from "./stealth.js";
 import { classifyResource } from "./utils.js";
 import { RobotsCache } from "./robots.js";
@@ -850,14 +852,23 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     }
   }
 
-  // Stealth fingerprint: deterministic per-crawl via the startUrl seed so a
-  // resumed crawl re-creates the same identity, but different crawls look
-  // like different users. Must install BEFORE the vitals script so our
+  // Stealth: deterministic per-crawl via the startUrl seed so a resumed
+  // crawl re-creates the same identity, but different crawls look like
+  // different users. Must install BEFORE the vitals script so the
   // native-toString hook wraps every subsequent patch.
   const stealthSeed = config.startUrl;
+  const patches: StealthPatchConfig = {
+    ...DEFAULT_STEALTH_PATCHES,
+    ...(config.stealthConfig as Partial<StealthPatchConfig> | undefined),
+  };
   const fp = generateFingerprint({ seed: stealthSeed });
   const fpDigest = fingerprintDigest(fp);
-  await context.addInitScript(buildStealthInitScript({ seed: stealthSeed }));
+  const disabled = Object.entries(patches)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  await context.addInitScript(
+    buildStealthInitScript({ seed: stealthSeed, patches }),
+  );
   log("info", "stealth fingerprint applied", {
     digest: fpDigest,
     platform: fp.platform,
@@ -866,6 +877,9 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     cpu: fp.hardwareConcurrency,
     memGB: fp.deviceMemory,
     webglVendor: fp.webglVendor,
+    prefersDark: fp.prefersDark,
+    colorGamutP3: fp.colorGamutP3,
+    disabledPatches: disabled.length ? disabled : undefined,
   });
 
   if (config.captureVitals) {

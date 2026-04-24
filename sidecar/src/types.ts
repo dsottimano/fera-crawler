@@ -128,4 +128,7 @@ export interface CrawlConfig {
   scraperRules?: ScraperRule[];
   // Capture LCP/CLS/FCP — requires waiting for the 'load' event, slowing crawl.
   captureVitals?: boolean;
+  // Partial patch config for stealth — unset patches take their defaults.
+  // Omit stealthConfig entirely to get the full default patch set.
+  stealthConfig?: Record<string, boolean>;
 }

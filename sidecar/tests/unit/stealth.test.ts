@@ -3,6 +3,8 @@ import {
   buildStealthInitScript,
   generateFingerprint,
   fingerprintDigest,
+  resolvePatches,
+  DEFAULT_STEALTH_PATCHES,
 } from "../../src/stealth.js";
 
 describe("generateFingerprint", () => {
@@ -80,5 +82,55 @@ describe("buildStealthInitScript", () => {
     const a = buildStealthInitScript({ seed: "abc" });
     const b = buildStealthInitScript({ seed: "abc" });
     expect(a).toBe(b);
+  });
+
+  it("bakes canvasNoise and matchMedia patches by default", () => {
+    const script = buildStealthInitScript({ seed: "x" });
+    expect(script).toContain("patchCanvas");
+    expect(script).toContain("patchMatchMedia");
+    expect(script).toContain("prefers-color-scheme");
+    expect(script).toContain("canvasSeed");
+  });
+});
+
+describe("patch gating", () => {
+  it("DEFAULT_STEALTH_PATCHES is all true", () => {
+    for (const v of Object.values(DEFAULT_STEALTH_PATCHES)) {
+      expect(v).toBe(true);
+    }
+  });
+
+  it("resolvePatches merges partial over defaults", () => {
+    const merged = resolvePatches({ canvasNoise: false });
+    expect(merged.canvasNoise).toBe(false);
+    expect(merged.webdriver).toBe(true);
+    expect(merged.matchMedia).toBe(true);
+  });
+
+  it("disabling canvasNoise stops the patchCanvas IIFE from running", () => {
+    // Patch body is gated at runtime on P.canvasNoise, so the function-body
+    // string still appears, but the config blob inside the script is
+    // "canvasNoise":false which the gate reads.
+    const script = buildStealthInitScript({ seed: "y", patches: { canvasNoise: false } });
+    expect(script).toContain('"canvasNoise":false');
+    expect(script).toContain('"webdriver":true');
+  });
+
+  it("disabling matchMedia reflects in baked config blob", () => {
+    const script = buildStealthInitScript({ seed: "z", patches: { matchMedia: false } });
+    expect(script).toContain('"matchMedia":false');
+  });
+
+  it("disabling nativeToString reflects in baked config blob", () => {
+    const script = buildStealthInitScript({ seed: "n", patches: { nativeToString: false } });
+    expect(script).toContain('"nativeToString":false');
+  });
+
+  it("partial patches leave unspecified toggles at their defaults", () => {
+    const script = buildStealthInitScript({ seed: "q", patches: { canvasNoise: false, matchMedia: false } });
+    expect(script).toContain('"canvasNoise":false');
+    expect(script).toContain('"matchMedia":false');
+    expect(script).toContain('"webdriver":true');
+    expect(script).toContain('"userAgentData":true');
   });
 });

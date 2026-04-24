@@ -146,6 +146,7 @@ pub async fn start_crawl(
     download_og_image: Option<bool>,
     scraper_rules: Option<String>,
     capture_vitals: Option<bool>,
+    stealth_config: Option<String>,
 ) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
 
@@ -233,6 +234,15 @@ pub async fn start_crawl(
         args.push("--scraper-rules-file".to_string());
         args.push(tmp.to_string_lossy().to_string());
         temp_files.push(tmp);
+    }
+
+    // Small JSON blob — pass inline rather than via temp file. Sidecar
+    // rejects invalid JSON with a clear error so we don't need to validate.
+    if let Some(sc) = stealth_config {
+        if !sc.is_empty() && sc != "{}" {
+            args.push("--stealth-config".to_string());
+            args.push(sc);
+        }
     }
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
