@@ -86,6 +86,18 @@ pub fn run() {
                 ON profiles(is_default) WHERE is_default = 1;",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 6,
+            description: "create crawl_configs table (per-domain probe results)",
+            sql: "CREATE TABLE IF NOT EXISTS crawl_configs (
+                domain TEXT PRIMARY KEY,
+                config_json TEXT NOT NULL,
+                winning_label TEXT,
+                attempts_json TEXT NOT NULL DEFAULT '[]',
+                probed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -111,6 +123,7 @@ pub fn run() {
             commands::debug_snapshot,
             commands::kill_sidecar,
             commands::wipe_browser_profile,
+            commands::probe_crawl_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

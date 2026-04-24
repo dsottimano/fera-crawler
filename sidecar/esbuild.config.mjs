@@ -1,12 +1,12 @@
 import { build } from "esbuild";
 import { readFile } from "node:fs/promises";
 
-// Patch playwright-core require.resolve() calls that reference files
+// Patch patchright-core require.resolve() calls that reference files
 // not needed at runtime (package.json path, electron support, app icons)
 const patchPlaywrightResolves = {
-  name: "patch-playwright-resolves",
+  name: "patch-patchright-resolves",
   setup(b) {
-    b.onLoad({ filter: /playwright-core[/\\]lib[/\\].*\.js$/ }, async (args) => {
+    b.onLoad({ filter: /patchright-core[/\\]lib[/\\].*\.js$/ }, async (args) => {
       let contents = await readFile(args.path, "utf8");
       contents = contents.replace(
         /require\.resolve\([\"']\.\.\/(\.\.\/)*package\.json[\"']\)/g,

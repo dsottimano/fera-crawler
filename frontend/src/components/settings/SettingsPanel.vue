@@ -4,7 +4,10 @@ import { SCHEMA, type SettingsSection as Section, type SettingDef } from "../../
 import { useSettings } from "../../composables/useSettings";
 import { useDebug } from "../../composables/useDebug";
 import SettingsSection from "./SettingsSection.vue";
+import CrawlConfigsPanel from "./CrawlConfigsPanel.vue";
 import type { SettingsValues } from "../../settings/types";
+
+const VIRTUAL_CRAWL_CONFIGS_KEY = "_crawlConfigs";
 
 const emit = defineEmits<{ close: [] }>();
 
@@ -48,8 +51,13 @@ function itemMatches(key: string, def: SettingDef, q: string): boolean {
   );
 }
 
+const virtualCrawlConfigsSection: Section = {
+  label: "Crawl Configs",
+  items: {},
+};
+
 const visibleSections = computed(() => {
-  return Object.entries(SCHEMA)
+  const schemaSections = Object.entries(SCHEMA)
     .filter(([key]) => !key.startsWith("_"))
     .filter(([, section]) => {
       // Hide sections whose every item is explicitly hidden.
@@ -57,6 +65,21 @@ const visibleSections = computed(() => {
     })
     .filter(([, section]) => sectionMatches(section, searchQuery.value))
     .map(([key, section]) => ({ key, section }));
+
+  const q = searchQuery.value.toLowerCase();
+  const virtualMatches =
+    !q ||
+    virtualCrawlConfigsSection.label.toLowerCase().includes(q) ||
+    "crawl config probe stealth domain".includes(q);
+
+  if (virtualMatches) {
+    schemaSections.push({
+      key: VIRTUAL_CRAWL_CONFIGS_KEY,
+      section: virtualCrawlConfigsSection,
+    });
+  }
+
+  return schemaSections;
 });
 
 const activeSection = computed(() => {
@@ -163,8 +186,11 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         </nav>
 
         <div class="section-content">
+          <CrawlConfigsPanel
+            v-if="activeSection && activeSection.key === VIRTUAL_CRAWL_CONFIGS_KEY"
+          />
           <SettingsSection
-            v-if="activeSection && draft"
+            v-else-if="activeSection && draft"
             :section="activeSection.section"
             :section-key="activeSection.key"
             :values="(localValues as unknown as Record<string, Record<string, unknown>>)[activeSection.key]"

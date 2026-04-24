@@ -822,3 +822,56 @@ pub async fn dump_profile(app: AppHandle, url: String) -> Result<(), String> {
 
     Ok(())
 }
+
+#[tauri::command]
+pub async fn probe_crawl_config(
+    app: AppHandle,
+    url: String,
+) -> Result<serde_json::Value, String> {
+    let shell = app.shell();
+    let args = vec!["probe-config".to_string(), url];
+
+    let mut cmd = shell
+        .sidecar("fera-crawler")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args(&args);
+
+    if let Some(res_dir) = resource_dir(&app) {
+        cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
+    }
+
+    let (mut rx, _child) = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn probe: {e}"))?;
+
+    use tauri_plugin_shell::process::CommandEvent;
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(line) => {
+                stdout_buf.push_str(&String::from_utf8_lossy(&line));
+                stdout_buf.push('\n');
+            }
+            CommandEvent::Stderr(line) => {
+                stderr_buf.push_str(&String::from_utf8_lossy(&line));
+                stderr_buf.push('\n');
+            }
+            CommandEvent::Terminated(_) => break,
+            _ => {}
+        }
+    }
+
+    for line in stdout_buf.lines().rev() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if v.get("attempts").is_some() {
+                return Ok(v);
+            }
+        }
+    }
+
+    Err(format!(
+        "probe-config produced no result (stderr: {})",
+        stderr_buf.trim()
+    ))
+}

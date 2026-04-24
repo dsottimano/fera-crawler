@@ -80,15 +80,15 @@ function copyRecursive(src, dest) {
 console.log(`[download-chromium] Platform: ${platform}`);
 
 // Step 1: Install Chromium via Playwright
-console.log("[download-chromium] Installing Playwright Chromium...");
+console.log("[download-chromium] Installing Patchright Chromium...");
 try {
-  execSync("npx playwright install chromium", {
+  execSync("npx patchright install chromium", {
     cwd: ROOT,
     stdio: "inherit",
     env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: "0" }, // Use default cache
   });
 } catch (err) {
-  console.error("[download-chromium] Failed to install Chromium via Playwright");
+  console.error("[download-chromium] Failed to install Chromium via Patchright");
   process.exit(1);
 }
 

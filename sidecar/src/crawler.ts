@@ -803,26 +803,8 @@ function canEnqueue(queueLen: number, processed: number, maxRequests: number): b
   return maxRequests === 0 || queueLen + processed < maxRequests;
 }
 
-function findSystemChrome(): string | undefined {
-  const isWindows = process.platform === "win32";
-  const isMac = process.platform === "darwin";
-  const candidates = isWindows
-    ? [
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-      ]
-    : isMac
-      ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/opt/google/chrome/chrome"];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
-  return undefined;
-}
-
 export async function runCrawler(config: CrawlConfig): Promise<void> {
   const executablePath = findChromium();
-  const hasSystemChrome = findSystemChrome() !== undefined;
   const userDataDir = getBrowserProfileDir(config.browserProfile);
 
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -873,14 +855,14 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     sessionWarmup: !!config.sessionWarmup,
     perHostDelay: config.perHostDelay ?? 500,
     perHostConcurrency: config.perHostConcurrency ?? 2,
-    chromium: executablePath ?? "(playwright-bundled)",
+    chromium: executablePath ?? "(patchright-bundled)",
     profileDir: userDataDir,
   });
   log("info", "crawler starting", {
     startUrl: config.startUrl,
     headless,
     stealth: stealthEnabled,
-    engine: stealthEnabled ? "patchright+custom-stealth" : (hasSystemChrome ? "patchright+system-chrome" : "patchright+bundled-chromium"),
+    engine: stealthEnabled ? "patchright+custom-stealth" : "patchright+bundled-chromium",
   });
 
   await killChromeForProfile(userDataDir);
@@ -902,7 +884,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   // When stealth is ON we keep our own full stack (UA + Sec-CH-UA + init script).
   const launchOpts = {
     headless,
-    ...(stealthEnabled ? { executablePath } : {}),
+    executablePath,
     args: headless ? STEALTH_ARGS : [...STEALTH_ARGS, "--start-maximized"],
     ignoreDefaultArgs: ["--enable-automation"] as string[],
     ...(stealthEnabled
@@ -911,7 +893,6 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
           viewport: null as null,
           // Prefer system Chrome (Patchright best practice) when available;
           // fall back to Patchright's bundled patched Chromium otherwise.
-          ...(hasSystemChrome ? { channel: "chrome" } : {}),
         }),
     ...(stealthEnabled && effectiveUa ? { userAgent: effectiveUa } : {}),
     ...(stealthEnabled && mergedHeaders ? { extraHTTPHeaders: mergedHeaders } : {}),
