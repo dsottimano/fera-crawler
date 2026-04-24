@@ -1,5 +1,6 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
@@ -7,6 +8,9 @@ use tauri_plugin_shell::process::CommandChild;
 pub struct CrawlChild {
     pub child: Mutex<Option<CommandChild>>,
     pub generation: AtomicU64,
+    /// PID of the currently-running sidecar, or 0 if none. Set when spawn succeeds;
+    /// cleared on Terminated. Exposed via debug_snapshot so the UI can monitor /proc.
+    pub pid: AtomicI32,
 }
 
 impl Default for CrawlChild {
@@ -14,7 +18,21 @@ impl Default for CrawlChild {
         Self {
             child: Mutex::new(None),
             generation: AtomicU64::new(0),
+            pid: AtomicI32::new(0),
         }
+    }
+}
+
+/// App-start time in epoch seconds — exposed via debug_snapshot for uptime.
+pub struct AppStart(pub u64);
+
+impl Default for AppStart {
+    fn default() -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Self(now)
     }
 }
 
@@ -73,18 +91,25 @@ fn kill_chrome_for_profile(profile_dir: &str) {
     }
     #[cfg(windows)]
     {
-        // Use PowerShell (wmic is removed in Windows 11 24H2+)
-        let escaped = profile_dir.replace('\'', "''");
-        let _ = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*--user-data-dir={}*' }} | ForEach-Object {{ $_.Terminate() }}",
-                    escaped
-                ),
-            ])
-            .output();
+        // Pass the profile dir as a PowerShell pipeline input rather than string-interpolating
+        // it into the script — avoids injection via backticks, $(), or quotes in the path.
+        let script = "$p = [Console]::In.ReadLine(); \
+            Get-CimInstance Win32_Process | \
+            Where-Object { $_.CommandLine -like ('*--user-data-dir=' + $p + '*') } | \
+            ForEach-Object { $_.Terminate() }";
+        if let Ok(mut child) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", script])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = writeln!(stdin, "{}", profile_dir);
+            }
+            let _ = child.wait();
+        }
     }
     // Remove stale singleton locks
     for name in &["SingletonLock", "SingletonCookie", "SingletonSocket"] {
@@ -120,17 +145,19 @@ pub async fn start_crawl(
     headless: Option<bool>,
     download_og_image: Option<bool>,
     scraper_rules: Option<String>,
+    capture_vitals: Option<bool>,
 ) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
 
-    // Kill any existing crawl and bump generation so the old task won't emit crawl-complete
-    {
+    // Kill any existing crawl and bump generation in the same critical section
+    // so the old task can never observe the pre-bumped value after being killed.
+    let gen = {
         let mut guard = lock_or_recover(&state.child);
         if let Some(old_child) = guard.take() {
             let _ = old_child.kill();
         }
-    }
-    let gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        state.generation.fetch_add(1, Ordering::SeqCst) + 1
+    };
 
     let shell = app.shell();
     let profile = browser_profile_dir(&app);
@@ -151,9 +178,9 @@ pub async fn start_crawl(
         args.push(ua);
     }
 
-    if let Some(false) = respect_robots {
+    // Sidecar treats `--respect-robots` as a presence flag (on when present).
+    if let Some(true) = respect_robots {
         args.push("--respect-robots".to_string());
-        args.push("false".to_string());
     }
 
     if let Some(d) = delay {
@@ -173,12 +200,17 @@ pub async fn start_crawl(
         args.push(m);
     }
 
+    // Track only temp files we actually wrote, so cleanup doesn't attempt unused paths
+    // and so we can roll them back if spawn fails.
+    let mut temp_files: Vec<std::path::PathBuf> = Vec::new();
+
     if let Some(url_list) = urls {
         if !url_list.is_empty() {
             let tmp = std::env::temp_dir().join(format!("fera-urls-{}-{}.txt", std::process::id(), gen));
             std::fs::write(&tmp, url_list.join("\n")).map_err(|e| format!("Failed to write urls file: {e}"))?;
             args.push("--urls-file".to_string());
             args.push(tmp.to_string_lossy().to_string());
+            temp_files.push(tmp);
         }
     }
 
@@ -191,15 +223,17 @@ pub async fn start_crawl(
         args.push("--download-og-image".to_string());
     }
 
+    if let Some(true) = capture_vitals {
+        args.push("--capture-vitals".to_string());
+    }
+
     if let Some(rules) = scraper_rules {
         let tmp = std::env::temp_dir().join(format!("fera-scraper-rules-{}-{}.json", std::process::id(), gen));
         std::fs::write(&tmp, &rules).map_err(|e| format!("Failed to write scraper rules: {e}"))?;
         args.push("--scraper-rules-file".to_string());
         args.push(tmp.to_string_lossy().to_string());
+        temp_files.push(tmp);
     }
-
-    let urls_tmp = std::env::temp_dir().join(format!("fera-urls-{}-{}.txt", std::process::id(), gen));
-    let rules_tmp = std::env::temp_dir().join(format!("fera-scraper-rules-{}-{}.json", std::process::id(), gen));
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -213,11 +247,31 @@ pub async fn start_crawl(
         cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
     }
 
-    let (mut rx, child) = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
+    let (mut rx, child) = match cmd.spawn() {
+        Ok(v) => v,
+        Err(e) => {
+            // Spawn failed — clean up any temp files we wrote.
+            for t in &temp_files {
+                let _ = std::fs::remove_file(t);
+            }
+            return Err(format!("Failed to spawn sidecar: {e}"));
+        }
+    };
 
+    let sidecar_pid = child.pid() as i32;
+    state.pid.store(sidecar_pid, Ordering::SeqCst);
     *lock_or_recover(&state.child) = Some(child);
+
+    // Announce spawn to the debug channel so the UI has immediate signal.
+    let _ = app.emit(
+        "sidecar-log",
+        serde_json::json!({
+            "ts": now_ms(),
+            "level": "info",
+            "msg": "sidecar spawned",
+            "meta": { "pid": sidecar_pid, "gen": gen, "args": args }
+        }),
+    );
 
     let app_handle = app.clone();
 
@@ -228,15 +282,31 @@ pub async fn start_crawl(
             match event {
                 CommandEvent::Stdout(line) => {
                     let line_str = String::from_utf8_lossy(&line);
-                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&line_str) {
-                        let _ = app_handle.emit("crawl-result", result);
-                    }
+                    route_sidecar_stdout(&app_handle, &line_str);
                 }
                 CommandEvent::Stderr(line) => {
                     let line_str = String::from_utf8_lossy(&line);
-                    eprintln!("[sidecar stderr] {}", line_str);
+                    let trimmed = line_str.trim_end().to_string();
+                    eprintln!("[sidecar stderr] {}", trimmed);
+                    let _ = app_handle.emit(
+                        "sidecar-log",
+                        serde_json::json!({
+                            "ts": now_ms(),
+                            "level": "stderr",
+                            "msg": trimmed,
+                        }),
+                    );
                 }
-                CommandEvent::Terminated(_) => {
+                CommandEvent::Terminated(payload) => {
+                    let _ = app_handle.emit(
+                        "sidecar-log",
+                        serde_json::json!({
+                            "ts": now_ms(),
+                            "level": "info",
+                            "msg": "sidecar terminated",
+                            "meta": { "code": payload.code }
+                        }),
+                    );
                     break;
                 }
                 _ => {}
@@ -248,15 +318,55 @@ pub async fn start_crawl(
             if state.generation.load(Ordering::SeqCst) == gen {
                 let _ = app_handle.emit("crawl-complete", ());
                 *lock_or_recover(&state.child) = None;
+                state.pid.store(0, Ordering::SeqCst);
             }
         }
 
-        // Clean up temp files
-        let _ = std::fs::remove_file(&urls_tmp);
-        let _ = std::fs::remove_file(&rules_tmp);
+        for t in &temp_files {
+            let _ = std::fs::remove_file(t);
+        }
     });
 
     Ok(())
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Route a single stdout NDJSON line from the sidecar. Discriminates by the
+/// `type` field: log/metric/phase go to their own events; anything without
+/// `type` is treated as a legacy CrawlResult and routed to crawl-result.
+fn route_sidecar_stdout(app: &AppHandle, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(val) => {
+            let ev_name = match val.get("type").and_then(|v| v.as_str()) {
+                Some("log") => "sidecar-log",
+                Some("metric") => "sidecar-metric",
+                Some("phase") => "sidecar-phase",
+                _ => "crawl-result",
+            };
+            let _ = app.emit(ev_name, val);
+        }
+        Err(_) => {
+            // Non-JSON stdout line — surface as a log so nothing vanishes.
+            let _ = app.emit(
+                "sidecar-log",
+                serde_json::json!({
+                    "ts": now_ms(),
+                    "level": "stdout",
+                    "msg": trimmed,
+                }),
+            );
+        }
+    }
 }
 
 #[tauri::command]
@@ -265,9 +375,167 @@ pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
     if let Some(child) = lock_or_recover(&state.child).take() {
         child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
     }
+    state.pid.store(0, Ordering::SeqCst);
     // Also kill any Chrome processes using our profile dir
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
+    Ok(())
+}
+
+/// Best-effort sample of /proc/<pid>/status on Linux. Returns RSS in KB and
+/// state char. None on non-Linux or if the pid isn't running.
+#[cfg(target_os = "linux")]
+fn sample_proc(pid: i32) -> Option<serde_json::Value> {
+    use std::fs;
+    let path = format!("/proc/{}/status", pid);
+    let content = fs::read_to_string(&path).ok()?;
+    let mut rss_kb = 0u64;
+    let mut vm_kb = 0u64;
+    let mut state = String::new();
+    let mut threads = 0u32;
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("VmRSS:") {
+            rss_kb = v.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("VmSize:") {
+            vm_kb = v.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("State:") {
+            state = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("Threads:") {
+            threads = v.trim().parse().unwrap_or(0);
+        }
+    }
+    Some(serde_json::json!({
+        "rssBytes": rss_kb * 1024,
+        "vmBytes": vm_kb * 1024,
+        "state": state,
+        "threads": threads,
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_proc(_pid: i32) -> Option<serde_json::Value> {
+    None
+}
+
+/// Enumerate descendant PIDs of the sidecar (Chromium children). Linux-only
+/// for now — uses /proc/<pid>/task/<tid>/children. None elsewhere.
+#[cfg(target_os = "linux")]
+fn descendant_pids(root: i32) -> Vec<i32> {
+    use std::collections::VecDeque;
+    use std::fs;
+    let mut out: Vec<i32> = Vec::new();
+    let mut queue: VecDeque<i32> = VecDeque::new();
+    queue.push_back(root);
+    let mut visited: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    while let Some(pid) = queue.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        let task_dir = format!("/proc/{}/task", pid);
+        let Ok(tasks) = fs::read_dir(&task_dir) else { continue };
+        for t in tasks.flatten() {
+            let children_path = t.path().join("children");
+            if let Ok(content) = fs::read_to_string(&children_path) {
+                for token in content.split_whitespace() {
+                    if let Ok(child_pid) = token.parse::<i32>() {
+                        if child_pid != root {
+                            out.push(child_pid);
+                        }
+                        queue.push_back(child_pid);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn descendant_pids(_root: i32) -> Vec<i32> {
+    Vec::new()
+}
+
+#[tauri::command]
+pub async fn debug_snapshot(app: AppHandle) -> Result<serde_json::Value, String> {
+    let crawl_state: State<CrawlChild> = app.state();
+    let app_start: State<AppStart> = app.state();
+
+    let sidecar_pid = crawl_state.pid.load(Ordering::SeqCst);
+    let generation = crawl_state.generation.load(Ordering::SeqCst);
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+
+    let db_path = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|p| p.join("fera.db"));
+    let db_size = db_path
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let host_pid = std::process::id();
+    let host_proc = sample_proc(host_pid as i32);
+    let sidecar_proc = if sidecar_pid > 0 { sample_proc(sidecar_pid) } else { None };
+    let children: Vec<serde_json::Value> = if sidecar_pid > 0 {
+        descendant_pids(sidecar_pid)
+            .into_iter()
+            .map(|cp| {
+                let info = sample_proc(cp).unwrap_or_else(|| serde_json::json!({}));
+                serde_json::json!({ "pid": cp, "proc": info })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    Ok(serde_json::json!({
+        "appStartEpoch": app_start.0,
+        "uptimeSec": now.saturating_sub(app_start.0),
+        "hostPid": host_pid,
+        "hostProc": host_proc,
+        "sidecarPid": sidecar_pid,
+        "sidecarProc": sidecar_proc,
+        "sidecarChildren": children,
+        "crawlGeneration": generation,
+        "dataDir": data_dir,
+        "dbPath": db_path.map(|p| p.to_string_lossy().to_string()),
+        "dbSizeBytes": db_size,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+    }))
+}
+
+#[tauri::command]
+pub async fn kill_sidecar(app: AppHandle) -> Result<(), String> {
+    let state: State<CrawlChild> = app.state();
+    if let Some(child) = lock_or_recover(&state.child).take() {
+        child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
+    }
+    state.pid.store(0, Ordering::SeqCst);
+    let profile = browser_profile_dir(&app);
+    kill_chrome_for_profile(&profile);
+    let _ = app.emit(
+        "sidecar-log",
+        serde_json::json!({
+            "ts": now_ms(),
+            "level": "warn",
+            "msg": "sidecar killed by user (debug panel)",
+        }),
+    );
     Ok(())
 }
 
@@ -275,14 +543,14 @@ pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
 pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
     let state: State<BrowserChild> = app.state();
 
-    // Kill any existing browser and bump generation
-    {
+    // Kill any existing browser and bump generation in the same critical section.
+    let gen = {
         let mut guard = lock_or_recover(&state.child);
         if let Some(old_child) = guard.take() {
             let _ = old_child.kill();
         }
-    }
-    let gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        state.generation.fetch_add(1, Ordering::SeqCst) + 1
+    };
 
     let shell = app.shell();
     let profile = browser_profile_dir(&app);
@@ -353,13 +621,14 @@ pub async fn open_browser(app: AppHandle, url: String) -> Result<(), String> {
 pub async fn open_inspector(app: AppHandle, url: String) -> Result<(), String> {
     let state: State<BrowserChild> = app.state();
 
-    {
+    // Kill and bump generation atomically.
+    let gen = {
         let mut guard = lock_or_recover(&state.child);
         if let Some(old_child) = guard.take() {
             let _ = old_child.kill();
         }
-    }
-    let gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        state.generation.fetch_add(1, Ordering::SeqCst) + 1
+    };
 
     let shell = app.shell();
     let profile = browser_profile_dir(&app);

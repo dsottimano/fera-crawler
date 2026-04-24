@@ -69,11 +69,29 @@ pub fn run() {
             sql: "ALTER TABLE crawl_sessions ADD COLUMN config_json TEXT DEFAULT '{}';",
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            description: "create profiles table",
+            sql: "CREATE TABLE IF NOT EXISTS profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                schema_version INTEGER NOT NULL,
+                values_json TEXT NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                start_url TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_default
+                ON profiles(is_default) WHERE is_default = 1;",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
         .manage(commands::CrawlChild::default())
         .manage(commands::BrowserChild::default())
+        .manage(commands::AppStart::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -90,6 +108,8 @@ pub fn run() {
             commands::close_browser,
             commands::dump_profile,
             commands::open_inspector,
+            commands::debug_snapshot,
+            commands::kill_sidecar,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -14,6 +14,9 @@ import AboutModal from "./components/AboutModal.vue";
 import ProfileViewer from "./components/ProfileViewer.vue";
 import CrawlManager from "./components/CrawlManager.vue";
 import SettingsFinder from "./components/SettingsFinder.vue";
+import SettingsPanel from "./components/settings/SettingsPanel.vue";
+import DebugPanel from "./components/debug/DebugPanel.vue";
+import { useDebug } from "./composables/useDebug";
 import { useCrawl } from "./composables/useCrawl";
 import { useConfig } from "./composables/useConfig";
 import { useFileOps } from "./composables/useFileOps";
@@ -28,6 +31,7 @@ const { results, crawling, stopped, startCrawl, stopCrawl, clearResults, setResu
 const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
 const { browserOpen, profileData, openBrowser, closeBrowser, fetchProfileData } = useBrowser();
 const { closeOrphanedSessions } = useDatabase();
+const { start: startDebugListeners } = useDebug();
 
 // Auto-show profile viewer when cookies arrive after sign-in
 watch(profileData, (data) => {
@@ -43,6 +47,13 @@ onMounted(async () => {
   } catch (e) {
     console.error("DB startup error:", e);
   }
+  // Start debug listeners app-wide so logs accumulate even when panel is closed.
+  try {
+    await startDebugListeners();
+  } catch (e) {
+    console.error("Debug listener error:", e);
+  }
+  window.addEventListener("keydown", onGlobalKeydown);
 });
 
 const activeMode = ref<"crawler" | "settings-finder">("crawler");
@@ -151,6 +162,22 @@ function handleStart() {
 }
 
 const showClearConfirm = ref(false);
+const showSettingsPanel = ref(false);
+const showDebugPanel = ref(false);
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key === ",") {
+    e.preventDefault();
+    showSettingsPanel.value = true;
+  }
+  // Cmd/Ctrl+Shift+D opens debug
+  if (mod && e.shiftKey && (e.key === "D" || e.key === "d")) {
+    e.preventDefault();
+    showDebugPanel.value = true;
+  }
+}
+
 
 async function handleClear() {
   if (results.value.length > 0) {
@@ -204,6 +231,7 @@ function handleLoadSession(sessionUrl: string) {
 
 onUnmounted(() => {
   if (resizing) stopResize();
+  window.removeEventListener("keydown", onGlobalKeydown);
 });
 
 async function handleMenuAction(menu: string, item: string) {
@@ -364,6 +392,9 @@ async function handleMenuAction(menu: string, item: string) {
           >
             &#x21BB; RESUME RECRAWL ({{ config.recrawlQueue.length }})
           </button>
+          <button class="btn-pill btn-debug" @click="showDebugPanel = true" title="Cmd/Ctrl+Shift+D">
+            &#x1F527; DEBUG
+          </button>
         </div>
 
         <!-- Config indicators -->
@@ -428,6 +459,8 @@ async function handleMenuAction(menu: string, item: string) {
       @load="handleLoadSession"
     />
     <ProfileViewer v-if="showProfile && profileData" :data="profileData" @close="showProfile = false" />
+    <SettingsPanel v-if="showSettingsPanel" @close="showSettingsPanel = false" />
+    <DebugPanel v-if="showDebugPanel" @close="showDebugPanel = false" />
 
     <!-- Clear confirm dialog -->
     <div v-if="showClearConfirm" class="overlay" @click.self="showClearConfirm = false">
@@ -813,6 +846,16 @@ async function handleMenuAction(menu: string, item: string) {
   background: rgba(206,145,120,0.1);
   border-color: #ce9178;
   box-shadow: 0 0 16px rgba(206,145,120,0.15);
+}
+
+.btn-debug {
+  color: rgba(255,255,255,0.5);
+  border-color: rgba(255,255,255,0.12);
+}
+.btn-debug:hover {
+  color: #569cd6;
+  border-color: rgba(86,156,214,0.4);
+  background: rgba(86,156,214,0.08);
 }
 
 /* ── Main layout ── */

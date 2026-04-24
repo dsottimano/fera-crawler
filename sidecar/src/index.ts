@@ -1,5 +1,8 @@
+import fs from "node:fs";
 import { runCrawler, openBrowser, dumpProfile } from "./crawler.js";
+import { openInspector } from "./inspector.js";
 import type { CrawlConfig } from "./types.js";
+import { startMetricEmitter, stopMetricEmitter, log } from "./observability.js";
 
 const args = process.argv.slice(2);
 
@@ -41,6 +44,19 @@ if (command === "open-browser") {
       console.error("Dump profile error:", err);
       process.exit(1);
     });
+} else if (command === "inspect") {
+  const url = args[1];
+  if (!url) {
+    console.error("Usage: fera-crawler inspect <url> [--browser-profile PATH]");
+    process.exit(1);
+  }
+  const browserProfile = getFlag("--browser-profile", "");
+  openInspector(url, browserProfile || undefined)
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error("Inspector error:", err);
+      process.exit(1);
+    });
 } else if (command === "crawl") {
   if (!args[1]) {
     console.error(
@@ -53,7 +69,7 @@ if (command === "open-browser") {
   }
 
   const url = args[1];
-  const maxRequests = parseInt(getFlag("--max-requests", "100"), 10);
+  const maxRequests = parseInt(getFlag("--max-requests", "0"), 10);
   const concurrency = parseInt(getFlag("--concurrency", "5"), 10);
   const userAgent = getFlag("--user-agent", "");
   const respectRobots = hasFlag("--respect-robots");
@@ -73,9 +89,34 @@ if (command === "open-browser") {
     }
   }
 
-  const urls = urlsRaw ? urlsRaw.split(",").map((u) => u.trim()) : undefined;
+  // Support --urls-file for large URL lists (one URL per line, or CSV with URL in first column)
+  const urlsFile = getFlag("--urls-file", "");
+  let urls: string[] | undefined;
+  if (urlsFile) {
+    const content = fs.readFileSync(urlsFile, "utf8");
+    urls = content.split("\n")
+      .map((line) => line.split(",")[0].trim())
+      .filter((u) => u && u.startsWith("http"));
+  } else {
+    urls = urlsRaw ? urlsRaw.split(",").map((u) => u.trim()) : undefined;
+  }
   const headlessRaw = getFlag("--headless", "true");
   const headless = headlessRaw !== "false";
+  const downloadOgImage = hasFlag("--download-og-image");
+  const captureVitals = hasFlag("--capture-vitals");
+
+  const scraperRulesRaw = getFlag("--scraper-rules", "");
+  const scraperRulesFile = getFlag("--scraper-rules-file", "");
+  let scraperRules: Array<{ name: string; selector: string }> | undefined;
+  const scraperJson = scraperRulesFile ? fs.readFileSync(scraperRulesFile, "utf8") : scraperRulesRaw;
+  if (scraperJson) {
+    try {
+      scraperRules = JSON.parse(scraperJson);
+    } catch {
+      console.error("Error: scraper rules must be valid JSON");
+      process.exit(1);
+    }
+  }
 
   const config: CrawlConfig = {
     startUrl: url,
@@ -89,11 +130,20 @@ if (command === "open-browser") {
     ...(customHeaders ? { customHeaders } : {}),
     ...(urls ? { urls } : {}),
     ...(browserProfile ? { browserProfile } : {}),
+    ...(downloadOgImage ? { downloadOgImage } : {}),
+    ...(scraperRules ? { scraperRules } : {}),
+    ...(captureVitals ? { captureVitals } : {}),
   };
 
+  startMetricEmitter(1000);
   runCrawler(config)
-    .then(() => process.exit(0))
+    .then(() => {
+      stopMetricEmitter();
+      process.exit(0);
+    })
     .catch((err) => {
+      log("error", "crawler threw", { error: String(err?.message ?? err), stack: err?.stack });
+      stopMetricEmitter();
       console.error("Crawler error:", err);
       process.exit(1);
     });
