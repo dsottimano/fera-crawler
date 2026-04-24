@@ -18,9 +18,12 @@ import {
   buildStealthInitScript,
   generateFingerprint,
   fingerprintDigest,
+  buildHeaders,
+  buildUserAgent,
   DEFAULT_STEALTH_PATCHES,
   type StealthPatchConfig,
 } from "./stealth.js";
+import { PerHostRateLimiter, parseRetryAfter } from "./rate-limiter.js";
 import { classifyResource } from "./utils.js";
 import { RobotsCache } from "./robots.js";
 import { discoverSitemapUrls } from "./sitemap.js";
@@ -807,6 +810,19 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
 
   const headless = config.headless !== false;
 
+  // Resolve stealth config upfront so UA + headers are derived coherently
+  // with the init script we're about to install.
+  const stealthSeed = config.startUrl;
+  const patches: StealthPatchConfig = {
+    ...DEFAULT_STEALTH_PATCHES,
+    ...(config.stealthConfig as Partial<StealthPatchConfig> | undefined),
+  };
+  const fp = generateFingerprint({ seed: stealthSeed });
+  const fpDigest = fingerprintDigest(fp);
+  const stealthEnabled = patches.enabled !== false;
+  const fpHeaders = stealthEnabled ? buildHeaders(fp) : undefined;
+  const fpUserAgent = stealthEnabled ? buildUserAgent(fp) : undefined;
+
   phase("startup", {
     startUrl: config.startUrl,
     mode: config.mode,
@@ -816,12 +832,25 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     respectRobots: !!config.respectRobots,
     captureVitals: !!config.captureVitals,
     downloadOgImage: !!config.downloadOgImage,
+    stealth: stealthEnabled,
+    sessionWarmup: !!config.sessionWarmup,
+    perHostDelay: config.perHostDelay ?? 500,
+    perHostConcurrency: config.perHostConcurrency ?? 2,
     chromium: executablePath ?? "(playwright-bundled)",
     profileDir: userDataDir,
   });
-  log("info", "crawler starting", { startUrl: config.startUrl, headless });
+  log("info", "crawler starting", { startUrl: config.startUrl, headless, stealth: stealthEnabled });
 
   await killChromeForProfile(userDataDir);
+
+  // Merge headers: fingerprint-derived baseline (when stealth on) → user custom headers on top.
+  const mergedHeaders: Record<string, string> | undefined = (() => {
+    if (!fpHeaders && !config.customHeaders) return undefined;
+    return { ...(fpHeaders ?? {}), ...(config.customHeaders ?? {}) };
+  })();
+
+  // Resolve effective User-Agent: user-supplied wins, else fingerprint, else Playwright default.
+  const effectiveUa = config.userAgent || fpUserAgent;
 
   const launchOpts = {
     headless,
@@ -829,8 +858,8 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     args: headless ? STEALTH_ARGS : [...STEALTH_ARGS, "--start-maximized"],
     ignoreDefaultArgs: ["--enable-automation"] as string[],
     ...(headless ? {} : { viewport: null as null }),
-    ...(config.userAgent ? { userAgent: config.userAgent } : {}),
-    ...(config.customHeaders ? { extraHTTPHeaders: config.customHeaders } : {}),
+    ...(effectiveUa ? { userAgent: effectiveUa } : {}),
+    ...(mergedHeaders ? { extraHTTPHeaders: mergedHeaders } : {}),
   };
 
   let context: BrowserContext;
@@ -852,38 +881,68 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     }
   }
 
-  // Stealth: deterministic per-crawl via the startUrl seed so a resumed
-  // crawl re-creates the same identity, but different crawls look like
-  // different users. Must install BEFORE the vitals script so the
-  // native-toString hook wraps every subsequent patch.
-  const stealthSeed = config.startUrl;
-  const patches: StealthPatchConfig = {
-    ...DEFAULT_STEALTH_PATCHES,
-    ...(config.stealthConfig as Partial<StealthPatchConfig> | undefined),
-  };
-  const fp = generateFingerprint({ seed: stealthSeed });
-  const fpDigest = fingerprintDigest(fp);
-  const disabled = Object.entries(patches)
-    .filter(([, v]) => !v)
-    .map(([k]) => k);
-  await context.addInitScript(
-    buildStealthInitScript({ seed: stealthSeed, patches }),
-  );
-  log("info", "stealth fingerprint applied", {
-    digest: fpDigest,
-    platform: fp.platform,
-    chrome: fp.chromeFullVersion,
-    screen: fp.screenWidth + "x" + fp.screenHeight,
-    cpu: fp.hardwareConcurrency,
-    memGB: fp.deviceMemory,
-    webglVendor: fp.webglVendor,
-    prefersDark: fp.prefersDark,
-    colorGamutP3: fp.colorGamutP3,
-    disabledPatches: disabled.length ? disabled : undefined,
-  });
+  // Install stealth init script (unless master toggle is off).
+  if (stealthEnabled) {
+    const disabled = Object.entries(patches)
+      .filter(([k, v]) => k !== "enabled" && !v)
+      .map(([k]) => k);
+    await context.addInitScript(
+      buildStealthInitScript({ seed: stealthSeed, patches }),
+    );
+    log("info", "stealth fingerprint applied", {
+      digest: fpDigest,
+      platform: fp.platform,
+      chrome: fp.chromeFullVersion,
+      screen: fp.screenWidth + "x" + fp.screenHeight,
+      cpu: fp.hardwareConcurrency,
+      memGB: fp.deviceMemory,
+      webglVendor: fp.webglVendor,
+      prefersDark: fp.prefersDark,
+      colorGamutP3: fp.colorGamutP3,
+      disabledPatches: disabled.length ? disabled : undefined,
+    });
+  } else {
+    log("warn", "stealth DISABLED for this crawl (master toggle off)");
+  }
 
   if (config.captureVitals) {
     await context.addInitScript(VITALS_INIT_SCRIPT);
+  }
+
+  // Per-host rate limiter (defaults: 500ms between request starts, 2 concurrent per host).
+  const rateLimiter = new PerHostRateLimiter(
+    config.perHostDelay ?? 500,
+    config.perHostConcurrency ?? 2,
+  );
+  log("info", "rate limiter configured", {
+    perHostDelayMs: rateLimiter.delayMs,
+    perHostConcurrency: rateLimiter.maxConcurrency,
+  });
+
+  // Session warmup: visit each unique origin root so anti-bot cookies
+  // (_abck, ak_bmsc, __cf_bm, etc.) can establish before deep-linking.
+  if (config.sessionWarmup) {
+    const warmupOrigins = new Set<string>();
+    try { warmupOrigins.add(new URL(ensureProtocol(config.startUrl)).origin); } catch {}
+    if (config.mode === "list" && config.urls?.length) {
+      for (const u of config.urls) {
+        try { warmupOrigins.add(new URL(ensureProtocol(u)).origin); } catch {}
+      }
+    }
+    for (const origin of warmupOrigins) {
+      phase("warmup", { origin });
+      log("info", "session warmup", { origin });
+      const warmupPage = await context.newPage();
+      try {
+        await warmupPage.goto(origin, { waitUntil: "domcontentloaded", timeout: 15000 });
+        await warmupPage.waitForTimeout(2500);
+        log("info", "warmup complete", { origin });
+      } catch (err: any) {
+        log("warn", "warmup navigation failed", { origin, error: String(err?.message ?? err) });
+      } finally {
+        await warmupPage.close().catch(() => {});
+      }
+    }
   }
 
   // Set up og:image download directory
@@ -938,6 +997,48 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   const effectiveConcurrency = headless ? config.concurrency : 1;
   const effectiveDelay = headless ? (config.delay ?? 0) : Math.max(config.delay ?? 0, 1000);
 
+  /**
+   * Crawl a URL with per-host rate limiting + one retry on 429/503 with
+   * Retry-After. 403 is NOT retried — retrying escalates adaptive bot
+   * walls (Akamai / DataDome) and burns IP reputation.
+   */
+  async function crawlWithPolicy(
+    page: Page,
+    url: string,
+  ): Promise<{ result: CrawlResult; discoveredLinks: string[] }> {
+    let host = "";
+    try { host = new URL(url).host; } catch {}
+
+    const doOnce = async () => {
+      if (host) await rateLimiter.acquire(host);
+      try {
+        return await crawlPage(page, url, crawlPageOpts);
+      } finally {
+        if (host) rateLimiter.release(host);
+      }
+    };
+
+    let outcome = await doOnce();
+    const status = outcome.result.status;
+    if (status === 429 || status === 503) {
+      const ra = outcome.result.responseHeaders?.["retry-after"]
+        ?? outcome.result.responseHeaders?.["Retry-After"];
+      const waitMs = Math.min(parseRetryAfter(ra), 60_000);
+      if (waitMs > 0) {
+        log("warn", "backoff: Retry-After observed", { url, status, waitMs });
+        await new Promise((r) => setTimeout(r, waitMs));
+        log("info", "backoff complete, retrying once", { url });
+        outcome = await doOnce();
+      } else {
+        log("warn", "server signaled rate limit but no Retry-After", { url, status });
+      }
+    } else if (status === 403) {
+      // Don't retry — just note the block signal.
+      log("warn", "403 block (not retrying)", { url });
+    }
+    return outcome;
+  }
+
   try {
     let reusePage: Page | null = null;
     if (!headless) {
@@ -982,7 +1083,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         for (const url of allowed) {
           if (effectiveDelay > 0) await new Promise((r) => setTimeout(r, effectiveDelay));
           log("debug", "navigating", { url });
-          const { result, discoveredLinks } = await crawlPage(reusePage, url, crawlPageOpts);
+          const { result, discoveredLinks } = await crawlWithPolicy(reusePage, url);
           if (result.error) {
             recordError();
             log("warn", "page error", { url, error: result.error, status: result.status });
@@ -1014,7 +1115,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
             log("debug", "navigating", { url });
             const page = await context.newPage();
             try {
-              return { url, data: await crawlPage(page, url, crawlPageOpts) };
+              return { url, data: await crawlWithPolicy(page, url) };
             } finally {
               await page.close();
             }

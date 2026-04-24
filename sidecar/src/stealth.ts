@@ -16,6 +16,12 @@ import { createHash } from "node:crypto";
 export type StealthPlatform = "Windows" | "macOS" | "Linux";
 
 export interface StealthPatchConfig {
+  /**
+   * Master toggle. When false, no init script is installed and no
+   * fingerprint-derived HTTP headers are set. Intended for A/B testing
+   * whether our stealth is helping or hurting against a specific site.
+   */
+  enabled: boolean;
   /** Hide navigator.webdriver */
   webdriver: boolean;
   /** Install plausible navigator.plugins + mimeTypes */
@@ -69,6 +75,7 @@ export interface StealthPatchConfig {
 }
 
 export const DEFAULT_STEALTH_PATCHES: StealthPatchConfig = {
+  enabled: true,
   webdriver: true,
   plugins: true,
   languages: true,
@@ -239,6 +246,55 @@ export function generateFingerprint(opts: StealthOpts = {}): Fingerprint {
     colorGamutP3,
     dynamicRangeHigh,
   };
+}
+
+/**
+ * Build HTTP headers consistent with a fingerprint.
+ *
+ * Akamai / Cloudflare / DataDome cross-check the HTTP User-Agent against
+ * the JS-exposed userAgentData. Any mismatch is a hard tell. This must
+ * be called with the same fingerprint used by buildStealthInitScript so
+ * the two layers agree.
+ *
+ * Returns headers intended for Playwright's `extraHTTPHeaders` option.
+ * `sec-fetch-*` headers are intentionally omitted — the browser sets
+ * them correctly based on navigation context and overriding them breaks
+ * in subtle ways.
+ */
+export function buildHeaders(fp: Fingerprint): Record<string, string> {
+  const ua = buildUserAgent(fp);
+  const brands = [
+    { brand: "Not=A?Brand", version: "24" },
+    { brand: "Chromium", version: String(fp.chromeMajor) },
+    { brand: "Google Chrome", version: String(fp.chromeMajor) },
+  ];
+  const secChUa = brands
+    .map((b) => `"${b.brand}";v="${b.version}"`)
+    .join(", ");
+  const chPlatform = `"${fp.uaPlatform}"`;
+
+  return {
+    "User-Agent": ua,
+    "Accept-Language": fp.languages[0] + "," + fp.languages.slice(1).join(",") + ";q=0.9",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Sec-CH-UA": secChUa,
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": chPlatform,
+    "Upgrade-Insecure-Requests": "1",
+  };
+}
+
+/** Build the User-Agent string for a fingerprint. Matches real Chrome format. */
+export function buildUserAgent(fp: Fingerprint): string {
+  const ua = fp.chromeFullVersion;
+  if (fp.platform === "Windows") {
+    return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ua} Safari/537.36`;
+  }
+  if (fp.platform === "macOS") {
+    // Real Chrome on macOS still ships the frozen 10_15_7 Mac OS X string.
+    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ua} Safari/537.36`;
+  }
+  return `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${ua} Safari/537.36`;
 }
 
 export function fingerprintDigest(fp: Fingerprint): string {

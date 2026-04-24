@@ -147,6 +147,9 @@ pub async fn start_crawl(
     scraper_rules: Option<String>,
     capture_vitals: Option<bool>,
     stealth_config: Option<String>,
+    per_host_delay: Option<u32>,
+    per_host_concurrency: Option<u32>,
+    session_warmup: Option<bool>,
 ) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
 
@@ -243,6 +246,20 @@ pub async fn start_crawl(
             args.push("--stealth-config".to_string());
             args.push(sc);
         }
+    }
+
+    if let Some(d) = per_host_delay {
+        args.push("--per-host-delay".to_string());
+        args.push(d.to_string());
+    }
+
+    if let Some(c) = per_host_concurrency {
+        args.push("--per-host-concurrency".to_string());
+        args.push(c.to_string());
+    }
+
+    if let Some(true) = session_warmup {
+        args.push("--session-warmup".to_string());
     }
 
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

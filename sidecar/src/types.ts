@@ -131,4 +131,12 @@ export interface CrawlConfig {
   // Partial patch config for stealth — unset patches take their defaults.
   // Omit stealthConfig entirely to get the full default patch set.
   stealthConfig?: Record<string, boolean>;
+  // Per-host rate limiting (ms between request starts per host, max concurrent per host).
+  // Defaults in crawler: 500ms / 2 concurrent. Set to 0 / 1 respectively to disable.
+  perHostDelay?: number;
+  perHostConcurrency?: number;
+  // Visit each unique origin's root with a brief wait before the main crawl
+  // loop, so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm)
+  // can establish. Non-fatal if any warmup fails.
+  sessionWarmup?: boolean;
 }

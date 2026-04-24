@@ -131,10 +131,15 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             placeholder="Search settings"
             class="search-input"
           />
-          <label class="advanced-toggle">
-            <input v-model="showAdvanced" type="checkbox" />
-            <span>Show advanced</span>
-          </label>
+          <button
+            class="advanced-btn"
+            :class="{ 'advanced-btn--on': showAdvanced }"
+            type="button"
+            @click="showAdvanced = !showAdvanced"
+            :title="showAdvanced ? 'Hide advanced settings' : 'Show advanced settings (stealth, per-host limits, debug)'"
+          >
+            {{ showAdvanced ? '▼' : '▶' }} ADVANCED
+          </button>
           <button class="btn-close" @click="emit('close')" aria-label="Close">&#x2715;</button>
         </div>
       </header>
@@ -277,19 +282,31 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   box-shadow: 0 0 0 2px rgba(86, 156, 214, 0.1);
 }
 
-.advanced-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  color: rgba(255, 255, 255, 0.7);
+.advanced-btn {
+  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
   cursor: pointer;
-  user-select: none;
+  transition: all 0.15s;
+  white-space: nowrap;
 }
-.advanced-toggle input {
-  accent-color: #569cd6;
+.advanced-btn:hover {
+  color: #ffffff;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.advanced-btn--on {
+  color: #569cd6;
+  border-color: rgba(86, 156, 214, 0.5);
+  background: rgba(86, 156, 214, 0.1);
+}
+.advanced-btn--on:hover {
+  color: #7cb8e8;
+  border-color: #569cd6;
 }
 
 .btn-close {

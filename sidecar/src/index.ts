@@ -118,6 +118,12 @@ if (command === "open-browser") {
     }
   }
 
+  const perHostDelayRaw = getFlag("--per-host-delay", "");
+  const perHostDelay = perHostDelayRaw ? parseInt(perHostDelayRaw, 10) : undefined;
+  const perHostConcurrencyRaw = getFlag("--per-host-concurrency", "");
+  const perHostConcurrency = perHostConcurrencyRaw ? parseInt(perHostConcurrencyRaw, 10) : undefined;
+  const sessionWarmup = hasFlag("--session-warmup");
+
   const stealthConfigRaw = getFlag("--stealth-config", "");
   let stealthConfig: Record<string, boolean> | undefined;
   if (stealthConfigRaw) {
@@ -148,6 +154,9 @@ if (command === "open-browser") {
     ...(scraperRules ? { scraperRules } : {}),
     ...(captureVitals ? { captureVitals } : {}),
     ...(stealthConfig ? { stealthConfig } : {}),
+    ...(perHostDelay !== undefined && !Number.isNaN(perHostDelay) ? { perHostDelay } : {}),
+    ...(perHostConcurrency !== undefined && !Number.isNaN(perHostConcurrency) ? { perHostConcurrency } : {}),
+    ...(sessionWarmup ? { sessionWarmup } : {}),
   };
 
   startMetricEmitter(1000);

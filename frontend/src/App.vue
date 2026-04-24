@@ -263,7 +263,7 @@ async function handleMenuAction(menu: string, item: string) {
   }
   if (menu === "Configuration") {
     if (item === "Scraper") scraperOpen.value = true;
-    else configSection.value = "settings";
+    else showSettingsPanel.value = true;
   }
   if (menu === "Mode") {
     config.mode = item === "List" ? "list" : "spider";
@@ -399,6 +399,9 @@ async function handleMenuAction(menu: string, item: string) {
             @click="handleResumeRecrawl"
           >
             &#x21BB; RESUME RECRAWL ({{ config.recrawlQueue.length }})
+          </button>
+          <button class="btn-pill btn-settings" @click="showSettingsPanel = true" title="Cmd/Ctrl+,">
+            &#x2699; SETTINGS
           </button>
           <button class="btn-pill btn-debug" @click="showDebugPanel = true" title="Cmd/Ctrl+Shift+D">
             &#x1F527; DEBUG
@@ -864,6 +867,16 @@ async function handleMenuAction(menu: string, item: string) {
   color: #569cd6;
   border-color: rgba(86,156,214,0.4);
   background: rgba(86,156,214,0.08);
+}
+
+.btn-settings {
+  color: rgba(255,255,255,0.5);
+  border-color: rgba(255,255,255,0.12);
+}
+.btn-settings:hover {
+  color: #ffffff;
+  border-color: rgba(255,255,255,0.3);
+  background: rgba(255,255,255,0.04);
 }
 
 /* ── Main layout ── */

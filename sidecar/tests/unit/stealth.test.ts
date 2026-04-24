@@ -5,6 +5,8 @@ import {
   fingerprintDigest,
   resolvePatches,
   DEFAULT_STEALTH_PATCHES,
+  buildHeaders,
+  buildUserAgent,
 } from "../../src/stealth.js";
 
 describe("generateFingerprint", () => {
@@ -132,5 +134,56 @@ describe("patch gating", () => {
     expect(script).toContain('"matchMedia":false');
     expect(script).toContain('"webdriver":true');
     expect(script).toContain('"userAgentData":true');
+  });
+});
+
+describe("buildHeaders", () => {
+  it("User-Agent matches fingerprint platform and Chrome version", () => {
+    const fp = generateFingerprint({ seed: "ua-test", platform: "Windows" });
+    const ua = buildUserAgent(fp);
+    expect(ua).toContain("Windows NT 10.0; Win64; x64");
+    expect(ua).toContain(`Chrome/${fp.chromeFullVersion}`);
+  });
+
+  it("macOS UA uses frozen 10_15_7 string", () => {
+    const fp = generateFingerprint({ seed: 1, platform: "macOS" });
+    expect(buildUserAgent(fp)).toContain("Mac OS X 10_15_7");
+  });
+
+  it("Linux UA uses X11 Linux x86_64", () => {
+    const fp = generateFingerprint({ seed: 1, platform: "Linux" });
+    expect(buildUserAgent(fp)).toContain("X11; Linux x86_64");
+  });
+
+  it("Sec-CH-UA-Platform matches fingerprint platform", () => {
+    const winFp = generateFingerprint({ seed: 1, platform: "Windows" });
+    expect(buildHeaders(winFp)["Sec-CH-UA-Platform"]).toBe('"Windows"');
+    const macFp = generateFingerprint({ seed: 1, platform: "macOS" });
+    expect(buildHeaders(macFp)["Sec-CH-UA-Platform"]).toBe('"macOS"');
+    const linFp = generateFingerprint({ seed: 1, platform: "Linux" });
+    expect(buildHeaders(linFp)["Sec-CH-UA-Platform"]).toBe('"Linux"');
+  });
+
+  it("Sec-CH-UA brands list includes Chromium and Google Chrome with correct major", () => {
+    const fp = generateFingerprint({ seed: "ch-ua" });
+    const h = buildHeaders(fp);
+    expect(h["Sec-CH-UA"]).toContain(`"Chromium";v="${fp.chromeMajor}"`);
+    expect(h["Sec-CH-UA"]).toContain(`"Google Chrome";v="${fp.chromeMajor}"`);
+    expect(h["Sec-CH-UA-Mobile"]).toBe("?0");
+  });
+
+  it("Accept-Language uses first fingerprint language", () => {
+    const fp = generateFingerprint({ seed: "lang" });
+    const h = buildHeaders(fp);
+    expect(h["Accept-Language"]).toContain(fp.languages[0]);
+  });
+
+  it("headers and init script are identity-consistent (both built from same fp)", () => {
+    const fp = generateFingerprint({ seed: "identity" });
+    const headers = buildHeaders(fp);
+    const script = buildStealthInitScript({ seed: "identity" });
+    // UA-CH platform in the script's baked FP must match the Sec-CH-UA-Platform header.
+    expect(script).toContain(`"uaPlatform":"${fp.uaPlatform}"`);
+    expect(headers["Sec-CH-UA-Platform"]).toBe(`"${fp.uaPlatform}"`);
   });
 });

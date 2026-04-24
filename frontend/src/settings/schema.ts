@@ -98,6 +98,28 @@ export const SCHEMA: SettingsSchema = {
         label: "Close page after extraction",
         help: "Don't wait for full load unless Core Web Vitals is on",
       },
+      perHostDelay: {
+        type: "number",
+        default: 500,
+        min: 0,
+        unit: "ms",
+        label: "Per-host delay",
+        help: "Minimum milliseconds between request starts to the same host. Real users don't hammer one domain; adaptive bot walls (Akamai, DataDome, PerimeterX) watch per-host RPS. 0 disables.",
+      },
+      perHostConcurrency: {
+        type: "number",
+        default: 2,
+        min: 1,
+        max: 10,
+        label: "Per-host concurrency",
+        help: "Maximum concurrent requests to the same host. Typical real-user concurrency is 2–4.",
+      },
+      sessionWarmup: {
+        type: "boolean",
+        default: false,
+        label: "Warm up sessions before deep-linking",
+        help: "Visit each origin's homepage for ~2.5s before deep-linking so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm) establish. Adds a few seconds per crawl, helps a lot against adaptive bot walls.",
+      },
     },
   },
   extraction: {
@@ -152,6 +174,13 @@ export const SCHEMA: SettingsSchema = {
   stealth: {
     label: "Stealth",
     items: {
+      enabled: {
+        type: "boolean",
+        default: true,
+        advanced: true,
+        label: "Enable stealth (master)",
+        help: "Master toggle. When off, no init script is installed and no fingerprint-derived HTTP headers are sent. Flip this to A/B test whether our stealth is helping or hurting against a specific site.",
+      },
       webdriver: {
         type: "boolean",
         default: true,

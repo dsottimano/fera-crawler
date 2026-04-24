@@ -116,10 +116,11 @@ export function useCrawl() {
       cleanup();
     });
 
-    // Active profile's stealth toggles. settings.value falls back to schema
-    // defaults (all on) when no profile has been loaded yet.
+    // Active profile settings. settings.value falls back to schema defaults
+    // (stealth on, perHost 500/2, warmup off) when no profile has loaded yet.
     const { settings } = useSettings();
     const stealthConfig = JSON.stringify(settings.value.stealth);
+    const perf = settings.value.performance;
 
     try {
       await invoke("start_crawl", {
@@ -140,6 +141,9 @@ export function useCrawl() {
           ? JSON.stringify(config.scraperRules)
           : null,
         stealthConfig,
+        perHostDelay: perf.perHostDelay,
+        perHostConcurrency: perf.perHostConcurrency,
+        sessionWarmup: perf.sessionWarmup || null,
       });
     } catch (e) {
       console.error("Crawl failed:", e);

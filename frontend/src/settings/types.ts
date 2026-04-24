@@ -3,6 +3,7 @@ import type { ScraperRule } from "../types/crawl";
 export type { ScraperRule };
 
 export interface StealthPatches {
+  enabled: boolean;
   webdriver: boolean;
   plugins: boolean;
   languages: boolean;
@@ -36,6 +37,9 @@ export interface SettingsValues {
   performance: {
     blockResources: boolean;
     closeOnExtract: boolean;
+    perHostDelay: number;
+    perHostConcurrency: number;
+    sessionWarmup: boolean;
   };
   extraction: {
     captureVitals: boolean;
