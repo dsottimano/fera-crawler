@@ -98,6 +98,16 @@ pub fn run() {
             );",
             kind: MigrationKind::Up,
         },
+        // Without this, every grid load full-scans crawl_results, and every
+        // recrawl-dedup DELETE does the same. Composite covers both
+        // `WHERE session_id = ?` and `WHERE session_id = ? AND url = ?`.
+        Migration {
+            version: 7,
+            description: "index crawl_results on (session_id, url)",
+            sql: "CREATE INDEX IF NOT EXISTS idx_crawl_results_session_url
+                  ON crawl_results(session_id, url);",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -124,6 +134,9 @@ pub fn run() {
             commands::kill_sidecar,
             commands::wipe_browser_profile,
             commands::probe_crawl_config,
+            commands::resume_host,
+            commands::stop_host,
+            commands::run_probe_matrix,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

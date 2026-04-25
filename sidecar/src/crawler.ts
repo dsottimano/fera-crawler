@@ -5,7 +5,8 @@ import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chromium, type BrowserContext, type Page } from "patchright";
 import sharp from "sharp";
-import { writeLine } from "./pipeline.js";
+import { writeLine, writeAnyEvent } from "./pipeline.js";
+import { BlockDetector, hostOf } from "./blockDetector.js";
 import {
   log,
   phase,
@@ -795,6 +796,15 @@ function makeBlockedResult(url: string, inSitemap: boolean): CrawlResult {
   };
 }
 
+// Park-by-detector result stub — surface parked URLs so user can select +
+// recrawl them with a better config instead of losing them on shutdown.
+function makeParkedResult(url: string, host: string): CrawlResult {
+  const r = makeBlockedResult(url, false);
+  r.blockedByRobots = false;
+  r.error = `host_blocked_by_detector:${host}`;
+  return r;
+}
+
 // ── Unlimited crawl helper ──
 function withinLimit(processed: number, maxRequests: number): boolean {
   return maxRequests === 0 || processed < maxRequests;
@@ -996,9 +1006,97 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   };
 
   const visited = new Set<string>();
+  // Resume support: pre-seed visited so already-crawled URLs are skipped.
+  if (config.excludeUrls?.length) {
+    for (const u of config.excludeUrls) visited.add(u);
+    // Spider mode still crawls the start URL — without it, link discovery
+    // can't bootstrap a resumed crawl.
+    if (config.mode === "spider" && config.startUrl) {
+      visited.delete(ensureProtocol(config.startUrl));
+    }
+    log("info", "exclude list seeded", { count: config.excludeUrls.length });
+  }
   const queue: string[] = [];
   const sitemapUrls = new Set<string>();
   let processed = 0;
+
+  // URLs parked while their host is gated. Resume-host moves them back to queue.
+  const parkedByHost = new Map<string, string[]>();
+
+  // Auto-cooldown callback: when the detector's timer fires, requeue the
+  // host's parked URLs and tell the frontend so the banner can clear.
+  const detector = new BlockDetector({
+    onAutoClear: (host) => {
+      const requeued = unparkHost(host);
+      log("info", "host auto-resumed after cooldown", { host, requeued });
+      writeAnyEvent({
+        type: "block-cooldown-cleared",
+        ts: Date.now(),
+        host,
+        requeued,
+      });
+    },
+  });
+
+  function park(url: string): void {
+    const h = hostOf(url);
+    let bucket = parkedByHost.get(h);
+    if (!bucket) {
+      bucket = [];
+      parkedByHost.set(h, bucket);
+    }
+    bucket.push(url);
+    // Emit a placeholder result so the parked URL is visible in the grid
+    // (and persisted to the DB session). Without this, parked URLs vanish
+    // on stop because the sidecar's in-memory parkedByHost map dies with it.
+    writeLine(makeParkedResult(url, h));
+  }
+
+  function unparkHost(host: string): number {
+    const bucket = parkedByHost.get(host);
+    if (!bucket || bucket.length === 0) return 0;
+    const n = bucket.length;
+    for (const u of bucket) queue.push(u);
+    parkedByHost.delete(host);
+    setQueueSize(queue.length);
+    return n;
+  }
+
+  function dropHost(host: string): number {
+    const bucket = parkedByHost.get(host);
+    const n = bucket ? bucket.length : 0;
+    parkedByHost.delete(host);
+    return n;
+  }
+
+  // Stdin command listener: {"cmd":"resume-host","host":"..."} / {"cmd":"stop-host","host":"..."}
+  let stdinBuf = "";
+  const onStdinData = (chunk: Buffer): void => {
+    stdinBuf += chunk.toString("utf8");
+    let idx: number;
+    while ((idx = stdinBuf.indexOf("\n")) !== -1) {
+      const line = stdinBuf.slice(0, idx).trim();
+      stdinBuf = stdinBuf.slice(idx + 1);
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line);
+        if (!msg || typeof msg !== "object") continue;
+        if (msg.cmd === "resume-host" && typeof msg.host === "string") {
+          detector.clearGate(msg.host);
+          const moved = unparkHost(msg.host);
+          log("info", "host resumed", { host: msg.host, requeued: moved });
+        } else if (msg.cmd === "stop-host" && typeof msg.host === "string") {
+          detector.clearGate(msg.host);
+          const dropped = dropHost(msg.host);
+          log("info", "host stopped", { host: msg.host, dropped });
+        }
+      } catch (err) {
+        log("warn", "invalid stdin command", { line, error: String((err as Error)?.message ?? err) });
+      }
+    }
+  };
+  process.stdin.on("data", onStdinData);
+  process.stdin.resume();
 
   // Robots.txt cache (only when respecting robots — null otherwise for zero overhead)
   const robotsCache = config.respectRobots ? new RobotsCache(config.userAgent) : null;
@@ -1090,6 +1188,17 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     return outcome;
   }
 
+  function recordResult(result: CrawlResult): void {
+    writeLine(result);
+    const h = hostOf(result.url);
+    if (!h) return;
+    const trip = detector.record({ url: result.url, status: result.status, title: result.title }, h);
+    if (trip) {
+      writeAnyEvent(trip);
+      log("warn", "block-detected: host paused", { host: trip.host, stats: trip.stats, reasons: trip.reasons });
+    }
+  }
+
   try {
     let reusePage: Page | null = null;
     if (!headless) {
@@ -1105,11 +1214,16 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         ? effectiveConcurrency
         : Math.min(effectiveConcurrency, config.maxRequests - processed);
       const batch = queue.splice(0, batchSize);
-      const tasks = batch.filter((url) => {
-        if (visited.has(url)) return false;
+      const tasks: string[] = [];
+      for (const url of batch) {
+        if (visited.has(url)) continue;
+        if (detector.isGated(hostOf(url))) {
+          park(url);
+          continue;
+        }
         visited.add(url);
-        return true;
-      });
+        tasks.push(url);
+      }
 
       if (tasks.length === 0) continue;
 
@@ -1142,7 +1256,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
             log("debug", "page complete", { url, status: result.status, ms: result.responseTime, links: discoveredLinks.length });
           }
           if (sitemapUrls.has(url)) result.inSitemap = true;
-          writeLine(result);
+          recordResult(result);
           processed++;
           recordCompletion();
           if (config.mode === "spider" && !(config.respectRobots && result.isNofollow)) {
@@ -1183,7 +1297,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
             log("debug", "page complete", { url, status: result.status, ms: result.responseTime, links: discoveredLinks.length });
           }
           if (sitemapUrls.has(url)) result.inSitemap = true;
-          writeLine(result);
+          recordResult(result);
           processed++;
           recordCompletion();
           if (config.mode === "spider" && !(config.respectRobots && result.isNofollow)) {
@@ -1201,6 +1315,8 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     phase("shutdown", { processed });
     log("info", "crawl finished", { processed });
     await context.close().catch(() => {});
+    process.stdin.off("data", onStdinData);
+    process.stdin.pause();
   }
 }
 

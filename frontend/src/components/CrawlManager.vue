@@ -88,6 +88,50 @@ function formatUrl(url: string): string {
     return url;
   }
 }
+
+interface SessionMeta {
+  mode: "list" | "spider";
+  listTotal: number | null;
+  status: "in progress" | "complete" | "stopped";
+  statusColor: string;
+  progressLabel: string;
+}
+
+// Derive display metadata from a session row + its config_json. Done at
+// render time (not during the SQL query) so we can change the display
+// without touching the schema.
+function sessionMeta(s: CrawlSession): SessionMeta {
+  let listTotal: number | null = null;
+  if (s.config_json && s.config_json !== "{}") {
+    try {
+      const cfg = JSON.parse(s.config_json);
+      if (Array.isArray(cfg?.urls) && cfg.urls.length > 0) {
+        listTotal = cfg.urls.length;
+      }
+    } catch { /* ignore */ }
+  }
+  const mode: "list" | "spider" = listTotal !== null ? "list" : "spider";
+  const crawled = s.result_count ?? 0;
+
+  let status: SessionMeta["status"];
+  let statusColor: string;
+  if (s.completed_at == null) {
+    status = "in progress";
+    statusColor = "#dcdcaa";
+  } else if (mode === "list" && listTotal !== null && crawled < listTotal) {
+    status = "stopped";
+    statusColor = "#ce9178";
+  } else {
+    status = "complete";
+    statusColor = "#4ec9b0";
+  }
+
+  const progressLabel = mode === "list" && listTotal !== null
+    ? `${crawled.toLocaleString()} / ${listTotal.toLocaleString()} URLs`
+    : `${crawled.toLocaleString()} URLs`;
+
+  return { mode, listTotal, status, statusColor, progressLabel };
+}
 </script>
 
 <template>
@@ -110,8 +154,10 @@ function formatUrl(url: string): string {
             <div class="session-info" @click="infoSession = infoSession?.id === s.id ? null : s">
               <span class="session-url" :title="s.start_url">{{ formatUrl(s.start_url) }}</span>
               <span class="session-meta">
-                {{ formatDate(s.started_at) }}
-                <span class="session-count">{{ s.result_count ?? 0 }} URLs</span>
+                <span>{{ formatDate(s.started_at) }}</span>
+                <span class="session-mode" :title="sessionMeta(s).mode === 'list' ? 'List mode — fixed URL list' : 'Spider mode — discovers links'">{{ sessionMeta(s).mode }}</span>
+                <span class="session-count">{{ sessionMeta(s).progressLabel }}</span>
+                <span class="session-status" :style="{ color: sessionMeta(s).statusColor }">{{ sessionMeta(s).status }}</span>
               </span>
             </div>
             <div class="session-actions">
@@ -277,11 +323,25 @@ function formatUrl(url: string): string {
   display: flex;
   gap: 8px;
   letter-spacing: 0.5px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .session-count {
   color: #569cd6;
   font-weight: 600;
+}
+
+.session-mode {
+  text-transform: uppercase;
+  font-weight: 600;
+  color: rgba(255,255,255,0.5);
+}
+
+.session-status {
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 1px;
 }
 
 .session-actions {

@@ -5,7 +5,7 @@ import type { CrawlResult } from "../types/crawl";
 import { useConfig } from "../composables/useConfig";
 import "tabulator-tables/dist/css/tabulator_midnight.min.css";
 
-const props = defineProps<{ results: CrawlResult[]; activeTab: string; filterType?: string; selectAll?: number; recrawlQueueAll?: string[] }>();
+const props = defineProps<{ results: CrawlResult[]; activeTab: string; filterType?: string; selectAll?: number }>();
 const emit = defineEmits<{ rowSelect: [result: CrawlResult | null]; recrawl: [urls: string[]]; filteredCount: [count: number] }>();
 
 const { config } = useConfig();
@@ -58,7 +58,28 @@ function statusTextFormatter(cell: any) {
   if (s >= 500) return "Server Error";
   if (s >= 400) return "Client Error";
   if (s >= 300) return "Redirect";
-  if (row.error) return `<span title="${row.error.replace(/"/g, '&quot;')}">Error</span>`;
+
+  // status === 0 — request never got an HTTP response (or was parked by the
+  // block detector). Distinguish the two so the user can tell at a glance.
+  const err = row.error ?? "";
+  const escape = (v: string) => v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+
+  if (err.startsWith("host_blocked_by_detector")) {
+    const host = err.split(":")[1] ?? "";
+    return `<span style="color:#dcdcaa" title="Parked by block detector — host '${escape(host)}' tripped the 10-of-15 block threshold. Use the banner Probe button to find a working config.">Parked (host paused)</span>`;
+  }
+  if (err) {
+    // Surface a compact reason inline; full text in the tooltip.
+    let short = err;
+    if (/timeout/i.test(err)) short = "Timeout";
+    else if (/ERR_CONNECTION_RESET|ECONNRESET/i.test(err)) short = "Connection reset";
+    else if (/ERR_NAME_NOT_RESOLVED|ENOTFOUND/i.test(err)) short = "DNS failed";
+    else if (/ERR_CERT|SSL|TLS/i.test(err)) short = "TLS error";
+    else if (/ERR_HTTP2/i.test(err)) short = "HTTP/2 error";
+    else if (/ERR_ABORTED|aborted/i.test(err)) short = "Aborted";
+    else if (err.length > 40) short = err.slice(0, 38) + "…";
+    return `<span style="color:#f44747" title="${escape(err)}">${escape(short)}</span>`;
+  }
   return "";
 }
 
@@ -234,9 +255,10 @@ function filterForTab(tab: string): ((r: CrawlResult) => boolean) {
     case "Issues":          return (r) => !r.title || !r.h1 || !r.metaDescription || r.status >= 400 || r.isNoindex;
     case "Response Times":  return () => true;
     case "Recrawl Queue": {
-      const allSet = new Set(props.recrawlQueueAll ?? []);
+      // Pending only — matches the tab badge count. Already-recrawled URLs
+      // leave the queue (and this tab); they're still visible in other tabs.
       const pendingSet = new Set(config.recrawlQueue);
-      return (r) => allSet.has(r.url) || pendingSet.has(r.url);
+      return (r) => pendingSet.has(r.url);
     }
     default:                return () => true;
   }
@@ -327,7 +349,7 @@ onUnmounted(() => {
   }
 });
 
-watch(() => [props.results, props.results.length], () => {
+watch(() => props.results.length, () => {
   if (!table) return;
   const scrollLeft = table?.element?.querySelector('.tabulator-tableholder')?.scrollLeft ?? 0;
   table.setData(getFilteredData(props.activeTab));
@@ -335,6 +357,27 @@ watch(() => [props.results, props.results.length], () => {
     const holder = table?.element?.querySelector('.tabulator-tableholder');
     if (holder) holder.scrollLeft = scrollLeft;
   }, 0);
+});
+
+// Recrawl tab filter snapshots config.recrawlQueue per render. When the
+// listener drains the queue (splice), neither props.results.length nor
+// props.activeTab change — without an explicit watch on the queue, the
+// Recrawl Queue tab keeps showing rows for URLs that were already drained.
+// Also rebuilds the queueStatus column mutator for the same reason.
+watch(() => config.recrawlQueue.length, () => {
+  if (!table) return;
+  if (props.activeTab === "Recrawl Queue") {
+    const scrollLeft = table?.element?.querySelector('.tabulator-tableholder')?.scrollLeft ?? 0;
+    table.setData(getFilteredData(props.activeTab));
+    setTimeout(() => {
+      const holder = table?.element?.querySelector('.tabulator-tableholder');
+      if (holder) holder.scrollLeft = scrollLeft;
+    }, 0);
+  } else {
+    // Other tabs that show the queueStatus column also need refresh, but
+    // it's just a column mutator update — no scroll preservation needed.
+    table.redraw(true);
+  }
 });
 
 watch(() => props.activeTab, (tab) => {

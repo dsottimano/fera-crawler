@@ -42,3 +42,9 @@ export function writeEvent(e: SidecarEvent): void {
   // Events carry a `type` field so Rust can discriminate them from crawl results.
   process.stdout.write(JSON.stringify(e) + "\n");
 }
+
+// Escape hatch for typed events defined elsewhere (block-detected, probe-result).
+// Keeps the strict SidecarEvent union pure for core events.
+export function writeAnyEvent(e: { type: string } & Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify(e) + "\n");
+}

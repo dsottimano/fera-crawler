@@ -123,6 +123,12 @@ export const SCHEMA: SettingsSchema = {
         label: "Warm up sessions before deep-linking",
         help: "Visit each origin's homepage for ~2.5s before deep-linking so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm) establish. Adds a few seconds per crawl, helps a lot against adaptive bot walls.",
       },
+      autoProbeOnBlock: {
+        type: "boolean",
+        default: true,
+        label: "Auto-probe + apply on first block",
+        help: "When a host trips the block detector for the first time, silently run the 6-row probe matrix in the background. If a winning config is found, apply it and resume the crawl automatically. Skipped if a manual probe is running. Each host is auto-probed at most once per crawl.",
+      },
     },
   },
   extraction: {

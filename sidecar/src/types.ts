@@ -139,4 +139,8 @@ export interface CrawlConfig {
   // loop, so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm)
   // can establish. Non-fatal if any warmup fails.
   sessionWarmup?: boolean;
+  // URLs to skip — pre-seed the visited set so resume after stop doesn't
+  // re-walk pages the frontend already has. Spider-mode start URL is never
+  // skipped (we still need its links for discovery).
+  excludeUrls?: string[];
 }

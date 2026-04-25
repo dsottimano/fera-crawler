@@ -150,17 +150,21 @@ pub async fn start_crawl(
     per_host_delay: Option<u32>,
     per_host_concurrency: Option<u32>,
     session_warmup: Option<bool>,
+    exclude_urls: Option<Vec<String>>,
 ) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
 
     // Kill any existing crawl and bump generation in the same critical section
     // so the old task can never observe the pre-bumped value after being killed.
+    // Bump happens BEFORE the kill so any late stdout from the dying child sees
+    // the advanced generation and gets filtered by route_sidecar_stdout.
     let gen = {
         let mut guard = lock_or_recover(&state.child);
+        let new_gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(old_child) = guard.take() {
             let _ = old_child.kill();
         }
-        state.generation.fetch_add(1, Ordering::SeqCst) + 1
+        new_gen
     };
 
     let shell = app.shell();
@@ -262,6 +266,16 @@ pub async fn start_crawl(
         args.push("--session-warmup".to_string());
     }
 
+    if let Some(ex) = exclude_urls {
+        if !ex.is_empty() {
+            let tmp = std::env::temp_dir().join(format!("fera-exclude-{}-{}.txt", std::process::id(), gen));
+            std::fs::write(&tmp, ex.join("\n")).map_err(|e| format!("Failed to write exclude file: {e}"))?;
+            args.push("--exclude-urls-file".to_string());
+            args.push(tmp.to_string_lossy().to_string());
+            temp_files.push(tmp);
+        }
+    }
+
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     let mut cmd = shell
@@ -289,6 +303,9 @@ pub async fn start_crawl(
     state.pid.store(sidecar_pid, Ordering::SeqCst);
     *lock_or_recover(&state.child) = Some(child);
 
+    // Tell the UI a fresh crawl is starting so banners from prior runs clear.
+    let _ = app.emit("crawl-started", gen);
+
     // Announce spawn to the debug channel so the UI has immediate signal.
     let _ = app.emit(
         "sidecar-log",
@@ -309,7 +326,7 @@ pub async fn start_crawl(
             match event {
                 CommandEvent::Stdout(line) => {
                     let line_str = String::from_utf8_lossy(&line);
-                    route_sidecar_stdout(&app_handle, &line_str);
+                    route_sidecar_stdout(&app_handle, &line_str, Some(gen));
                 }
                 CommandEvent::Stderr(line) => {
                     let line_str = String::from_utf8_lossy(&line);
@@ -367,7 +384,12 @@ fn now_ms() -> u64 {
 /// Route a single stdout NDJSON line from the sidecar. Discriminates by the
 /// `type` field: log/metric/phase go to their own events; anything without
 /// `type` is treated as a legacy CrawlResult and routed to crawl-result.
-fn route_sidecar_stdout(app: &AppHandle, line: &str) {
+///
+/// If `from_gen` is provided, `crawl-result` and `block-detected` events are
+/// dropped when their source generation no longer matches the active crawl —
+/// prevents late-stdout from a killed sidecar contaminating the next crawl.
+/// Probe-matrix subprocesses pass None (they're not generation-scoped).
+fn route_sidecar_stdout(app: &AppHandle, line: &str, from_gen: Option<u64>) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
@@ -378,8 +400,23 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str) {
                 Some("log") => "sidecar-log",
                 Some("metric") => "sidecar-metric",
                 Some("phase") => "sidecar-phase",
+                Some("block-detected") => "block-detected",
+                Some("block-cooldown-cleared") => "block-cooldown-cleared",
+                Some("probe-result") => "probe-result",
+                Some("probe-matrix-start") => "probe-matrix-start",
+                Some("probe-matrix-complete") => "probe-matrix-complete",
                 _ => "crawl-result",
             };
+            // Gate stale crawl data from replaced sidecars.
+            if matches!(ev_name, "crawl-result" | "block-detected" | "block-cooldown-cleared") {
+                if let Some(gen) = from_gen {
+                    if let Some(state) = app.try_state::<CrawlChild>() {
+                        if state.generation.load(Ordering::SeqCst) != gen {
+                            return;
+                        }
+                    }
+                }
+            }
             let _ = app.emit(ev_name, val);
         }
         Err(_) => {
@@ -399,6 +436,9 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str) {
 #[tauri::command]
 pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
+    // Bump generation so any stdout still in-flight from the dying child
+    // is rejected by route_sidecar_stdout's generation check.
+    state.generation.fetch_add(1, Ordering::SeqCst);
     if let Some(child) = lock_or_recover(&state.child).take() {
         child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
     }
@@ -406,6 +446,7 @@ pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
     // Also kill any Chrome processes using our profile dir
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
+    let _ = app.emit("crawl-stopped", ());
     Ok(())
 }
 
@@ -591,12 +632,14 @@ pub async fn wipe_browser_profile(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub async fn kill_sidecar(app: AppHandle) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
+    state.generation.fetch_add(1, Ordering::SeqCst);
     if let Some(child) = lock_or_recover(&state.child).take() {
         child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
     }
     state.pid.store(0, Ordering::SeqCst);
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
+    let _ = app.emit("crawl-stopped", ());
     let _ = app.emit(
         "sidecar-log",
         serde_json::json!({
@@ -874,4 +917,91 @@ pub async fn probe_crawl_config(
         "probe-config produced no result (stderr: {})",
         stderr_buf.trim()
     ))
+}
+
+fn write_crawl_stdin(app: &AppHandle, cmd_json: &str) -> Result<(), String> {
+    let state: State<CrawlChild> = app.state();
+    let mut guard = lock_or_recover(&state.child);
+    let child = guard.as_mut().ok_or("no active crawl")?;
+    let mut line = cmd_json.as_bytes().to_vec();
+    line.push(b'\n');
+    child
+        .write(&line)
+        .map_err(|e| format!("stdin write failed: {e}"))
+}
+
+#[tauri::command]
+pub async fn resume_host(app: AppHandle, host: String) -> Result<(), String> {
+    let json = serde_json::json!({ "cmd": "resume-host", "host": host });
+    write_crawl_stdin(&app, &json.to_string())
+}
+
+#[tauri::command]
+pub async fn stop_host(app: AppHandle, host: String) -> Result<(), String> {
+    let json = serde_json::json!({ "cmd": "stop-host", "host": host });
+    write_crawl_stdin(&app, &json.to_string())
+}
+
+/// Spawns a fresh sidecar in probe-matrix mode for the given sample URL.
+/// Streams probe-result events back through the normal route_sidecar_stdout path
+/// (same `block-detected`/`probe-result` routing). Non-blocking — returns once
+/// the probe child is spawned.
+#[tauri::command]
+pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), String> {
+    let shell = app.shell();
+    // Use an isolated profile dir so the probe doesn't collide with the
+    // main crawl's Playwright process on the shared user-data-dir (Chrome
+    // won't allow two concurrent processes on the same profile).
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let probe_profile = data_dir
+        .join("browser-profile-probe")
+        .to_string_lossy()
+        .to_string();
+
+    let args = vec![
+        "probe-matrix".to_string(),
+        sample_url,
+        "--browser-profile".to_string(),
+        probe_profile,
+    ];
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let mut cmd = shell
+        .sidecar("fera-crawler")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args(&args_refs);
+
+    if let Some(res_dir) = resource_dir(&app) {
+        cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
+    }
+
+    let (mut rx, child) = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn probe-matrix: {e}"))?;
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_shell::process::CommandEvent;
+        // Keep child alive until the event loop drains (mirrors dump_profile).
+        let _child = child;
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) => {
+                    let line_str = String::from_utf8_lossy(&line);
+                    route_sidecar_stdout(&app_handle, &line_str, None);
+                }
+                CommandEvent::Stderr(line) => {
+                    let line_str = String::from_utf8_lossy(&line);
+                    eprintln!("[probe-matrix stderr] {}", line_str.trim_end());
+                }
+                CommandEvent::Terminated(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    Ok(())
 }

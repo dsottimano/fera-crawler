@@ -1,12 +1,33 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed, watch } from "vue";
+import type { CrawlResult } from "../types/crawl";
 
-const props = defineProps<{ totalResults: number; filteredCount: number }>();
-const emit = defineEmits<{ search: [query: string]; export: []; filterType: [type: string] }>();
+const props = defineProps<{
+  totalResults: number;
+  filteredCount: number;
+  activeTab?: string;
+  results?: CrawlResult[];
+}>();
+const emit = defineEmits<{ search: [query: string]; export: []; filterType: [type: string]; selectAll: [] }>();
 
 const searchQuery = ref("");
 const filterType = ref("All");
-const filterOptions = ["All", "HTML", "JavaScript", "CSS", "Images", "PDF", "Other"];
+
+const defaultOptions = ["All", "HTML", "JavaScript", "CSS", "Images", "PDF", "Other"];
+
+const filterOptions = computed(() => {
+  if (props.activeTab === "Response Codes" && props.results?.length) {
+    const codes = [...new Set(props.results.map(r => r.status))].sort((a, b) => a - b);
+    return ["All", ...codes.map(String)];
+  }
+  return defaultOptions;
+});
+
+// Reset filter when tab changes
+watch(() => props.activeTab, () => {
+  filterType.value = "All";
+  emit("filterType", "All");
+});
 
 function onSearch() { emit("search", searchQuery.value); }
 function onFilterChange() { emit("filterType", filterType.value); }
@@ -19,6 +40,7 @@ function onFilterChange() { emit("filterType", filterType.value); }
         <option v-for="opt in filterOptions" :key="opt" :value="opt">{{ opt }}</option>
       </select>
       <button class="toolbar-btn" @click="emit('export')">EXPORT</button>
+      <button class="toolbar-btn" @click="emit('selectAll')">SELECT ALL VISIBLE</button>
     </div>
     <div class="filter-right">
       <div class="search-wrap">
@@ -36,14 +58,14 @@ function onFilterChange() { emit("filterType", filterType.value); }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 10px;
+  padding: 4px 12px;
   background: rgba(255,255,255,0.02);
   border-bottom: 1px solid rgba(255,255,255,0.06);
   flex-shrink: 0;
 }
-.filter-left { display: flex; align-items: center; gap: 6px; }
+.filter-left { display: flex; align-items: center; gap: 8px; }
 .filter-select {
-  padding: 4px 26px 4px 10px;
+  padding: 4px 28px 4px 12px;
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 14px;
   background: rgba(255,255,255,0.04) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='rgba(255,255,255,0.4)'/%3E%3C/svg%3E") no-repeat right 8px center;

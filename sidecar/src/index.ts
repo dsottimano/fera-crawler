@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { runCrawler, openBrowser, dumpProfile } from "./crawler.js";
 import { openInspector } from "./inspector.js";
 import { probeConfig } from "./probe.js";
+import { runProbeMatrix } from "./probeMatrix.js";
 import type { CrawlConfig } from "./types.js";
 import { startMetricEmitter, stopMetricEmitter, log } from "./observability.js";
 
@@ -73,6 +74,19 @@ if (command === "open-browser") {
       console.error("Probe error:", err);
       process.exit(1);
     });
+} else if (command === "probe-matrix") {
+  const sampleUrl = args[1];
+  if (!sampleUrl) {
+    console.error("Usage: fera-crawler probe-matrix <sampleUrl> [--browser-profile PATH]");
+    process.exit(1);
+  }
+  const browserProfile = getFlag("--browser-profile", "");
+  runProbeMatrix(sampleUrl, browserProfile || undefined)
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error("Probe matrix error:", err);
+      process.exit(1);
+    });
 } else if (command === "crawl") {
   if (!args[1]) {
     console.error(
@@ -140,6 +154,13 @@ if (command === "open-browser") {
   const perHostConcurrency = perHostConcurrencyRaw ? parseInt(perHostConcurrencyRaw, 10) : undefined;
   const sessionWarmup = hasFlag("--session-warmup");
 
+  const excludeUrlsFile = getFlag("--exclude-urls-file", "");
+  let excludeUrls: string[] | undefined;
+  if (excludeUrlsFile) {
+    const content = fs.readFileSync(excludeUrlsFile, "utf8");
+    excludeUrls = content.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("http"));
+  }
+
   const stealthConfigRaw = getFlag("--stealth-config", "");
   let stealthConfig: Record<string, boolean> | undefined;
   if (stealthConfigRaw) {
@@ -173,6 +194,7 @@ if (command === "open-browser") {
     ...(perHostDelay !== undefined && !Number.isNaN(perHostDelay) ? { perHostDelay } : {}),
     ...(perHostConcurrency !== undefined && !Number.isNaN(perHostConcurrency) ? { perHostConcurrency } : {}),
     ...(sessionWarmup ? { sessionWarmup } : {}),
+    ...(excludeUrls?.length ? { excludeUrls } : {}),
   };
 
   startMetricEmitter(1000);

@@ -5,8 +5,7 @@ const emit = defineEmits<{ select: [tab: string] }>();
 const tabs = [
   "Internal", "External", "Security", "Response Codes", "URL",
   "Page Titles", "Meta Description", "H1", "H2", "Content",
-  "Images", "Canonicals", "Directives", "JavaScript", "Links",
-  "Structured Data", "Overview", "Issues", "Site Structure", "Response Times",
+  "Images", "Canonicals", "Directives", "Response Times",
   "Recrawl Queue",
 ];
 </script>
@@ -60,7 +59,7 @@ const tabs = [
 }
 .queue-count {
   margin-left: 4px;
-  padding: 1px 6px;
+  padding: 0 8px;
   border-radius: 14px;
   font-size: 8px;
   font-weight: 700;

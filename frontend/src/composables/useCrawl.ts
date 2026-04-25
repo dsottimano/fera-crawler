@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useDatabase } from "./useDatabase";
 import { useConfig } from "./useConfig";
 import { useSettings } from "./useSettings";
+import { useDebug } from "./useDebug";
 import type { CrawlResult, CrawlConfig } from "../types/crawl";
 
 const results = ref<CrawlResult[]>([]);
@@ -30,6 +31,7 @@ export function useCrawl() {
     loadSessionResults,
     loadSessionConfig,
     updateSessionConfig,
+    getSessionStatus,
   } = useDatabase();
 
   async function startCrawl(
@@ -59,34 +61,69 @@ export function useCrawl() {
     cleanup();
 
     // On resume, keep existing results and build a set of already-visited URLs
-    // to deduplicate incoming results (sidecar restarts from scratch).
+    // to deduplicate incoming results AND skip them in the sidecar (so it
+    // doesn't waste time re-fetching). Recrawl targets and the explicit list
+    // (Exact URL scope, list mode) are exempt — those URLs need fresh data.
     const visitedUrls = new Set<string>();
+    const explicitUrls = new Set(opts.urls ?? []);
     if (resume) {
       for (const r of results.value) {
-        // Don't mark recrawl targets as visited — we want fresh results
-        if (!replaceUrls?.has(r.url)) {
-          visitedUrls.add(r.url);
-        }
+        if (replaceUrls?.has(r.url)) continue;
+        if (explicitUrls.has(r.url)) continue;
+        // Parked stubs aren't real crawls — let the sidecar try them again.
+        if (r.error?.startsWith("host_blocked_by_detector")) continue;
+        visitedUrls.add(r.url);
       }
     } else {
       results.value = [];
+      // Fresh crawl — recrawl queue from a prior crawl no longer applies.
+      // Without this, the badge shows a stale count and the Recrawl Queue
+      // tab is filled with URLs that aren't in this session's results.
+      if (config.recrawlQueue.length > 0) {
+        config.recrawlQueue = [];
+      }
     }
     crawling.value = true;
     stopped.value = false;
 
-    // Create a DB session (or reuse current for resume)
+    // Create a DB session (or reuse current for resume).
+    //
+    // Guard: if resume:true was requested AND there are results in memory but
+    // currentSessionId is null, that's a data-fragmentation footgun — those
+    // results would silently land in a fresh session, leaving the original
+    // orphaned. Refuse instead. Caller should either Clear or rehydrate the
+    // session via Crawl Manager → Open before resuming.
     let sessionId: number;
     if (resume && currentSessionId.value) {
       sessionId = currentSessionId.value;
       await updateSessionConfig(sessionId, config);
+    } else if (resume && results.value.length > 0) {
+      crawling.value = false;
+      cleanup();
+      const msg =
+        "Can't resume: no active session is bound to this view. " +
+        "Either Clear results, or open the original session from Crawl Manager.";
+      console.error(msg);
+      throw new Error(msg);
     } else {
       sessionId = await createSession(url, config);
       currentSessionId.value = sessionId;
     }
 
     unlistenResult = await listen<CrawlResult>("crawl-result", async (event) => {
-      // Skip URLs already crawled (happens during resume)
-      if (visitedUrls.has(event.payload.url)) return;
+      // Skip URLs already crawled (happens during resume) — except when the
+      // existing row is a parked stub from the block detector. Those rows
+      // need to be replaced when the host is later resumed and the URL
+      // actually gets crawled.
+      if (visitedUrls.has(event.payload.url)) {
+        const existingIdx = results.value.findIndex(r => r.url === event.payload.url);
+        if (existingIdx >= 0 && results.value[existingIdx].error?.startsWith("host_blocked_by_detector")) {
+          results.value[existingIdx] = event.payload;
+          scheduleRefresh();
+          insertResult(sessionId, event.payload);
+        }
+        return;
+      }
       visitedUrls.add(event.payload.url);
 
       // Replace in-place for recrawled URLs, otherwise append
@@ -100,17 +137,22 @@ export function useCrawl() {
       }
       scheduleRefresh();
 
-      // Remove from recrawl queue if present
+      // Remove from recrawl queue if present.
       const queueIdx = config.recrawlQueue.indexOf(event.payload.url);
       if (queueIdx >= 0) {
         config.recrawlQueue.splice(queueIdx, 1);
+      } else if (replaceUrls?.has(event.payload.url)) {
+        // Diagnostic: replaceUrls says this URL was a recrawl target, but
+        // it's not in the queue. Likely a redirect-changed-url mismatch
+        // (page.goto() returned a different URL than we sent in). Log so
+        // the cause is visible if a recrawl run leaves the queue stuck.
+        console.warn("recrawl URL emitted with no matching queue entry — possible redirect mismatch", {
+          emitted: event.payload.url,
+          replaceUrlsSize: replaceUrls.size,
+        });
       }
 
-      try {
-        await insertResult(sessionId, event.payload);
-      } catch (e) {
-        console.error("DB insert failed:", e);
-      }
+      insertResult(sessionId, event.payload);
     });
 
     unlistenComplete = await listen<void>("crawl-complete", async () => {
@@ -122,8 +164,56 @@ export function useCrawl() {
       } catch (e) {
         console.error("DB session complete failed:", e);
       }
-      // Clear recrawl queue — all done
-      if (config.recrawlQueue.length > 0) {
+      // Persist the post-run config (drained recrawl queue, etc.) — without
+      // this, reopening the session restores the pre-run queue from DB and
+      // it looks like the recrawl didn't actually happen.
+      try {
+        await updateSessionConfig(sessionId, config);
+      } catch (e) {
+        console.error("DB config save on complete failed:", e);
+      }
+
+      // Safety-net: reconcile the recrawl queue against fresh results. If a
+      // recrawl URL was successfully crawled in this run (we have a status>0
+      // result for it) but it's still in the queue, the per-event drain
+      // missed it — drain it here so the user doesn't end up with a phantom
+      // pending count on completion.
+      if (replaceUrls && replaceUrls.size > 0 && config.recrawlQueue.length > 0) {
+        const drained: string[] = [];
+        const remaining: string[] = [];
+        for (const url of config.recrawlQueue) {
+          if (replaceUrls.has(url)) {
+            const r = results.value.find((x) => x.url === url);
+            if (r && r.status > 0 && !r.error) {
+              drained.push(url);
+              continue;
+            }
+          }
+          remaining.push(url);
+        }
+        if (drained.length > 0) {
+          console.warn(
+            `recrawl post-mortem: ${drained.length} URLs had fresh results but stayed in queue — draining now`,
+            drained.slice(0, 5),
+          );
+          config.recrawlQueue = remaining;
+        }
+      }
+
+      // Was anything in this run actually a failure (4xx/5xx, network error,
+      // parked stub)? Distinguishes "dirty completion" (some URLs to retry)
+      // from "clean completion" (all URLs finished cleanly).
+      const hadFailures = results.value.some((r) =>
+        r.status >= 400 ||
+        r.status === 0 ||
+        !!r.error,
+      );
+      if (hadFailures) {
+        stopped.value = true;
+      }
+      // Clear recrawl queue — all done. (Keep it if we ended dirty; user
+      // may want to resume-recrawl those.)
+      if (!hadFailures && config.recrawlQueue.length > 0) {
         config.recrawlQueue = [];
       }
       cleanup();
@@ -163,6 +253,7 @@ export function useCrawl() {
         perHostDelay: s.performance.perHostDelay,
         perHostConcurrency: s.performance.perHostConcurrency,
         sessionWarmup: s.performance.sessionWarmup || null,
+        excludeUrls: visitedUrls.size ? Array.from(visitedUrls) : null,
       });
     } catch (e) {
       console.error("Crawl failed:", e);
@@ -203,6 +294,14 @@ export function useCrawl() {
     results.value = [];
     currentSessionId.value = null;
     stopped.value = false;
+    // Recrawl queue belongs to the cleared session — drop it so the badge
+    // doesn't carry into the next crawl.
+    const { config } = useConfig();
+    if (config.recrawlQueue.length > 0) {
+      config.recrawlQueue = [];
+    }
+    // Stale logs would now refer to results that are gone — clear them too.
+    useDebug().clearLogs();
   }
 
   function setResults(data: CrawlResult[]) {
@@ -210,10 +309,25 @@ export function useCrawl() {
   }
 
   async function loadSession(sessionId: number): Promise<CrawlConfig | null> {
+    // Loaded sessions don't carry the live crawl's debug log — clear so the
+    // panel reflects what the user is now viewing, not the prior run.
+    useDebug().clearLogs();
+
     const loaded = await loadSessionResults(sessionId);
     results.value = loaded;
     currentSessionId.value = sessionId;
     const savedConfig = await loadSessionConfig(sessionId);
+
+    // Detect partial coverage so the UI shows RESUME / STOPPED instead of
+    // START / COMPLETE. List-mode: fewer crawled than queued. Spider-mode:
+    // session was never completed (Stop, crash, or load before finish).
+    const status = await getSessionStatus(sessionId);
+    const listTotal = savedConfig?.urls?.length ?? 0;
+    const isPartial = listTotal > 0
+      ? loaded.length < listTotal
+      : status.completed_at == null && loaded.length > 0;
+    stopped.value = isPartial;
+
     return savedConfig;
   }
 

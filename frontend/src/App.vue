@@ -13,7 +13,7 @@ import ReportPanel from "./components/ReportPanel.vue";
 import AboutModal from "./components/AboutModal.vue";
 import ProfileViewer from "./components/ProfileViewer.vue";
 import CrawlManager from "./components/CrawlManager.vue";
-import SettingsFinder from "./components/SettingsFinder.vue";
+import BlockAlert from "./components/BlockAlert.vue";
 import SettingsPanel from "./components/settings/SettingsPanel.vue";
 import DebugPanel from "./components/debug/DebugPanel.vue";
 import { useDebug } from "./composables/useDebug";
@@ -30,7 +30,7 @@ const crawlScope = ref("Subdomain");
 const { config, applyConfig } = useConfig();
 const { results, crawling, stopped, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
 const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
-const { browserOpen, profileData, openBrowser, closeBrowser, fetchProfileData } = useBrowser();
+const { profileData } = useBrowser();
 const { closeOrphanedSessions } = useDatabase();
 const { start: startDebugListeners } = useDebug();
 const { settings, init: initSettings, patch: patchSetting } = useSettings();
@@ -64,8 +64,6 @@ onMounted(async () => {
   window.addEventListener("keydown", onGlobalKeydown);
 });
 
-const activeMode = ref<"crawler" | "settings-finder">("crawler");
-const showModeMenu = ref(false);
 const showProfile = ref(false);
 const configSection = ref<string | null>(null);
 const scraperOpen = ref(false);
@@ -78,7 +76,6 @@ const searchQuery = ref("");
 const filterType = ref("All");
 const selectAllTrigger = ref(0);
 const filteredCount = ref(0);
-const recrawlQueueAll = ref<string[]>([]);
 
 const bottomPanelHeight = ref(parseInt(localStorage.getItem('fera-bottom-height') || '200', 10));
 const sidebarWidth = ref(parseInt(localStorage.getItem('fera-sidebar-width') || '250', 10));
@@ -117,20 +114,15 @@ function stopResize() {
   document.body.style.userSelect = '';
 }
 
-const modeLabel = computed(() => {
-  return activeMode.value === "crawler" ? "Crawler Mode" : "Settings Finder";
-});
-
-function selectMode(mode: "crawler" | "settings-finder") {
-  activeMode.value = mode;
-  showModeMenu.value = false;
-}
-
 const hasRecrawlQueue = computed(() => config.recrawlQueue.length > 0);
 
 function handleResumeRecrawl() {
   if (!config.recrawlQueue.length || crawling.value) return;
   handleRecrawl([...config.recrawlQueue]);
+}
+
+function handleClearRecrawlQueue() {
+  config.recrawlQueue = [];
 }
 
 const statusText = computed(() => {
@@ -153,20 +145,40 @@ function canStart(): boolean {
   return !!url.value.trim();
 }
 
-function handleStart() {
-  const isResume = stopped.value;
-  if (settings.value.crawling.mode === "list") {
-    if (!config.urls.length) return;
-    startCrawl(config.urls[0], { resume: isResume });
-  } else {
-    if (!url.value.trim()) return;
-    url.value = normalizeUrl(url.value);
-    if (crawlScope.value === "Exact URL") {
-      // Per-call override — don't mutate the profile's mode for a one-off scope.
-      startCrawl(url.value, { resume: isResume, mode: "list", urls: [url.value] });
+// Probe modal "Save settings & resume" → BlockAlert applied the row's config
+// to settings and (optionally) wiped the profile. Now stop the running
+// sidecar and respawn with resume:true so excludeUrls skips done URLs.
+async function onApplyProbeAndResume() {
+  if (crawling.value) {
+    try { await stopCrawl(); } catch (e) { console.error("stopCrawl failed:", e); }
+    // Give the sidecar a moment to actually exit (kill is async).
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  handleStart();
+}
+
+async function handleStart() {
+  // Treat any START click with existing results as a resume — never silently
+  // wipe a partial crawl. To start fresh, the user must explicitly Clear.
+  const isResume = stopped.value || results.value.length > 0;
+  try {
+    if (settings.value.crawling.mode === "list") {
+      if (!config.urls.length) return;
+      await startCrawl(config.urls[0], { resume: isResume });
     } else {
-      startCrawl(url.value, { resume: isResume });
+      if (!url.value.trim()) return;
+      url.value = normalizeUrl(url.value);
+      if (crawlScope.value === "Exact URL") {
+        // Per-call override — don't mutate the profile's mode for a one-off scope.
+        await startCrawl(url.value, { resume: isResume, mode: "list", urls: [url.value] });
+      } else {
+        await startCrawl(url.value, { resume: isResume });
+      }
     }
+  } catch (e) {
+    // Surface the resume-without-session guard (and any other startCrawl
+    // throw) directly — silent fragmentation is worse than an interruption.
+    alert((e as Error).message ?? String(e));
   }
 }
 
@@ -220,7 +232,6 @@ function onRowSelect(result: CrawlResult | null) {
 
 async function handleRecrawl(urls: string[]) {
   if (!urls.length || crawling.value) return;
-  recrawlQueueAll.value = [...urls];
   config.recrawlQueue = [...urls];
   await startCrawl(urls[0], {
     resume: true,
@@ -233,7 +244,6 @@ async function handleRecrawl(urls: string[]) {
 
 function handleLoadSession(sessionUrl: string) {
   url.value = sessionUrl;
-  if (config.recrawlQueue.length > 0) recrawlQueueAll.value = [...config.recrawlQueue];
   showCrawlManager.value = false;
 }
 
@@ -252,7 +262,6 @@ async function handleMenuAction(menu: string, item: string) {
         setResults(data.results);
         if (data.config) {
           applyConfig(data.config);
-          if (config.recrawlQueue.length > 0) recrawlQueueAll.value = [...config.recrawlQueue];
         }
       }
     }
@@ -288,26 +297,20 @@ async function handleMenuAction(menu: string, item: string) {
 </script>
 
 <template>
-  <div class="app" @click="showModeMenu = false">
+  <div class="app">
     <MenuBar @action="handleMenuAction" />
 
     <!-- ── Telemetry bar ── -->
     <header class="telemetry-bar">
-      <!-- Logo + Mode switcher -->
-      <div class="telem-logo" @click.stop="showModeMenu = !showModeMenu">
+      <div class="telem-logo">
         <img src="/logo.svg" alt="Fera" class="logo-img" />
         <div class="logo-label">
           <span class="logo-name">Fera</span>
-          <span class="logo-mode">{{ modeLabel }} <span class="mode-chevron">&#x25BE;</span></span>
-        </div>
-        <div v-if="showModeMenu" class="mode-dropdown">
-          <button class="mode-item" :class="{ 'mode-item--active': activeMode === 'crawler' }" @click.stop="selectMode('crawler')">Crawler Mode</button>
-          <button class="mode-item" :class="{ 'mode-item--active': activeMode === 'settings-finder' }" @click.stop="selectMode('settings-finder')">Settings Finder</button>
+          <span class="logo-mode">Crawler</span>
         </div>
       </div>
 
-      <template v-if="activeMode === 'crawler'">
-        <div class="telem-divider"></div>
+      <div class="telem-divider"></div>
 
         <!-- Status -->
         <div class="telem-stat">
@@ -360,24 +363,9 @@ async function handleMenuAction(menu: string, item: string) {
             {{ stopped ? '&#x25B6; RESUME' : '&#x25B6; START' }}
           </button>
           <button v-if="crawling" class="btn-pill btn-stop" @click="stopCrawl">
-            &#x25A0; PAUSE
+            &#x25A0; STOP
           </button>
           <button class="btn-pill btn-reset" @click="handleClear">CLEAR</button>
-          <button
-            class="btn-pill btn-signin"
-            :disabled="crawling || (!browserOpen && !url.trim())"
-            @click="browserOpen ? closeBrowser() : openBrowser(normalizeUrl(url))"
-          >
-            {{ browserOpen ? '&#x2715; CLOSE' : '&#x1F511; SIGN IN' }}
-          </button>
-          <button
-            class="btn-pill btn-headless"
-            :class="{ 'btn-headless--off': !settings.authentication.headless }"
-            :disabled="crawling"
-            @click="patchSetting('authentication', 'headless', !settings.authentication.headless)"
-          >
-            {{ settings.authentication.headless ? '&#x1F441; HEADLESS' : '&#x1F5A5; HEADED' }}
-          </button>
           <button
             class="btn-pill btn-ogimage"
             :class="{ 'btn-ogimage--on': settings.extraction.downloadOgImage }"
@@ -396,9 +384,18 @@ async function handleMenuAction(menu: string, item: string) {
           <button
             v-if="hasRecrawlQueue && !crawling"
             class="btn-pill btn-recrawl"
+            :title="'Crawl the URLs queued for recrawl (' + config.recrawlQueue.length + '). They were added when you clicked Recrawl on rows in the grid. URLs leave the queue as they get re-crawled.'"
             @click="handleResumeRecrawl"
           >
             &#x21BB; RESUME RECRAWL ({{ config.recrawlQueue.length }})
+          </button>
+          <button
+            v-if="hasRecrawlQueue && !crawling"
+            class="btn-pill btn-recrawl-clear"
+            title="Discard the recrawl queue without crawling. Removes the URLs from the queue but keeps them as rows in the grid."
+            @click="handleClearRecrawlQueue"
+          >
+            &times; CLEAR QUEUE
           </button>
           <button class="btn-pill btn-settings" @click="showSettingsPanel = true" title="Cmd/Ctrl+,">
             &#x2699; SETTINGS
@@ -416,11 +413,9 @@ async function handleMenuAction(menu: string, item: string) {
           <span v-if="config.scraperRules.length > 0" class="config-badge" :title="config.scraperRules.length + ' scraper rule(s)'">SCRAPER</span>
           <span v-if="Object.keys(config.customHeaders).length > 0" class="config-badge" :title="Object.keys(config.customHeaders).length + ' custom header(s)'">HEADERS</span>
         </div>
-      </template>
     </header>
 
-    <!-- ── Crawler Mode ── -->
-    <template v-if="activeMode === 'crawler'">
+    <BlockAlert @apply-probe-and-resume="onApplyProbeAndResume" />
       <CategoryTabs :active="activeCategory" :recrawl-count="config.recrawlQueue.length" @select="activeCategory = $event" />
       <FilterBar
         :total-results="results.length"
@@ -436,7 +431,7 @@ async function handleMenuAction(menu: string, item: string) {
       <div class="main-content">
         <div class="left-panels">
           <div class="grid-area">
-            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" :recrawl-queue-all="recrawlQueueAll" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
+            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
           </div>
           <div class="grid-status-bar">
             <span>Selected Cells: 0</span>
@@ -449,16 +444,9 @@ async function handleMenuAction(menu: string, item: string) {
         </div>
         <div class="resize-handle resize-handle--v" @mousedown="startResize('sidebar', $event)"></div>
         <div :style="{ width: sidebarWidth + 'px', flexShrink: 0, overflow: 'hidden' }">
-          <RightSidebar :results="results" />
+          <RightSidebar :results="results" @edit-settings="showSettingsPanel = true" />
         </div>
       </div>
-    </template>
-
-    <!-- ── Settings Finder Mode ── -->
-    <div v-if="activeMode === 'settings-finder'" class="main-content">
-      <SettingsFinder />
-    </div>
-
     <ConfigModal v-if="configSection" @close="configSection = null" />
     <ScraperModal v-if="scraperOpen" @close="scraperOpen = false" />
     <ReportPanel v-if="activeReport" :report="activeReport" :results="results" @close="activeReport = null" />
@@ -543,44 +531,6 @@ async function handleMenuAction(menu: string, item: string) {
   text-transform: uppercase;
   transition: color 0.15s;
 }
-.mode-chevron { font-size: 8px; margin-left: 2px; }
-
-.mode-dropdown {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  margin-top: 6px;
-  background: #141a2e;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 8px;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-  padding: 4px;
-  z-index: 100;
-  min-width: 180px;
-}
-.mode-item {
-  display: block;
-  width: 100%;
-  padding: 7px 14px;
-  border: none;
-  background: transparent;
-  color: rgba(255,255,255,0.6);
-  font-size: 11px;
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  border-radius: 5px;
-  transition: all 0.15s;
-}
-.mode-item:hover {
-  background: rgba(86,156,214,0.15);
-  color: #ffffff;
-}
-.mode-item--active {
-  color: #569cd6;
-  font-weight: 600;
-}
-
 .telem-divider {
   width: 1px;
   height: 28px;
@@ -781,42 +731,6 @@ async function handleMenuAction(menu: string, item: string) {
   border-color: rgba(255,255,255,0.25);
 }
 
-.btn-signin {
-  color: #dcdcaa;
-  border-color: rgba(220,220,170,0.3);
-}
-.btn-signin:hover:not(:disabled) {
-  background: rgba(220,220,170,0.1);
-  border-color: #dcdcaa;
-  box-shadow: 0 0 16px rgba(220,220,170,0.15);
-}
-.btn-signin:disabled {
-  opacity: 0.25;
-  cursor: default;
-}
-
-.btn-headless {
-  color: rgba(255,255,255,0.4);
-  border-color: rgba(255,255,255,0.1);
-}
-.btn-headless:hover:not(:disabled) {
-  color: rgba(255,255,255,0.7);
-  border-color: rgba(255,255,255,0.25);
-}
-.btn-headless--off {
-  color: #ce9178;
-  border-color: rgba(206,145,120,0.3);
-}
-.btn-headless--off:hover:not(:disabled) {
-  background: rgba(206,145,120,0.1);
-  border-color: #ce9178;
-  box-shadow: 0 0 16px rgba(206,145,120,0.15);
-}
-.btn-headless:disabled {
-  opacity: 0.25;
-  cursor: default;
-}
-
 .btn-ogimage {
   color: rgba(255,255,255,0.4);
   border-color: rgba(255,255,255,0.1);
@@ -856,6 +770,15 @@ async function handleMenuAction(menu: string, item: string) {
   background: rgba(206,145,120,0.1);
   border-color: #ce9178;
   box-shadow: 0 0 16px rgba(206,145,120,0.15);
+}
+
+.btn-recrawl-clear {
+  color: rgba(255,255,255,0.4);
+  border-color: rgba(255,255,255,0.1);
+}
+.btn-recrawl-clear:hover {
+  color: #f44747;
+  border-color: rgba(244,71,71,0.3);
 }
 
 .btn-debug {

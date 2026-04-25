@@ -41,6 +41,11 @@ export interface SettingsValues {
     perHostDelay: number;
     perHostConcurrency: number;
     sessionWarmup: boolean;
+    // When a host gets gated by the block detector, automatically run the
+    // 6-row probe matrix and apply the first winning row's settings if found.
+    // Skipped if a manual probe is already running, or if this host has
+    // already been auto-probed in this session (prevents loops).
+    autoProbeOnBlock: boolean;
   };
   extraction: {
     captureVitals: boolean;

@@ -96,6 +96,16 @@ async function start(): Promise<void> {
       currentPhase.value = "idle";
     })
   );
+
+  // A new crawl is its own log scope — wipe the prior run's noise so the
+  // panel only shows what's relevant to the current crawl.
+  unlisteners.push(
+    await listen("crawl-started", () => {
+      logs.value = [];
+      phases.value = [];
+      currentPhase.value = "starting";
+    })
+  );
 }
 
 async function stop(): Promise<void> {

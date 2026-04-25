@@ -13,5 +13,14 @@ export default defineConfig({
     target: "esnext",
     minify: !process.env.TAURI_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_DEBUG,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Tabulator is ~40% of the main bundle on its own — split it out
+          // so grid-free paths (settings, about, errors) don't eat the cost.
+          tabulator: ["tabulator-tables"],
+        },
+      },
+    },
   },
 });

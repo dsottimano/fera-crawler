@@ -5,9 +5,139 @@ let dbPromise: Promise<Database> | null = null;
 
 function getDb(): Promise<Database> {
   if (!dbPromise) {
-    dbPromise = Database.load("sqlite:fera.db");
+    dbPromise = Database.load("sqlite:fera.db").then(async (d) => {
+      // WAL = concurrent reads alongside a writer + faster writes.
+      // synchronous=NORMAL is durability-safe with WAL (a power loss can
+      // lose the last committed transaction but never corrupts the DB),
+      // and roughly halves write latency vs the default FULL.
+      try {
+        await d.execute("PRAGMA journal_mode=WAL");
+        await d.execute("PRAGMA synchronous=NORMAL");
+      } catch (e) {
+        console.error("Failed to apply sqlite pragmas:", e);
+      }
+      return d;
+    });
   }
   return dbPromise;
+}
+
+// ── Batched insert buffer ────────────────────────────────────────────────
+// 32K-URL crawls = 32K individual INSERTs in their own transactions today.
+// Buffer rows and flush as a single transaction every BATCH_SIZE rows or
+// FLUSH_MS, whichever comes first. Callers MUST await flushPendingInserts()
+// before any session-level operation that depends on rows being persisted
+// (completeSession, updateSessionConfig, loadSessionResults of an active
+// session, …) — otherwise rows still in the buffer aren't visible.
+
+interface PendingInsert {
+  sessionId: number;
+  result: CrawlResult;
+}
+
+const insertBuffer: PendingInsert[] = [];
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let flushInFlight: Promise<void> | null = null;
+const FLUSH_MS = 1000;
+const BATCH_SIZE = 200;
+
+function scheduleFlush() {
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    void flushPendingInserts();
+  }, FLUSH_MS);
+}
+
+async function doFlush(): Promise<void> {
+  if (insertBuffer.length === 0) return;
+  const batch = insertBuffer.splice(0);
+  const d = await getDb();
+
+  await d.execute("BEGIN");
+  try {
+    for (const { sessionId, result } of batch) {
+      const seoJson = JSON.stringify({
+        metaGooglebot: result.metaGooglebot || "",
+        xRobotsTag: result.xRobotsTag || "",
+        ogType: result.ogType || "",
+        ogUrl: result.ogUrl || "",
+        datePublishedTime: result.datePublishedTime || "",
+        dateModifiedTime: result.dateModifiedTime || "",
+        outlinks: result.outlinks || [],
+        metaTags: result.metaTags || [],
+        responseHeaders: result.responseHeaders || {},
+        ogImageWidthReal: result.ogImageWidthReal || 0,
+        ogImageHeightReal: result.ogImageHeightReal || 0,
+        ogImageFileSize: result.ogImageFileSize || 0,
+        scraper: result.scraper || {},
+      });
+
+      await d.execute(
+        "DELETE FROM crawl_results WHERE session_id = $1 AND url = $2",
+        [sessionId, result.url],
+      );
+      await d.execute(
+        `INSERT INTO crawl_results
+          (session_id, url, status, title, h1, h2, meta_description, canonical,
+           internal_links, external_links, response_time, content_type,
+           resource_type, size, error, word_count, meta_robots,
+           is_indexable, is_noindex, is_nofollow,
+           og_title, og_description, og_image, og_image_width, og_image_height,
+           date_published, date_modified, redirect_url, server_header, seo_json)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
+        [
+          sessionId,
+          result.url,
+          result.status,
+          result.title,
+          result.h1,
+          result.h2,
+          result.metaDescription,
+          result.canonical,
+          result.internalLinks,
+          result.externalLinks,
+          result.responseTime,
+          result.contentType,
+          result.resourceType,
+          result.size,
+          result.error ?? null,
+          result.wordCount,
+          result.metaRobots,
+          result.isIndexable ? 1 : 0,
+          result.isNoindex ? 1 : 0,
+          result.isNofollow ? 1 : 0,
+          result.ogTitle,
+          result.ogDescription,
+          result.ogImage,
+          result.ogImageWidth,
+          result.ogImageHeight,
+          result.datePublished,
+          result.dateModified,
+          result.redirectUrl ?? "",
+          result.serverHeader ?? "",
+          seoJson,
+        ],
+      );
+    }
+    await d.execute("COMMIT");
+  } catch (e) {
+    console.error("Batched insert failed, rolling back:", e);
+    try { await d.execute("ROLLBACK"); } catch {}
+    throw e;
+  }
+}
+
+export async function flushPendingInserts(): Promise<void> {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  // Serialize concurrent flushers — only one transaction at a time.
+  while (flushInFlight) await flushInFlight;
+  if (insertBuffer.length === 0) return;
+  flushInFlight = doFlush().finally(() => { flushInFlight = null; });
+  await flushInFlight;
 }
 
 export interface CrawlSession {
@@ -31,6 +161,7 @@ export function useDatabase() {
   }
 
   async function completeSession(sessionId: number): Promise<void> {
+    await flushPendingInserts();
     const d = await getDb();
     await d.execute(
       "UPDATE crawl_sessions SET completed_at = CURRENT_TIMESTAMP WHERE id = $1",
@@ -38,77 +169,26 @@ export function useDatabase() {
     );
   }
 
-  async function insertResult(sessionId: number, result: CrawlResult): Promise<void> {
-    const d = await getDb();
+  // Pushes onto the batched-insert buffer; the actual DB write happens in
+  // a transaction at flush time. Errors surface from flushPendingInserts.
+  function insertResult(sessionId: number, result: CrawlResult): void {
+    insertBuffer.push({ sessionId, result });
+    if (insertBuffer.length >= BATCH_SIZE) {
+      void flushPendingInserts();
+    } else {
+      scheduleFlush();
+    }
+  }
 
-    // Pack overflow fields into seo_json
-    const seoJson = JSON.stringify({
-      metaGooglebot: result.metaGooglebot || "",
-      xRobotsTag: result.xRobotsTag || "",
-      ogType: result.ogType || "",
-      ogUrl: result.ogUrl || "",
-      datePublishedTime: result.datePublishedTime || "",
-      dateModifiedTime: result.dateModifiedTime || "",
-      outlinks: result.outlinks || [],
-      metaTags: result.metaTags || [],
-      responseHeaders: result.responseHeaders || {},
-      ogImageWidthReal: result.ogImageWidthReal || 0,
-      ogImageHeightReal: result.ogImageHeightReal || 0,
-      ogImageFileSize: result.ogImageFileSize || 0,
-      scraper: result.scraper || {},
-    });
-
-    // Remove any existing row for this URL in this session (recrawl dedup)
-    await d.execute(
-      "DELETE FROM crawl_results WHERE session_id = $1 AND url = $2",
-      [sessionId, result.url]
-    );
-
-    await d.execute(
-      `INSERT INTO crawl_results
-        (session_id, url, status, title, h1, h2, meta_description, canonical,
-         internal_links, external_links, response_time, content_type,
-         resource_type, size, error, word_count, meta_robots,
-         is_indexable, is_noindex, is_nofollow,
-         og_title, og_description, og_image, og_image_width, og_image_height,
-         date_published, date_modified, redirect_url, server_header, seo_json)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)`,
-      [
-        sessionId,
-        result.url,
-        result.status,
-        result.title,
-        result.h1,
-        result.h2,
-        result.metaDescription,
-        result.canonical,
-        result.internalLinks,
-        result.externalLinks,
-        result.responseTime,
-        result.contentType,
-        result.resourceType,
-        result.size,
-        result.error ?? null,
-        result.wordCount,
-        result.metaRobots,
-        result.isIndexable ? 1 : 0,
-        result.isNoindex ? 1 : 0,
-        result.isNofollow ? 1 : 0,
-        result.ogTitle,
-        result.ogDescription,
-        result.ogImage,
-        result.ogImageWidth,
-        result.ogImageHeight,
-        result.datePublished,
-        result.dateModified,
-        result.redirectUrl ?? "",
-        result.serverHeader ?? "",
-        seoJson,
-      ]
-    );
+  async function listSessions(): Promise<CrawlSession[]> {
+    // Buffered inserts must be visible in the COUNT(r.id) subquery — otherwise
+    // an in-progress crawl shows a stale row count in the modal.
+    await flushPendingInserts();
+    return rawListSessions();
   }
 
   async function loadSessionResults(sessionId: number): Promise<CrawlResult[]> {
+    await flushPendingInserts();
     const d = await getDb();
     const rows = await d.select<any[]>(
       `SELECT url, status, title, h1, h2, meta_description, canonical,
@@ -173,7 +253,7 @@ export function useDatabase() {
     });
   }
 
-  async function listSessions(): Promise<CrawlSession[]> {
+  async function rawListSessions(): Promise<CrawlSession[]> {
     const d = await getDb();
     return d.select<CrawlSession[]>(
       `SELECT s.id, s.start_url, s.started_at, s.completed_at, s.config_json,
@@ -206,6 +286,7 @@ export function useDatabase() {
   }
 
   async function getLatestSession(): Promise<CrawlSession | null> {
+    await flushPendingInserts();
     const d = await getDb();
     const rows = await d.select<CrawlSession[]>(
       `SELECT s.id, s.start_url, s.started_at, s.completed_at,
@@ -233,7 +314,17 @@ export function useDatabase() {
     }
   }
 
+  async function getSessionStatus(sessionId: number): Promise<{ completed_at: string | null }> {
+    const d = await getDb();
+    const rows = await d.select<{ completed_at: string | null }[]>(
+      "SELECT completed_at FROM crawl_sessions WHERE id = $1",
+      [sessionId]
+    );
+    return rows.length > 0 ? rows[0] : { completed_at: null };
+  }
+
   async function updateSessionConfig(sessionId: number, config: CrawlConfig): Promise<void> {
+    await flushPendingInserts();
     const d = await getDb();
     await d.execute(
       "UPDATE crawl_sessions SET config_json = $1 WHERE id = $2",
@@ -253,5 +344,6 @@ export function useDatabase() {
     getLatestSession,
     loadSessionConfig,
     updateSessionConfig,
+    getSessionStatus,
   };
 }
