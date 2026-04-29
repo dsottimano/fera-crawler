@@ -191,7 +191,15 @@ async function startAutoProbe(info: BlockInfo) {
   probeRows.value = [];
   probeFinished.value = false;
   probeRunning.value = true;
-  // Modal stays closed — this is silent recovery.
+  // Open the modal so the user sees the auto-probe in action — same UI
+  // they'd get from clicking PROBE CONFIGS manually. Without this the
+  // probe ran silently in the background, the user would click PROBE
+  // CONFIGS thinking nothing was happening, get a "probe already
+  // running" rejection, and have no idea why. applyRowAndResume calls
+  // closeProbe() once a winning row applies, so the modal flow is:
+  // open → rows tick → win → settings saved → modal auto-closes →
+  // crawl resumes.
+  probeOpen.value = true;
   try {
     await invoke("run_probe_matrix", { sampleUrl: probeSampleUrl.value });
   } catch (err) {
