@@ -1225,7 +1225,15 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   setQueueSize(queue.length);
 
   const effectiveConcurrency = headless ? config.concurrency : 1;
-  const effectiveDelay = headless ? (config.delay ?? 0) : Math.max(config.delay ?? 0, 1000);
+  // Global staggered delay only for headless multi-tab mode (it staggers
+  // parallel request starts so concurrency=N doesn't fire N requests in
+  // the same millisecond). In headed mode there's only one tab and the
+  // per-host rate limiter (acquire() inside crawlWithPolicy) is the
+  // single source of pacing — adding a redundant JS-level sleep silently
+  // floored the user's perHostDelay setting at 1000ms, which is what
+  // made headed mode "instant" relative to a 3000ms user config: the
+  // user expected 3s/req, got 1s/req because the floor capped them.
+  const effectiveDelay = headless ? (config.delay ?? 0) : 0;
 
   /**
    * Crawl a URL with per-host rate limiting + one retry on 429/503 with

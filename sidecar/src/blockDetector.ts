@@ -11,10 +11,22 @@
 
 const WINDOW_SIZE = 15;
 const TRIP_THRESHOLD = 10;
+// Fast-trip: if the END of the window is N consecutively-blocked entries,
+// park the host immediately even though TRIP_THRESHOLD isn't met. Catches
+// the case where soft-only blocks stream in (e.g. 5 same-titled "Access
+// Blocked" pages with HTTP 200) — the rolling-window count rises slowly
+// but the consecutive run is a clear, strong signal that doesn't deserve
+// 5 more wasted requests of waiting.
+const CONSECUTIVE_TRIP_THRESHOLD = 5;
 const SOFT_TITLE_REPEAT_THRESHOLD = 3;
 
+// Phrases that show up on bot-wall interstitials regardless of the upstream
+// HTTP status. Walls increasingly serve "you've been blocked" pages with
+// 200 OK so vanilla status-code heuristics miss them entirely. Keep this
+// list matching only HIGH-CONFIDENCE phrases — false positives gate hosts
+// that are actually fine.
 const BLOCK_PHRASE_RE =
-  /access denied|attention required|just a moment|verify you are human|are you a robot|pardon our interruption|request unsuccessful/i;
+  /access denied|attention required|just a moment|verify you are human|are you a robot|pardon our interruption|request unsuccessful|you have been blocked|you've been blocked|sorry,?\s+you have been blocked|security check|cloudflare to restrict access|please verify you are a human|bot detected|access to this page has been denied|website is using a security service to protect itself/i;
 
 // 60s → 2min → 4min, then give up.
 export const DEFAULT_COOLDOWNS_MS = [60_000, 120_000, 240_000];
@@ -147,7 +159,11 @@ export class BlockDetector {
     if (state.gated) return null;
 
     const blockedCount = state.window.filter((w) => w.blocked).length;
-    if (blockedCount < TRIP_THRESHOLD) return null;
+    const consecutiveTail = countTrailingBlocks(state.window);
+    const tripped =
+      blockedCount >= TRIP_THRESHOLD ||
+      consecutiveTail >= CONSECUTIVE_TRIP_THRESHOLD;
+    if (!tripped) return null;
 
     state.gated = true;
     const cooldownMs = this.scheduleCooldownIfEligible(host, state);
@@ -222,4 +238,16 @@ export function hostOf(url: string): string {
   } catch {
     return "";
   }
+}
+
+// Length of the trailing run of `blocked: true` entries in the window.
+// Used by the consecutive-trip fast path so a tight cluster of soft-only
+// blocks can park a host without waiting for 10/15 to accumulate.
+function countTrailingBlocks(window: WindowEntry[]): number {
+  let n = 0;
+  for (let i = window.length - 1; i >= 0; i--) {
+    if (!window[i].blocked) break;
+    n++;
+  }
+  return n;
 }

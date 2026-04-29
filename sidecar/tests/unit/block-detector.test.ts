@@ -4,6 +4,9 @@ import { BlockDetector, hostOf } from "../../src/blockDetector.js";
 const HOST = "example.com";
 const url = (n: string | number) => `https://${HOST}/page-${n}`;
 
+// Fires `n` consecutive hard blocks. With the fast-trip threshold at 5,
+// the gate trips on the 5th — earlier than the old 10/15 path. Tests
+// that need to verify the SCATTERED-blocks path use scatterTrip instead.
 function tripGate(d: BlockDetector, host = HOST, n = 10) {
   let payload: ReturnType<typeof d.record> = null;
   for (let i = 0; i < n; i++) {
@@ -30,6 +33,14 @@ describe("BlockDetector — classify", () => {
       "Attention Required! | Cloudflare",
       "Verify you are human",
       "Pardon Our Interruption",
+      // Phrases added when soft-only walls (HTTP 200 + "blocked" body)
+      // were slipping past the original short list.
+      "Sorry, you have been blocked",
+      "You've been blocked",
+      "Bot detected",
+      "Access to this page has been denied",
+      "This website is using a security service to protect itself from online attacks",
+      "Security check",
     ];
     for (const t of cases) {
       const r = d.classify({ url: url(t), status: 200, title: t }, HOST);
@@ -58,24 +69,74 @@ describe("BlockDetector — classify", () => {
 });
 
 describe("BlockDetector — trip threshold", () => {
-  it("does not trip below 10 of last 15", () => {
+  it("does not trip below 5 consecutive blocks (fast-path floor)", () => {
     const d = new BlockDetector();
-    for (let i = 0; i < 9; i++) {
+    for (let i = 0; i < 4; i++) {
       const p = d.record({ url: url(i), status: 403 }, HOST);
       expect(p).toBeNull();
     }
     expect(d.isGated(HOST)).toBe(false);
   });
 
-  it("trips on the 10th hard block within the window", () => {
+  it("scattered blocks need 10/15 in the window — 9 spread over a clean stream don't trip", () => {
+    // Pure threshold-path coverage: blocks are not consecutive, so the
+    // fast-trip never fires and we depend on the rolling window count.
+    const d = new BlockDetector();
+    for (let i = 0; i < 14; i++) {
+      // Pattern: block,clean,block,clean,... — 7 blocks, 7 cleans.
+      const status = i % 2 === 0 ? 403 : 200;
+      const title = i % 2 === 0 ? "" : "OK page " + i;
+      d.record({ url: url(i), status, title }, HOST);
+    }
+    expect(d.isGated(HOST)).toBe(false);
+  });
+
+  it("fast-trips on 5 consecutive hard blocks", () => {
     const d = new BlockDetector();
     const payload = tripGate(d);
     expect(d.isGated(HOST)).toBe(true);
     expect(payload).not.toBeNull();
     expect(payload?.host).toBe(HOST);
-    expect(payload?.stats.blocked).toBeGreaterThanOrEqual(10);
+    // With the fast-trip path, the gate trips at 5 consecutive — not 10.
+    expect(payload?.stats.blocked).toBeGreaterThanOrEqual(5);
     expect(payload?.attempt).toBe(1);
     expect(payload?.cooldownMs).toBeGreaterThan(0);
+  });
+
+  it("fast-trips on 5 consecutive soft blocks via repeated title (HTTP 200)", () => {
+    // The user-reported scenario: a wall returns 200 + same body 5 times.
+    // BLOCK_PHRASE_RE doesn't match the title; soft_title_repeat does once
+    // 3 URLs share it; the trailing-run fast-trip lights up at 5.
+    const d = new BlockDetector();
+    const T = "Generic Page Title";
+    let payload: ReturnType<typeof d.record> = null;
+    for (let i = 0; i < 8; i++) {
+      const p = d.record({ url: url(`x-${i}`), status: 200, title: T }, HOST);
+      if (p) payload = p;
+    }
+    expect(d.isGated(HOST)).toBe(true);
+    expect(payload).not.toBeNull();
+    // Fast-trip fires before the 10/15 threshold path could.
+    expect(payload?.stats.blocked).toBeLessThan(10);
+  });
+
+  it("does NOT fast-trip when a non-blocked entry interrupts the run", () => {
+    const d = new BlockDetector();
+    const T = "Generic Page Title";  // doesn't match BLOCK_PHRASE_RE
+    // 4 same-titled (soft_title_repeat warms up after the 3rd, so entries
+    // 3 and 4 are blocked; entries 0,1 are not).
+    for (let i = 0; i < 4; i++) {
+      d.record({ url: url(`s-${i}`), status: 200, title: T }, HOST);
+    }
+    // Clean entry breaks the run.
+    d.record({ url: url("clean"), status: 200, title: "Different page" }, HOST);
+    // 3 more same-titled — trailing run is 3, below the fast-trip floor.
+    for (let i = 0; i < 3; i++) {
+      d.record({ url: url(`c-${i}`), status: 200, title: T }, HOST);
+    }
+    // Total blocked count is below 10/15 AND trailing run is below 5 →
+    // NOT gated. Confirms the fast-path doesn't fire on scattered blocks.
+    expect(d.isGated(HOST)).toBe(false);
   });
 
   it("does not re-trip while already gated", () => {
