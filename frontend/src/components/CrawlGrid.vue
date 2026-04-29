@@ -1,11 +1,26 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { TabulatorFull as Tabulator } from "tabulator-tables";
 import type { CrawlResult } from "../types/crawl";
 import { useConfig } from "../composables/useConfig";
+import { buildResultsFilter, sortFieldToColumn, type ResultsFilter } from "../utils/gridFilter";
 import "tabulator-tables/dist/css/tabulator_midnight.min.css";
 
-const props = defineProps<{ results: CrawlResult[]; activeTab: string; filterType?: string; selectAll?: number; seoVersion?: number }>();
+// Phase-4 contract: the grid is data-bound to a session id, NOT to an
+// in-memory results array. Tabulator runs in pagination=remote +
+// progressiveLoad=scroll mode and pulls pages from the Rust query commands
+// as the user scrolls. `refreshKey` is bumped by the parent (on
+// crawl-progress, on tab/filter change, on recrawl-queue mutation) to
+// force the grid to ask Rust for fresh data.
+const props = defineProps<{
+  sessionId: number | null;
+  activeTab: string;
+  filterType?: string;
+  searchQuery?: string;
+  selectAll?: number;
+  refreshKey?: number;
+}>();
 const emit = defineEmits<{ rowSelect: [result: CrawlResult | null]; recrawl: [urls: string[]]; filteredCount: [count: number] }>();
 
 const { config } = useConfig();
@@ -275,36 +290,6 @@ const TAB_COLUMNS: Record<string, any[]> = {
   "Recrawl Queue":    [COL.address, COL.queueStatus, COL.statusCode, COL.statusText, COL.contentType, COL.responseTime, COL.size],
 };
 
-/* ── Tab → row filter ── */
-
-function filterForTab(tab: string): ((r: CrawlResult) => boolean) {
-  switch (tab) {
-    case "Internal":        return () => true;
-    case "External":        return () => true;
-    case "Response Codes":  return () => true;
-    case "Page Titles":     return (r) => r.resourceType === "HTML";
-    case "Meta Description":return (r) => r.resourceType === "HTML";
-    case "H1":              return (r) => r.resourceType === "HTML";
-    case "H2":              return (r) => r.resourceType === "HTML";
-    case "Content":         return (r) => r.resourceType === "HTML";
-    case "Canonicals":      return (r) => r.resourceType === "HTML";
-    case "Directives":      return (r) => r.resourceType === "HTML";
-    case "Images":          return (r) => r.resourceType === "HTML" && !!r.ogImage;
-    case "JavaScript":      return (r) => r.resourceType === "JavaScript";
-    case "CSS":             return (r) => r.resourceType === "CSS";
-    case "Structured Data": return (r) => r.resourceType === "HTML";
-    case "Issues":          return (r) => !r.title || !r.h1 || !r.metaDescription || r.status >= 400 || r.isNoindex;
-    case "Response Times":  return () => true;
-    case "Recrawl Queue": {
-      // Pending only — matches the tab badge count. Already-recrawled URLs
-      // leave the queue (and this tab); they're still visible in other tabs.
-      const pendingSet = new Set(config.recrawlQueue);
-      return (r) => pendingSet.has(r.url);
-    }
-    default:                return () => true;
-  }
-}
-
 /* ── Helpers ── */
 
 function getScraperColumns(): any[] {
@@ -334,39 +319,38 @@ function getColumns(tab: string) {
   return scraper.length ? [...base, ...scraper] : base;
 }
 
-function getFilteredData(tab: string) {
-  let data = props.results.filter(filterForTab(tab));
-  const ft = props.filterType;
-  if (ft && ft !== "All") {
-    if (tab === "Response Codes") {
-      const code = parseInt(ft, 10);
-      data = data.filter(r => r.status === code);
-    } else {
-      data = data.filter(r => r.resourceType === ft || (ft === "Images" && r.resourceType === "Image"));
-    }
-  }
-  emit("filteredCount", data.length);
-  return data;
+// Builds the typed ResultsFilter passed to query_results / count_results
+// from the current tab + Filter Bar selection + search query + recrawl
+// queue. Pure function so it can be unit-tested independent of Tabulator.
+function currentFilter(): ResultsFilter {
+  return buildResultsFilter({
+    tab: props.activeTab,
+    filterType: props.filterType,
+    searchQuery: props.searchQuery,
+    recrawlQueue: config.recrawlQueue,
+  });
 }
 
 /* ── Lifecycle ── */
 
 onMounted(() => {
   if (!tableRef.value) return;
-  // Snapshot of results.length when the table mounts so the append-watch
-  // can distinguish "live append" from "first paint" — first paint already
-  // had data passed in to the constructor.
-  lastResultsLen = props.results.length;
 
   table = new Tabulator(tableRef.value, {
-    data: getFilteredData(props.activeTab),
-    reactiveData: false,
     height: "100%",
     layout: "fitDataStretch",
-    virtualDom: true,
-    // selectableRows: true keeps unlimited capacity (so SELECT ALL VISIBLE
-    // works). The rowClick handler below downgrades plain mouse-clicks to
-    // single-select; modifier-clicks (cmd/ctrl/shift) still multi-select.
+    // Phase-4 remote mode: Tabulator asks Rust for the visible window via
+    // ajaxRequestFunc. We piggyback on its ajax pipeline (URL is unused —
+    // every fetch routes through the func).
+    ajaxURL: "tauri://query_results",
+    ajaxRequestFunc: ajaxRequestFunc,
+    pagination: true,
+    paginationMode: "remote",
+    paginationSize: 100,
+    progressiveLoad: "scroll",
+    progressiveLoadDelay: 200,
+    progressiveLoadScrollMargin: 300,
+    sortMode: "remote",
     selectableRows: true,
     rowHeader: { formatter: "rownum", hozAlign: "center", width: 40, resizable: false, frozen: true },
     columns: getColumns(props.activeTab),
@@ -392,7 +376,6 @@ onMounted(() => {
   // Right-click context menu
   table.on("rowContext", (e: MouseEvent, row: any) => {
     e.preventDefault();
-    // If right-clicked row isn't selected, select only it
     if (!row.isSelected()) {
       table?.deselectRow();
       row.select();
@@ -408,85 +391,67 @@ onUnmounted(() => {
   }
 });
 
-// Tabulator's setData rebuilds the virtual-scroll viewport, which wipes
-// scroll. Use this only when the dataset actually changes wholesale
-// (filter / tab / shrink). For pure appends during a live crawl we use
-// addData below — that preserves scroll natively.
-function setDataPreservingScroll(data: CrawlResult[]) {
-  if (!table) return;
-  const holder = table.element?.querySelector(".tabulator-tableholder") as HTMLElement | null;
-  const scrollLeft = holder?.scrollLeft ?? 0;
-  const scrollTop = holder?.scrollTop ?? 0;
-  table.setData(data);
-  setTimeout(() => {
-    const h = table?.element?.querySelector(".tabulator-tableholder") as HTMLElement | null;
-    if (h) { h.scrollLeft = scrollLeft; h.scrollTop = scrollTop; }
-  }, 0);
-  requestAnimationFrame(() => {
-    const h = table?.element?.querySelector(".tabulator-tableholder") as HTMLElement | null;
-    if (h) { h.scrollLeft = scrollLeft; h.scrollTop = scrollTop; }
-  });
+// Tabulator hands us `(url, _config, params)` where params has page, size,
+// and (in sortMode=remote) sort: [{ field, dir }]. We translate to the
+// ResultsFilter / ResultsSort shape the Rust commands expect, run them in
+// parallel, and return the page payload Tabulator's progressive-load loop
+// expects: { data, last_page }.
+async function ajaxRequestFunc(_url: string, _config: any, params: any): Promise<{ data: any[]; last_page: number }> {
+  if (props.sessionId == null) {
+    emit("filteredCount", 0);
+    return { data: [], last_page: 1 };
+  }
+  const filter = currentFilter();
+  const page = (params?.page ?? 1) - 1;  // Tabulator pages are 1-based; Rust takes 0-based.
+  const size = params?.size ?? 100;
+  const sortDescriptor = Array.isArray(params?.sort) && params.sort.length > 0 ? params.sort[0] : null;
+  const column = sortDescriptor ? sortFieldToColumn(sortDescriptor.field) : null;
+  const sort = column
+    ? { column, direction: sortDescriptor!.dir === "desc" ? "desc" : "asc" }
+    : null;
+
+  try {
+    const [rows, total] = await Promise.all([
+      invoke<any[]>("query_results", {
+        sessionId: props.sessionId,
+        page,
+        limit: size,
+        filter,
+        sort,
+      }),
+      invoke<number>("count_results", { sessionId: props.sessionId, filter }),
+    ]);
+    emit("filteredCount", total);
+    const last_page = Math.max(1, Math.ceil(total / size));
+    return { data: rows, last_page };
+  } catch (e) {
+    console.error("CrawlGrid query failed:", e);
+    return { data: [], last_page: 1 };
+  }
 }
 
-// During a live crawl rows are pure-appends to results.value (recrawls and
-// parked-stub replacements happen in-place, no length change). Detect that
-// case and use addData(newRows) — Tabulator extends the virtual-scroll
-// dataset without rebuilding, so the user's scroll position survives.
-let lastResultsLen = 0;
-
-watch(() => props.results.length, (newLen, oldLen) => {
+// Force Tabulator to rerun its ajaxRequestFunc — used whenever the filter
+// inputs change (tab/filterType/search) or the data may have changed
+// underneath us (refreshKey bump from a crawl-progress event or recrawl
+// queue mutation).
+function refresh() {
   if (!table) return;
-  // Append path: extend existing data set with the newly-arrived rows.
-  if (newLen > oldLen && oldLen > 0 && oldLen === lastResultsLen) {
-    const filterFn = filterForTab(props.activeTab);
-    const newRows = props.results.slice(oldLen).filter(filterFn);
-    lastResultsLen = newLen;
-    if (newRows.length) {
-      void table.addData(newRows, false);  // false = append at end
-    }
-    return;
-  }
-  // Reset / shrink / first-load: full setData with scroll preservation.
-  lastResultsLen = newLen;
-  setDataPreservingScroll(getFilteredData(props.activeTab));
-});
-
-// Recrawl tab filter snapshots config.recrawlQueue per render. When the
-// listener drains the queue (splice), neither props.results.length nor
-// props.activeTab change — without an explicit watch on the queue, the
-// Recrawl Queue tab keeps showing rows for URLs that were already drained.
-// Also rebuilds the queueStatus column mutator for the same reason.
-watch(() => config.recrawlQueue.length, () => {
-  if (!table) return;
-  if (props.activeTab === "Recrawl Queue") {
-    setDataPreservingScroll(getFilteredData(props.activeTab));
-  } else {
-    // Other tabs that show the queueStatus column also need refresh, but
-    // it's just a column mutator update — no scroll preservation needed.
-    table.redraw(true);
-  }
-});
+  // setData with no args re-issues the ajax request from page 1.
+  void table.setData();
+}
 
 watch(() => props.activeTab, (tab) => {
   if (!table) return;
   table.setColumns(getColumns(tab));
-  setDataPreservingScroll(getFilteredData(tab));
+  refresh();
 });
-
-watch(() => props.filterType, () => {
-  setDataPreservingScroll(getFilteredData(props.activeTab));
-});
-
+watch(() => props.filterType, refresh);
+watch(() => props.searchQuery, refresh);
+watch(() => props.refreshKey, refresh);
+watch(() => props.sessionId, refresh);
+watch(() => config.recrawlQueue.length, refresh);
 watch(() => props.selectAll, () => {
   if (table) table.selectRow();
-});
-
-// Lazy seo_json enrichment mutates rows in place — length doesn't change, so
-// the length-watcher doesn't fire. seoVersion bumps each batch merge.
-// redraw(false) re-renders the visible rows with the freshly-mutated data
-// without touching scroll position.
-watch(() => props.seoVersion, () => {
-  if (table) table.redraw(false);
 });
 </script>
 

@@ -32,7 +32,7 @@ import type { CrawlResult } from "./types/crawl";
 const url = ref("");
 const crawlScope = ref("Subdomain");
 const { config } = useConfig();
-const { results, crawling, stopped, seoVersion, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
+const { results, crawling, stopped, seoVersion, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
 const voiceFlow = useVoiceFlow();
 const voiceModalOpen = ref(false);
 
@@ -152,6 +152,13 @@ const searchQuery = ref("");
 const filterType = ref("All");
 const selectAllTrigger = ref(0);
 const filteredCount = ref(0);
+
+// CrawlGrid lives in remote-mode against query_results. We bump
+// gridRefreshKey whenever the grid should re-issue its query — currently:
+// every crawl-progress tick (so live counts and new rows reach the user
+// without per-row events). 500ms cadence matches the Rust emitter.
+const gridRefreshKey = ref(0);
+watch(() => crawlProgress.value.rowCount, () => { gridRefreshKey.value++; });
 const browserInstallNotice = ref<{ state: "running" | "done" | "failed"; text: string } | null>(null);
 let browserInstallTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -547,7 +554,7 @@ async function handleMenuAction(menu: string, item: string) {
       <div class="main-content">
         <div class="left-panels">
           <div class="grid-area">
-            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" :seo-version="seoVersion" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
+            <CrawlGrid :session-id="currentSessionId" :active-tab="activeCategory" :filter-type="filterType" :search-query="searchQuery" :select-all="selectAllTrigger" :refresh-key="gridRefreshKey" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
           </div>
           <div class="grid-status-bar">
             <span>Selected Cells: 0</span>

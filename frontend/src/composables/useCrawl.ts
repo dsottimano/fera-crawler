@@ -13,6 +13,36 @@ const results = ref<CrawlResult[]>([]);
 const crawling = ref(false);
 const stopped = ref(false);
 const currentSessionId = ref<number | null>(null);
+
+/** Live aggregate from the Rust `crawl-progress` event (Phase 3). One
+ *  module-scope listener feeds this; the data grid watches `rowCount` to
+ *  offer a "X new rows" refresh and the health screen reads it directly. */
+export interface CrawlProgress {
+  rowCount: number;
+  errorCount: number;
+  lastUrl: string;
+  latestStatuses: number[];
+}
+const crawlProgress = ref<CrawlProgress>({
+  rowCount: 0,
+  errorCount: 0,
+  lastUrl: "",
+  latestStatuses: [],
+});
+
+let progressUnlisten: (() => void) | null = null;
+async function ensureProgressListener(): Promise<void> {
+  if (progressUnlisten) return;
+  progressUnlisten = await listen<CrawlProgress>("crawl-progress", (event) => {
+    crawlProgress.value = event.payload;
+  });
+}
+// Reset on every crawl start so the row count doesn't carry over from the
+// previous crawl. Module-level so any caller that starts a crawl gets the
+// reset without re-wiring.
+function resetCrawlProgress() {
+  crawlProgress.value = { rowCount: 0, errorCount: 0, lastUrl: "", latestStatuses: [] };
+}
 // When a saved crawl is loaded, its pinned settings snapshot lives here so
 // resume/start/stop and the sidebar all read from the same source. Cleared on
 // New Crawl so a fresh crawl falls back to the default settings.
@@ -48,6 +78,10 @@ export function useCrawl() {
     getSessionStatus,
     getLatestIncompleteSession,
   } = useDatabase();
+
+  // Wire the global crawl-progress listener once. Idempotent — subsequent
+  // useCrawl() callers no-op.
+  void ensureProgressListener();
 
   // Lazy first-call rehydration. Survives HMR + production reload because
   // the source of truth is the DB row, not in-memory refs.
@@ -119,6 +153,7 @@ export function useCrawl() {
     }
     crawling.value = true;
     stopped.value = false;
+    resetCrawlProgress();
 
     // Create a DB session (or reuse current for resume).
     //
@@ -380,6 +415,7 @@ export function useCrawl() {
     currentSessionId,
     pinnedSettings,
     seoVersion,
+    crawlProgress,
     startCrawl,
     stopCrawl,
     clearResults,

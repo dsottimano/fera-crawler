@@ -91,6 +91,16 @@ pub struct ResultsFilter {
     pub empty_scraper_rule: Option<String>,
     /// Resource type slice: "HTML" | "CSS" | "JavaScript" | …
     pub resource_type: Option<String>,
+    /// True → "Issues" tab equivalent: rows missing title/h1/meta-description
+    /// OR status >= 400 OR is_noindex. None → no filter.
+    pub issues_only: Option<bool>,
+    /// Restrict to a specific URL set — used by the "Recrawl Queue" tab,
+    /// which is bounded by an in-memory list rather than a row property.
+    pub url_in: Option<Vec<String>>,
+    /// True → only HTML rows that have a non-empty og:image. Powers the
+    /// Images tab. (resourceType=HTML covers the first half; this flag
+    /// adds the og_image filter.)
+    pub has_og_image: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -180,6 +190,39 @@ fn build_where(
             out_clauses.push("resource_type = ?".to_string());
             out_binds.push(Value::String(rt.clone()));
         }
+    }
+    if let Some(true) = filter.issues_only {
+        // Five OR'd issue conditions match the legacy "Issues" tab predicate.
+        // Keep the parens — strips ambiguity when this AND's into the wider
+        // WHERE clause.
+        out_clauses.push(
+            "(title = '' OR title IS NULL \
+              OR h1 = '' OR h1 IS NULL \
+              OR meta_description = '' OR meta_description IS NULL \
+              OR status >= 400 \
+              OR is_noindex = 1)"
+                .to_string(),
+        );
+    }
+    if let Some(urls) = &filter.url_in {
+        if urls.is_empty() {
+            // url_in: [] = "match nothing" — explicit empty set. Without
+            // this short-circuit SQLite would parse `IN ()` as a syntax
+            // error.
+            out_clauses.push("0".to_string());
+        } else {
+            let placeholders = std::iter::repeat("?")
+                .take(urls.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            out_clauses.push(format!("url IN ({})", placeholders));
+            for u in urls {
+                out_binds.push(Value::String(u.clone()));
+            }
+        }
+    }
+    if let Some(true) = filter.has_og_image {
+        out_clauses.push("og_image IS NOT NULL AND og_image != ''".to_string());
     }
 }
 
@@ -364,8 +407,12 @@ pub async fn query_results_inner(
     build_where(filter, &mut clauses, &mut binds);
     let where_clause = clauses.join(" AND ");
     let order = order_clause(sort);
+    // Always include seo_json: the data grid renders user-defined scraper
+    // columns (data.scraper.<rule>.value) and a few overflow OG fields.
+    // ~20KB/row × 50-row page = ~1MB — bounded per page, so OK to ship
+    // every time. Cheaper than a second roundtrip for those columns.
     let sql = format!(
-        "SELECT {cols} FROM crawl_results WHERE {where_clause} {order} LIMIT ? OFFSET ?",
+        "SELECT {cols}, seo_json FROM crawl_results WHERE {where_clause} {order} LIMIT ? OFFSET ?",
         cols = RESULT_COLUMNS,
         where_clause = where_clause,
         order = order,
@@ -376,7 +423,27 @@ pub async fn query_results_inner(
     }
     q = q.bind(limit).bind(offset);
     let rows = q.fetch_all(pool).await?;
-    Ok(rows.iter().map(row_to_json).collect())
+    Ok(rows.iter().map(|r| {
+        let mut v = row_to_json(r);
+        let seo_str: String = r.try_get("seo_json").unwrap_or_default();
+        merge_seo_overflow(&mut v, &seo_str);
+        v
+    }).collect())
+}
+
+// Merge seo_json's overflow fields back into a row JSON object. Used by
+// both query_results (so the grid sees scraper/og fields without a second
+// fetch) and get_result_full (so the detail panel sees the full shape).
+// `entry().or_insert` — top-level columns always win over seo_json keys
+// of the same name.
+fn merge_seo_overflow(target: &mut Value, seo_str: &str) {
+    if let Ok(Value::Object(seo)) = serde_json::from_str::<Value>(seo_str) {
+        if let Value::Object(ref mut obj) = target {
+            for (k, val) in seo {
+                obj.entry(k).or_insert(val);
+            }
+        }
+    }
 }
 
 pub async fn count_results_inner(
@@ -418,17 +485,8 @@ pub async fn get_result_full_inner(
         .await?;
     Ok(row.map(|r| {
         let mut v = row_to_json(&r);
-        // Merge seo_json's overflow fields back into the row so the detail
-        // view sees the full CrawlResult shape with one DB hop. Bad/empty
-        // JSON falls through as the row's defaults.
         let seo_str: String = r.try_get("seo_json").unwrap_or_default();
-        if let Ok(Value::Object(seo)) = serde_json::from_str::<Value>(&seo_str) {
-            if let Value::Object(ref mut obj) = v {
-                for (k, val) in seo {
-                    obj.entry(k).or_insert(val);
-                }
-            }
-        }
+        merge_seo_overflow(&mut v, &seo_str);
         v
     }))
 }
@@ -850,6 +908,88 @@ mod tests {
         insert_fixture_rows(&pool).await;
         let r = get_result_full_inner(&pool, 1, "https://nope.com").await.unwrap();
         assert!(r.is_none());
+    }
+
+    #[tokio::test]
+    async fn issues_only_filter_matches_legacy_predicate() {
+        // Legacy "Issues" tab: !title || !h1 || !meta_description || status >= 400 || isNoindex.
+        // Fixture rows that should match:
+        //   row 2 (h1 = "")                                 ✓
+        //   row 3 (h1 = "" AND status 404)                  ✓
+        //   row 4 (h1 = "" AND status 500)                  ✓
+        //   row 8 (title = "" AND h1 = "")                  ✓
+        //   row 9 (h1 = "")                                 ✓
+        //   row 5 (Pricing Page / "Plans") — no missing fields, status 200, indexable.
+        //     But meta_description = '' (default) → matches.  ✓
+        //   rows 1, 6, 7 — all have h1, no status problem, but meta_description = '' → match.
+        // So all rows that have an empty meta_description match. Fixture
+        // never sets meta_description, which means all rows have ''.
+        // → all 9 rows in session 1 match the issues predicate.
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        let f = ResultsFilter { issues_only: Some(true), ..Default::default() };
+        assert_eq!(count_results_inner(&pool, 1, &f).await.unwrap(), 9);
+
+        // Force a clean row by inserting one with everything filled.
+        sqlx::query(
+            "INSERT INTO crawl_results (session_id, url, status, title, h1, meta_description, is_indexable)
+             VALUES (1, 'https://clean.com', 200, 'OK', 'OK', 'present', 1)"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Issues count unchanged (10 rows, 9 issues, 1 clean).
+        assert_eq!(count_results_inner(&pool, 1, &f).await.unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn url_in_filter_powers_recrawl_queue_tab() {
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        // Pick three urls; the rest are excluded.
+        let f = ResultsFilter {
+            url_in: Some(vec![
+                "https://a.com/1".into(),
+                "https://a.com/3".into(),
+                "https://a.com/8".into(),
+            ]),
+            ..Default::default()
+        };
+        let rows = query_results_inner(&pool, 1, 0, 100, &f, None).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        let urls: Vec<&str> = rows.iter().map(|r| r["url"].as_str().unwrap()).collect();
+        assert!(urls.contains(&"https://a.com/1"));
+        assert!(urls.contains(&"https://a.com/3"));
+        assert!(urls.contains(&"https://a.com/8"));
+    }
+
+    #[tokio::test]
+    async fn url_in_empty_returns_no_rows_not_a_syntax_error() {
+        // An empty Recrawl Queue should be selectable without erroring.
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        let f = ResultsFilter {
+            url_in: Some(vec![]),
+            ..Default::default()
+        };
+        assert_eq!(count_results_inner(&pool, 1, &f).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn query_results_includes_scraper_overflow_from_seo_json() {
+        // The grid renders user-defined scraper columns directly off the
+        // row's `scraper` field — that field lives in seo_json, not as a
+        // top-level column. Verifying the merge here protects against
+        // silent regressions when query_results' SELECT shape changes.
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        let rows = query_results_inner(&pool, 1, 0, 100, &ResultsFilter::default(), None)
+            .await
+            .unwrap();
+        let row6 = rows.iter().find(|r| r["url"] == "https://a.com/6").unwrap();
+        assert_eq!(row6["scraper"]["price"]["value"], "$10");
+        let row5 = rows.iter().find(|r| r["url"] == "https://a.com/5").unwrap();
+        assert_eq!(row5["scraper"]["price"]["value"], "");
     }
 
     #[tokio::test]
