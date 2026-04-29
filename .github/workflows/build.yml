@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -115,8 +114,9 @@ jobs:
         run: |
           $exe = Get-ChildItem -Recurse -Path "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
           Write-Host "Found installer: $($exe.FullName) ($([math]::Round($exe.Length / 1MB, 1)) MB)"
-          $tag = if ($env:GITHUB_REF_NAME -match '^v') { $env:GITHUB_REF_NAME } else { "main" }
-          gh release create $tag --draft --title "Fera $tag" --notes "SEO Crawler release" 2>$null
+          $tag = $env:GITHUB_REF_NAME
+          # Create the release if the Linux job hasn't already; published, not draft.
+          gh release create $tag --title "Fera $tag" --notes "SEO Crawler release" 2>$null
           gh release upload $tag $exe.FullName --clobber
 
   build-linux:
@@ -272,12 +272,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$GH_REF_NAME" =~ ^v ]]; then
-            tag="$GH_REF_NAME"
-          else
-            tag="main"
-          fi
-          gh release create "$tag" --draft --title "Fera $tag" --notes "SEO Crawler release" 2>/dev/null || true
+          tag="$GH_REF_NAME"
+          # Create the release if the Windows job hasn't already; published, not draft.
+          gh release create "$tag" --title "Fera $tag" --notes "SEO Crawler release" 2>/dev/null || true
 
           deb=$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -n1 || true)
           if [ -n "$deb" ]; then
