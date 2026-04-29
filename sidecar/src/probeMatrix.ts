@@ -30,16 +30,29 @@ export interface ProbeRowConfig {
   // gate behavioral-detection signals that flip headless→headed even with
   // identical fingerprints. Last-resort row before declaring IP-banned.
   headed: boolean;
+  // True → wipe the persistent baseProfileDir before this row runs.
+  // Targets the case where Akamai stamped `_abck` with `~-1~` (or
+  // Cloudflare invalidated `__cf_bm`) and the poisoned cookie is
+  // pre-judging every subsequent request. Wiping resets the bot-score
+  // state. Only one row per matrix should set this — multiple wipes is
+  // wasted work, and a wipe destroys any other site's login state in
+  // the profile.
+  wipeBaseProfile: boolean;
 }
 
+// Row order matters: cheapest no-op first, then the strongest single
+// block-buster (profile wipe), then progressively heavier
+// fingerprint/network changes. Probe early-exits on the first 200, so
+// putting the wipe at row 2 means a typical re-block recovery costs
+// just two attempts instead of running the whole matrix.
 export const DEFAULT_MATRIX: ProbeRowConfig[] = [
-  { row: 1, stealth: "off",    perHostDelayMs: 500,  warmup: false, freshProfile: false, residentialUa: false, headed: false },
-  { row: 2, stealth: "tier-1", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false },
-  { row: 3, stealth: "tier-2", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false },
-  { row: 4, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: false, residentialUa: false, headed: false },
-  { row: 5, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: false, headed: false },
-  { row: 6, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: false },
-  { row: 7, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: true  },
+  { row: 1, stealth: "off",    perHostDelayMs: 500,  warmup: false, freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
+  { row: 2, stealth: "tier-2", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: true  },
+  { row: 3, stealth: "tier-1", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
+  { row: 4, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
+  { row: 5, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: false, headed: false, wipeBaseProfile: false },
+  { row: 6, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: false, wipeBaseProfile: false },
+  { row: 7, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: true,  wipeBaseProfile: false },
 ];
 
 function patchesFor(tier: StealthTier) {
@@ -92,6 +105,30 @@ async function runRow(
   // starts. killChromeForProfile also sleeps 500ms so the OS releases
   // file handles before the next launch.
   await killChromeForProfile(userDataDir);
+
+  // Profile wipe: the strongest single block-busting move. Akamai's
+  // `_abck` stamped `~-1~` and Cloudflare's invalidated `__cf_bm`
+  // persist across crawls and pre-judge every subsequent request, so
+  // wiping the baseProfileDir resets the bot-score state. Only on rows
+  // where wipeBaseProfile is set; never on freshProfile rows (those
+  // already use a throwaway dir).
+  if (cfg.wipeBaseProfile && !cfg.freshProfile) {
+    try {
+      fs.rmSync(baseProfileDir, { recursive: true, force: true });
+      fs.mkdirSync(baseProfileDir, { recursive: true });
+    } catch (err) {
+      // Best-effort: a leftover lockfile from a process we couldn't
+      // kill may block rmSync. Surface it via the row's error string
+      // so the user sees why the wipe didn't take effect.
+      writeAnyEvent({
+        type: "log",
+        ts: Date.now(),
+        level: "warn",
+        msg: "profile wipe failed",
+        meta: { row: cfg.row, error: (err as Error).message },
+      });
+    }
+  }
 
   const executablePath = await ensureChromiumExecutable("probe-matrix");
 
@@ -173,6 +210,7 @@ async function runRow(
       freshProfile: cfg.freshProfile,
       residentialUa: cfg.residentialUa,
       headed: cfg.headed,
+      wipeBaseProfile: cfg.wipeBaseProfile,
     },
     status,
     title,

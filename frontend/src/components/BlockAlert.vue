@@ -28,6 +28,10 @@ interface ProbeConfig {
   residentialUa: boolean;
   // Tier-3+ row: visible browser. Older sidecar builds don't emit this field.
   headed?: boolean;
+  // Set on the wipe-and-retry row — destroys the persistent profile dir
+  // before launching to clear poisoned anti-bot cookies. Optional so
+  // older sidecar builds that don't emit it still render cleanly.
+  wipeBaseProfile?: boolean;
 }
 
 interface ProbeRow {
@@ -376,7 +380,8 @@ onUnmounted(() => {
             <ul>
               <li><code>500ms / 1000ms / 2000ms</code>: minimum gap between same-host requests. Defeats per-host RPS detection.</li>
               <li><code>warmup</code>: visit <code>origin/</code> once before the deep-link so Akamai's <code>_abck</code> / Cloudflare's <code>__cf_bm</code> challenge cookies set first.</li>
-              <li><code>fresh</code>: throwaway browser-profile dir for this row, so prior poisoned cookies don't carry in.</li>
+              <li><code>WIPE</code>: rm -rf the persistent browser profile dir before launching. Resets poisoned anti-bot cookies (Akamai's <code>~-1~</code>-stamped <code>_abck</code>; invalidated <code>__cf_bm</code>) that pre-judge every subsequent request. One of the strongest single moves; runs early so a typical re-block recovers in 2 attempts. Destructive — also clears any other site's login state in this profile.</li>
+              <li><code>fresh</code>: throwaway browser-profile dir for this row, so prior poisoned cookies don't carry in (does NOT touch your persistent profile).</li>
               <li><code>residential-UA</code>: forces a Chrome-on-Windows UA string instead of the fingerprint-derived one.</li>
               <li><code>headed</code>: visible Chrome window. Catches walls that gate behavioral signals only in headless. Last-resort row.</li>
             </ul>
@@ -409,6 +414,7 @@ onUnmounted(() => {
             <div class="c-cfg">
               {{ probeRows[n - 1].config.stealth }} · {{ probeRows[n - 1].config.rate }}
               <template v-if="probeRows[n - 1].config.warmup"> · warmup</template>
+              <template v-if="probeRows[n - 1].config.wipeBaseProfile"> · <span class="c-cfg-wipe">WIPE</span></template>
               <template v-if="probeRows[n - 1].config.freshProfile"> · fresh</template>
               <template v-if="probeRows[n - 1].config.residentialUa"> · residential-UA</template>
               <template v-if="probeRows[n - 1].config.headed"> · headed</template>
@@ -440,7 +446,8 @@ onUnmounted(() => {
           Winning config: stealth <strong>{{ firstSuccessRow.config.stealth }}</strong>,
           per-host delay <strong>{{ firstSuccessRow.config.rate }}</strong>
           <template v-if="firstSuccessRow.config.warmup">, <strong>session warmup on</strong></template>
-          <template v-if="firstSuccessRow.config.freshProfile">, <strong>fresh browser profile</strong> (wipes existing cookies)</template>
+          <template v-if="firstSuccessRow.config.wipeBaseProfile">, <strong>profile wiped</strong> (cleared poisoned anti-bot cookies)</template>
+          <template v-if="firstSuccessRow.config.freshProfile">, <strong>fresh browser profile</strong> (throwaway dir, no persisted cookies)</template>
           <template v-if="firstSuccessRow.config.residentialUa">, <strong>residential user-agent</strong></template>
           <template v-if="firstSuccessRow.config.headed">, <strong>headed mode</strong> (visible browser window during crawl)</template>.
         </div>
@@ -732,6 +739,15 @@ onUnmounted(() => {
 
 .probe-trow.row-blocked .c-result {
   color: #f44747;
+}
+
+/* WIPE badge in the config column — destructive op, deserves a callout
+   so the user clocks it at a glance ("did the probe really nuke my
+   profile? yes, deliberately, on row 2"). */
+.c-cfg-wipe {
+  font-weight: 700;
+  color: #f4b266;
+  letter-spacing: 0.5px;
 }
 
 /* Inline error excerpt next to the reason label — same row as
