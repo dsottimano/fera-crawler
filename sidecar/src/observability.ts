@@ -20,7 +20,18 @@ const ROLLING_WINDOW_MS = 10_000;
 
 let metricTimer: NodeJS.Timeout | null = null;
 
+// Per-URL debug events (navigating / page complete / rate-limit gap) cost one
+// IPC hop each on the Rust→Tauri→Vue path, so a 30k-URL crawl emits ~100k log
+// events even when nobody is watching the panel. Off by default; turned on by
+// the `advanced.debugLog` setting via `--debug-log`.
+let debugEnabled = false;
+
+export function setDebugEnabled(on: boolean): void {
+  debugEnabled = on;
+}
+
 export function log(level: LogLevel, msg: string, meta?: Record<string, unknown>): void {
+  if (level === "debug" && !debugEnabled) return;
   writeEvent({ type: "log", ts: Date.now(), level, msg, meta });
 }
 

@@ -3,7 +3,7 @@ import { runCrawler, openBrowser, dumpProfile } from "./crawler.js";
 import { openInspector } from "./inspector.js";
 import { runProbeMatrix } from "./probeMatrix.js";
 import type { CrawlConfig } from "./types.js";
-import { startMetricEmitter, stopMetricEmitter, log } from "./observability.js";
+import { startMetricEmitter, stopMetricEmitter, log, setDebugEnabled } from "./observability.js";
 
 const args = process.argv.slice(2);
 
@@ -141,6 +141,7 @@ if (command === "open-browser") {
   const perHostConcurrencyRaw = getFlag("--per-host-concurrency", "");
   const perHostConcurrency = perHostConcurrencyRaw ? parseInt(perHostConcurrencyRaw, 10) : undefined;
   const sessionWarmup = hasFlag("--session-warmup");
+  setDebugEnabled(hasFlag("--debug-log"));
 
   const excludeUrlsFile = getFlag("--exclude-urls-file", "");
   let excludeUrls: string[] | undefined;

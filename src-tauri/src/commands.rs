@@ -236,6 +236,7 @@ pub async fn start_crawl(
     per_host_concurrency: Option<u32>,
     session_warmup: Option<bool>,
     exclude_urls: Option<Vec<String>>,
+    debug_log: Option<bool>,
 ) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
 
@@ -354,6 +355,10 @@ pub async fn start_crawl(
 
     if let Some(true) = session_warmup {
         args.push("--session-warmup".to_string());
+    }
+
+    if let Some(true) = debug_log {
+        args.push("--debug-log".to_string());
     }
 
     if let Some(ex) = exclude_urls {

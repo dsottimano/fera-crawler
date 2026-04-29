@@ -27,6 +27,7 @@ export interface StartCrawlPayload {
   perHostConcurrency: number;
   sessionWarmup: boolean | null;
   excludeUrls: string[] | null;
+  debugLog: boolean;
   [k: string]: unknown;
 }
 
@@ -80,5 +81,6 @@ export function buildStartCrawlPayload(
     perHostConcurrency: s.performance.perHostConcurrency,
     sessionWarmup: s.performance.sessionWarmup || null,
     excludeUrls: excludeUrlsArr.length ? excludeUrlsArr : null,
+    debugLog: s.advanced.debugLog,
   };
 }

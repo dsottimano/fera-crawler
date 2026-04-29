@@ -301,19 +301,31 @@ function maxResponseTime(): string {
       </div>
       <div class="hero-stats">
         <div class="hero-stat">
-          <div class="hero-stat-label">PAGES</div>
+          <div class="hero-stat-label">
+            PAGES
+            <span class="info-tip" :data-tip="props.crawling ? 'Live: every URL the sidecar has emitted, including retries. Settles to the de-duped DB count once the crawl finishes.' : 'Distinct URLs persisted to the database for this session.'">i</span>
+          </div>
           <div class="hero-stat-value">{{ heroRowCount.toLocaleString() }}</div>
         </div>
         <div class="hero-stat">
-          <div class="hero-stat-label">ERRORS</div>
+          <div class="hero-stat-label">
+            ERRORS
+            <span class="info-tip" :data-tip="props.crawling ? 'Live: every failed fetch attempt the sidecar emits. A retried URL counts each failed try here, so this is usually higher than the DB-truth count below.' : 'URLs whose final persisted result was a request failure (network error, timeout, page-closed, etc.).'">i</span>
+          </div>
           <div class="hero-stat-value" :class="{ 'hero-stat-value--bad': heroErrorCount > 0 }">{{ heroErrorCount.toLocaleString() }}</div>
         </div>
         <div class="hero-stat">
-          <div class="hero-stat-label">AVG RESPONSE</div>
+          <div class="hero-stat-label">
+            AVG RESPONSE
+            <span class="info-tip" data-tip="Mean response_time across all persisted rows in this session, in milliseconds.">i</span>
+          </div>
           <div class="hero-stat-value">{{ avgResponseTime() }}</div>
         </div>
         <div class="hero-stat">
-          <div class="hero-stat-label">MAX RESPONSE</div>
+          <div class="hero-stat-label">
+            MAX RESPONSE
+            <span class="info-tip" data-tip="Slowest single response in this session. A 20000ms value usually means the page navigation hit the timeout cap.">i</span>
+          </div>
           <div class="hero-stat-value">{{ maxResponseTime() }}</div>
         </div>
       </div>
@@ -326,7 +338,10 @@ function maxResponseTime(): string {
     <div class="cards-grid">
       <!-- Status code mix -->
       <div class="card" :class="`card--${statusMixSeverity()}`">
-        <div class="card-title">STATUS CODES</div>
+        <div class="card-title">
+          STATUS CODES
+          <span class="info-tip" data-tip="HTTP response code distribution from the persisted rows. Click a band to filter the DATA grid to those URLs.">i</span>
+        </div>
         <div class="card-body status-mix">
           <button class="status-row" @click="emit('drill', { tab: 'Response Codes', filterType: '2xx' })">
             <span class="status-dot status-dot--ok"></span>
@@ -353,7 +368,10 @@ function maxResponseTime(): string {
 
       <!-- Indexability -->
       <div class="card" :class="`card--${indexabilitySeverity()}`">
-        <div class="card-title">INDEXABILITY</div>
+        <div class="card-title">
+          INDEXABILITY
+          <span class="info-tip" data-tip="Share of pages that search engines may index. Indexable = 2xx + not noindex + not blocked by robots. Noindex / Nofollow come from meta-robots and X-Robots-Tag headers.">i</span>
+        </div>
         <div class="card-body status-mix">
           <button class="status-row" @click="emit('drill', { tab: 'Directives' })">
             <span class="status-dot status-dot--ok"></span>
@@ -375,7 +393,10 @@ function maxResponseTime(): string {
 
       <!-- Issues / quality -->
       <div class="card" :class="`card--${emptyH1Severity() === 'red' || emptyTitleSeverity() === 'red' ? 'red' : emptyH1Severity() === 'amber' || emptyTitleSeverity() === 'amber' ? 'amber' : 'ok'}`">
-        <div class="card-title">CONTENT GAPS</div>
+        <div class="card-title">
+          CONTENT GAPS
+          <span class="info-tip" data-tip="Pages missing on-page SEO essentials. Computed across all persisted rows — non-HTML resources are excluded by the underlying queries.">i</span>
+        </div>
         <div class="card-body status-mix">
           <button class="status-row" @click="emit('drill', { tab: 'Page Titles' })">
             <span class="status-dot" :class="emptyTitleSeverity() === 'ok' ? 'status-dot--ok' : 'status-dot--bad'"></span>
@@ -397,21 +418,27 @@ function maxResponseTime(): string {
 
       <!-- Redirects + errors -->
       <div class="card" :class="`card--${health.errors > 0 ? 'red' : health.redirects > 0 ? 'amber' : 'ok'}`">
-        <div class="card-title">FLOW &amp; FAULTS</div>
+        <div class="card-title">
+          FLOW &amp; FAULTS
+          <span class="info-tip" data-tip="DB-truth view: distinct URLs per outcome. These numbers can be lower than the live hero counters during a crawl because retries that eventually succeed overwrite the failed row.">i</span>
+        </div>
         <div class="card-body status-mix">
           <button class="status-row" @click="emit('drill', { tab: 'Response Codes', filterType: '3xx' })">
             <span class="status-dot status-dot--warn"></span>
             <span class="status-label">Redirects</span>
+            <span class="info-tip" data-tip="URLs whose final response was a 3xx — they pointed somewhere else. The redirect target is in the redirect_url column.">i</span>
             <span class="status-count">{{ health.redirects.toLocaleString() }}</span>
           </button>
           <button class="status-row" @click="emit('drill', { tab: 'Issues' })">
             <span class="status-dot status-dot--bad"></span>
             <span class="status-label">Errors (req-fail)</span>
+            <span class="info-tip" data-tip="URLs whose final attempt failed before a status code came back (network error, timeout, page-closed). Different from 4xx/5xx — those got a real response. Lower than the live ERRORS counter when retries succeeded.">i</span>
             <span class="status-count">{{ health.errors.toLocaleString() }}</span>
           </button>
           <button class="status-row" @click="emit('drill', { tab: 'Response Codes' })">
             <span class="status-dot status-dot--info"></span>
             <span class="status-label">Total pages</span>
+            <span class="info-tip" data-tip="Distinct URLs persisted to the database. The hero PAGES counter is event-based and counts retries, so it temporarily runs ahead of this during a crawl.">i</span>
             <span class="status-count">{{ health.total.toLocaleString() }}</span>
           </button>
         </div>
@@ -419,7 +446,10 @@ function maxResponseTime(): string {
 
       <!-- Resource type breakdown (replaces the old right-sidebar STATS donut). -->
       <div v-if="resourceSegments.length" class="card card--ok card--wide">
-        <div class="card-title">RESOURCE TYPES</div>
+        <div class="card-title">
+          RESOURCE TYPES
+          <span class="info-tip" data-tip="Resource-type mix derived from each row's content_type. Click a segment to filter the DATA grid to just that type.">i</span>
+        </div>
         <div class="card-body resource-card">
           <svg viewBox="0 0 200 200" class="donut-chart" aria-hidden="true">
             <circle cx="100" cy="100" r="70" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="22" />
@@ -641,6 +671,70 @@ function maxResponseTime(): string {
 .status-count {
   font-weight: 600;
   color: #ffffff;
+}
+
+/* Info tooltip — small (i) glyph next to a label/title; reveals a tooltip on
+   hover/focus. CSS-only so we don't pull in a popper lib for what is
+   ultimately a static piece of explanatory copy. */
+.info-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 8px;
+  font-weight: 700;
+  font-style: italic;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  letter-spacing: 0;
+  cursor: help;
+  position: relative;
+  flex-shrink: 0;
+  vertical-align: middle;
+  text-transform: none;
+}
+.info-tip:hover,
+.info-tip:focus-visible {
+  background: rgba(86, 156, 214, 0.08);
+  border-color: rgba(86, 156, 214, 0.5);
+  color: #ffffff;
+}
+.info-tip:hover::after,
+.info-tip:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 100;
+  width: max-content;
+  max-width: 320px;
+  padding: 8px 10px;
+  background: #141a2e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  font-weight: 400;
+  font-style: normal;
+  letter-spacing: 0;
+  line-height: 1.45;
+  white-space: normal;
+  text-align: left;
+  text-transform: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+/* Right-edge tooltips would clip off-screen — flip them. */
+.status-row .info-tip:hover::after,
+.status-row .info-tip:focus-visible::after {
+  left: auto;
+  right: 0;
 }
 
 .health-error {
