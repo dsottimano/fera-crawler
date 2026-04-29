@@ -1,28 +1,56 @@
-import { reactive } from "vue";
-import { type CrawlConfig, defaultConfig } from "../types/crawl";
+import { useSettings } from "./useSettings";
+import { useCrawl } from "./useCrawl";
+import type { SettingsValues } from "../settings/types";
+
+type Inputs = SettingsValues["inputs"];
 
 const LEGACY_STORAGE_KEY = "fera-config-defaults";
-
-// Transient per-crawl state. Nothing here persists across launches — persistent
-// knobs (concurrency, delay, mode, headless, UA, …) are profile settings now.
-// One-shot cleanup of the legacy localStorage blob that used to hold persistent
-// defaults (including a bot-identifying userAgent that overrode stealth).
 try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch {}
 
-const config = reactive<CrawlConfig>({ ...defaultConfig });
-
+// Per-crawl inputs (URL list, custom headers, scraper rules, recrawl queue)
+// live in the active SettingsValues.inputs bucket — single source of truth.
+// The "active" SettingsValues is the pinned snapshot when a saved crawl is
+// loaded, otherwise the default-settings profile. This Proxy keeps existing
+// callsites (`config.urls`, `config.customHeaders[k] = v`, …) working
+// unchanged while routing reads/writes to whichever blob is in effect.
 export function useConfig() {
+  const { settings } = useSettings();
+  const { pinnedSettings } = useCrawl();
+
+  function effectiveInputs(): Inputs {
+    return (pinnedSettings.value ?? settings.value).inputs;
+  }
+
+  const config = new Proxy({} as Inputs, {
+    get(_t, prop) {
+      return (effectiveInputs() as Record<string | symbol, unknown>)[prop as string];
+    },
+    set(_t, prop, value) {
+      (effectiveInputs() as Record<string | symbol, unknown>)[prop as string] = value;
+      return true;
+    },
+    deleteProperty(_t, prop) {
+      delete (effectiveInputs() as Record<string | symbol, unknown>)[prop as string];
+      return true;
+    },
+    has(_t, prop) {
+      return prop in (effectiveInputs() as object);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(effectiveInputs() as object);
+    },
+    getOwnPropertyDescriptor(_t, prop) {
+      return Object.getOwnPropertyDescriptor(effectiveInputs(), prop);
+    },
+  });
+
   function reset() {
-    Object.assign(config, defaultConfig);
+    const inputs = effectiveInputs();
+    inputs.urls = [];
+    inputs.customHeaders = {};
+    inputs.scraperRules = [];
+    inputs.recrawlQueue = [];
   }
 
-  function applyConfig(incoming: Partial<CrawlConfig>) {
-    if (!incoming || Object.keys(incoming).length === 0) return;
-    // Older .fera files and DB session configs may include schema-migrated
-    // keys (mode, concurrency, userAgent, …). Spreading over defaultConfig
-    // drops the extras; TypeScript-unknown keys are harmless at runtime.
-    Object.assign(config, { ...defaultConfig, ...incoming });
-  }
-
-  return { config, reset, applyConfig };
+  return { config, reset };
 }

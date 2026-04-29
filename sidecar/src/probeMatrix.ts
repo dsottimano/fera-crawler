@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { chromium, type Page } from "patchright";
-import { crawlPage, findChromium, getBrowserProfileDir } from "./crawler.js";
+import { crawlPage, ensureChromiumExecutable, getBrowserProfileDir } from "./crawler.js";
 import { BlockDetector, hostOf, type BlockReason } from "./blockDetector.js";
 import { writeAnyEvent } from "./pipeline.js";
 import {
@@ -26,15 +26,20 @@ export interface ProbeRowConfig {
   warmup: boolean;
   freshProfile: boolean;
   residentialUa: boolean;
+  // Headed mode = visible Chrome window. Some walls (DataDome, PerimeterX)
+  // gate behavioral-detection signals that flip headless→headed even with
+  // identical fingerprints. Last-resort row before declaring IP-banned.
+  headed: boolean;
 }
 
 export const DEFAULT_MATRIX: ProbeRowConfig[] = [
-  { row: 1, stealth: "off",    perHostDelayMs: 500,  warmup: false, freshProfile: false, residentialUa: false },
-  { row: 2, stealth: "tier-1", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false },
-  { row: 3, stealth: "tier-2", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false },
-  { row: 4, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: false, residentialUa: false },
-  { row: 5, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: false },
-  { row: 6, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true  },
+  { row: 1, stealth: "off",    perHostDelayMs: 500,  warmup: false, freshProfile: false, residentialUa: false, headed: false },
+  { row: 2, stealth: "tier-1", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false },
+  { row: 3, stealth: "tier-2", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false },
+  { row: 4, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: false, residentialUa: false, headed: false },
+  { row: 5, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: false, headed: false },
+  { row: 6, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: false },
+  { row: 7, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: true  },
 ];
 
 function patchesFor(tier: StealthTier) {
@@ -45,11 +50,17 @@ function patchesFor(tier: StealthTier) {
   return { ...DEFAULT_STEALTH_PATCHES };
 }
 
+interface RowOutcome {
+  blocked: boolean;
+  status: number;
+  errored: boolean;
+}
+
 async function runRow(
   sampleUrl: string,
   cfg: ProbeRowConfig,
   baseProfileDir: string,
-): Promise<void> {
+): Promise<RowOutcome> {
   const started = Date.now();
   const patches = patchesFor(cfg.stealth);
   const ua = cfg.residentialUa ? RESIDENTIAL_UA : undefined;
@@ -74,7 +85,7 @@ async function runRow(
     : baseProfileDir;
   if (cfg.freshProfile) fs.mkdirSync(userDataDir, { recursive: true });
 
-  const executablePath = findChromium();
+  const executablePath = await ensureChromiumExecutable("probe-matrix");
 
   let status = 0;
   let title = "";
@@ -82,7 +93,7 @@ async function runRow(
   let reason: BlockReason | null = null;
   let errorMsg: string | undefined;
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: true,
+    headless: !cfg.headed,
     ...(executablePath ? { executablePath } : {}),
     ...(userAgent ? { userAgent } : {}),
     ...(headers ? { extraHTTPHeaders: headers } : {}),
@@ -136,6 +147,7 @@ async function runRow(
     }
   }
 
+  const finalBlocked = blocked || !!errorMsg;
   writeAnyEvent({
     type: "probe-result",
     ts: Date.now(),
@@ -146,14 +158,16 @@ async function runRow(
       warmup: cfg.warmup,
       freshProfile: cfg.freshProfile,
       residentialUa: cfg.residentialUa,
+      headed: cfg.headed,
     },
     status,
     title,
-    blocked: blocked || !!errorMsg,
+    blocked: finalBlocked,
     reason: errorMsg ? "launch_error" : reason,
     error: errorMsg,
     durationMs: Date.now() - started,
   });
+  return { blocked: finalBlocked, status, errored: !!errorMsg };
 }
 
 export async function runProbeMatrix(
@@ -170,13 +184,23 @@ export async function runProbeMatrix(
     rows: matrix.length,
   });
 
+  let winningRow: number | null = null;
   for (const cfg of matrix) {
-    await runRow(sampleUrl, cfg, profileDir);
+    const outcome = await runRow(sampleUrl, cfg, profileDir);
+    // Early exit: first row that returns a real 200 wins. Saves up to ~30s
+    // (rows 3-7 are progressively slower at 5-6s each). User can re-probe
+    // via the BlockAlert if the wall comes back, which means this row's
+    // config wasn't strong enough.
+    if (!outcome.blocked) {
+      winningRow = cfg.row;
+      break;
+    }
   }
 
   writeAnyEvent({
     type: "probe-matrix-complete",
     ts: Date.now(),
     sampleUrl,
+    winningRow,
   });
 }

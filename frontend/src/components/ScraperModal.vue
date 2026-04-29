@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { useConfig } from "../composables/useConfig";
 import { useInspector } from "../composables/useInspector";
 import { useCrawl } from "../composables/useCrawl";
+import { useSettings } from "../composables/useSettings";
 import { useDatabase } from "../composables/useDatabase";
 import type { ScraperRule } from "../types/crawl";
 
@@ -11,12 +12,17 @@ const ready = ref(false);
 onMounted(() => { setTimeout(() => { ready.value = true; }, 100); });
 const { config } = useConfig();
 const { currentSessionId } = useCrawl();
+const { effectiveSettings } = useSettings();
 const { updateSessionConfig } = useDatabase();
 const sessionSaved = ref(false);
+// Inspector test URL — pure transient editor state, not part of crawl config.
+const scraperUrl = ref("");
 
 async function handleSaveForCrawl() {
   if (currentSessionId.value) {
-    await updateSessionConfig(currentSessionId.value, config);
+    // Persist the full pinned snapshot so the next open of this saved crawl
+    // sees the new scraper rules. updateSessionConfig now expects SettingsValues.
+    await updateSessionConfig(currentSessionId.value, effectiveSettings.value);
   }
   sessionSaved.value = true;
   setTimeout(() => { emit('close'); }, 600);
@@ -37,7 +43,7 @@ function removeScraperRule(index: number) {
 }
 
 function startInspector() {
-  const url = config.scraperUrl.trim();
+  const url = scraperUrl.value.trim();
   if (!url) return;
   openInspector(url, handleSelectorPicked);
 }
@@ -49,7 +55,7 @@ function startInspector() {
       <div class="modal-header"><h3>Scraper</h3><button class="close-btn" @click="emit('close')">&times;</button></div>
       <div class="modal-body">
         <div class="scraper-launch">
-          <input v-model="config.scraperUrl" type="text" placeholder="https://example.com" class="scraper-url" />
+          <input v-model="scraperUrl" type="text" placeholder="https://example.com" class="scraper-url" />
           <button v-if="!inspecting" class="inspector-btn" @click="startInspector">Open Inspector</button>
           <button v-else class="inspector-btn inspector-btn--active" @click="closeInspector">Close Inspector</button>
         </div>

@@ -106,8 +106,16 @@ export const SCHEMA: SettingsSchema = {
         default: 500,
         min: 0,
         unit: "ms",
-        label: "Per-host delay",
-        help: "Minimum milliseconds between request starts to the same host. Real users don't hammer one domain; adaptive bot walls (Akamai, DataDome, PerimeterX) watch per-host RPS. 0 disables.",
+        label: "Per-host delay (min)",
+        help: "Minimum ms between request starts to the same host. Pair with the max below for a randomized range — fresh draw per request defeats interval-regularity bot detectors (DataDome, PerimeterX, Akamai). 0 disables.",
+      },
+      perHostDelayMax: {
+        type: "number",
+        default: 1500,
+        min: 0,
+        unit: "ms",
+        label: "Per-host delay (max)",
+        help: "Upper end of the randomized range. Sidecar samples a uniform random value in [min, max] before each request. Set equal to min for fixed delay (no jitter). Mean of the range is your effective rate, so set max somewhat above min for noise without slowing the crawl.",
       },
       perHostConcurrency: {
         type: "number",
@@ -115,7 +123,7 @@ export const SCHEMA: SettingsSchema = {
         min: 1,
         max: 10,
         label: "Per-host concurrency",
-        help: "Maximum concurrent requests to the same host. Typical real-user concurrency is 2–4.",
+        help: "Maximum concurrent requests to the same host. Typical real-user concurrency is 2–4. Natural response-time variance gives you organic concurrency jitter for free, so this stays a single max (no range).",
       },
       sessionWarmup: {
         type: "boolean",
@@ -175,10 +183,6 @@ export const SCHEMA: SettingsSchema = {
         label: "Retention days",
       },
     },
-  },
-  aiMcp: {
-    label: "AI & MCP",
-    items: {},
   },
   stealth: {
     label: "Stealth",
@@ -349,22 +353,6 @@ export const SCHEMA: SettingsSchema = {
   advanced: {
     label: "Advanced",
     items: {
-      perHostDelay: {
-        type: "number",
-        default: 500,
-        min: 0,
-        unit: "ms",
-        advanced: true,
-        label: "Per-host delay",
-      },
-      perHostConcurrency: {
-        type: "number",
-        default: 2,
-        min: 1,
-        max: 10,
-        advanced: true,
-        label: "Per-host concurrency",
-      },
       debugLog: {
         type: "boolean",
         default: false,

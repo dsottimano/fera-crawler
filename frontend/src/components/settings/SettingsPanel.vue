@@ -4,14 +4,68 @@ import { SCHEMA, type SettingsSection as Section, type SettingDef } from "../../
 import { useSettings } from "../../composables/useSettings";
 import { useDebug } from "../../composables/useDebug";
 import SettingsSection from "./SettingsSection.vue";
+import SettingsItem from "./SettingsItem.vue";
 import CrawlConfigsPanel from "./CrawlConfigsPanel.vue";
 import type { SettingsValues } from "../../settings/types";
 
 const VIRTUAL_CRAWL_CONFIGS_KEY = "_crawlConfigs";
 
+// Sections folded into the "Crawling" tab so users see one merged surface
+// instead of four near-identical knob lists. Data shape in SettingsValues is
+// unchanged — only the UI grouping differs.
+const CRAWLING_MERGED_INTO = new Set<string>(["performance", "authentication", "advanced"]);
+
+// UI-only grouping for the Crawling tab. Items are referenced by (bucket, key)
+// pairs into the schema; data shape stays in its original SettingsValues bucket.
+type CrawlingItemRef = { bucket: keyof SettingsValues & string; key: string };
+type CrawlingSubgroup = {
+  heading: string;
+  hint?: string;
+  items: CrawlingItemRef[];
+  action?: "wipe";
+};
+
+const CRAWLING_SUBGROUPS: CrawlingSubgroup[] = [
+  {
+    heading: "Mode & scope",
+    items: [
+      { bucket: "crawling", key: "mode" },
+      { bucket: "crawling", key: "maxRequests" },
+      { bucket: "crawling", key: "respectRobots" },
+      { bucket: "crawling", key: "discoverSitemap" },
+    ],
+  },
+  {
+    heading: "Speed & throttling",
+    items: [
+      { bucket: "crawling", key: "concurrency" },
+      { bucket: "crawling", key: "delay" },
+      { bucket: "performance", key: "perHostDelay" },
+      { bucket: "performance", key: "perHostDelayMax" },
+      { bucket: "performance", key: "perHostConcurrency" },
+      { bucket: "performance", key: "blockResources" },
+      { bucket: "performance", key: "closeOnExtract" },
+    ],
+  },
+  {
+    heading: "Anti-bot resilience",
+    hint: "For the full fingerprint stack, see the Stealth tab.",
+    items: [
+      { bucket: "performance", key: "sessionWarmup" },
+      { bucket: "performance", key: "autoProbeOnBlock" },
+      { bucket: "authentication", key: "headless" },
+    ],
+    action: "wipe",
+  },
+  {
+    heading: "Debug",
+    items: [{ bucket: "advanced", key: "debugLog" }],
+  },
+];
+
 const emit = defineEmits<{ close: [] }>();
 
-const { settings, activeProfile, profiles, init, switchProfile, save } = useSettings();
+const { settings, effectiveSettings, editingPinned, activeProfile, profiles, init, switchProfile, save } = useSettings();
 const { wipeBrowserProfile } = useDebug();
 
 const searchQuery = ref("");
@@ -19,19 +73,30 @@ const activeSectionKey = ref<string | null>(null);
 const draft = ref<SettingsValues | null>(null);
 const dirty = ref(false);
 
-// localDraft: always render from draft once loaded; fallback to settings pre-init.
-const localValues = computed<SettingsValues>(() => draft.value ?? settings.value);
+// Modal always edits whatever is *active*: pinned snapshot when a saved crawl
+// is loaded, otherwise the default-settings profile. Single editing target
+// at any time — no confusion about which thing the changes affect.
+const localValues = computed<SettingsValues>(() => draft.value ?? effectiveSettings.value);
 
 onMounted(async () => {
   await init();
-  draft.value = JSON.parse(JSON.stringify(settings.value)) as SettingsValues;
+  draft.value = JSON.parse(JSON.stringify(effectiveSettings.value)) as SettingsValues;
   const visibleKeys = visibleSections.value.map((s) => s.key);
   if (visibleKeys.length) activeSectionKey.value = visibleKeys[0];
 });
 
 watch(activeProfile, (p) => {
-  if (p && !dirty.value) {
+  if (p && !dirty.value && !editingPinned.value) {
     draft.value = JSON.parse(JSON.stringify(p.values)) as SettingsValues;
+  }
+});
+
+// If a saved crawl is loaded/cleared while the modal is open, swap draft to
+// match the new editing target — but only when the user hasn't typed anything
+// yet, to avoid clobbering in-flight edits.
+watch(editingPinned, () => {
+  if (!dirty.value) {
+    draft.value = JSON.parse(JSON.stringify(effectiveSettings.value)) as SettingsValues;
   }
 });
 
@@ -56,14 +121,49 @@ const virtualCrawlConfigsSection: Section = {
   items: {},
 };
 
+type ResolvedCrawlingItem = { bucket: string; key: string; def: SettingDef };
+type ResolvedCrawlingSubgroup = {
+  heading: string;
+  hint?: string;
+  items: ResolvedCrawlingItem[];
+  action?: "wipe";
+};
+
+const visibleCrawlingSubgroups = computed<ResolvedCrawlingSubgroup[]>(() => {
+  const q = searchQuery.value.toLowerCase();
+  const out: ResolvedCrawlingSubgroup[] = [];
+  for (const group of CRAWLING_SUBGROUPS) {
+    const items: ResolvedCrawlingItem[] = [];
+    for (const ref of group.items) {
+      const def = SCHEMA[ref.bucket]?.items[ref.key];
+      if (!def) continue;
+      if (def.hidden) continue;
+      if (q && !itemMatches(ref.key, def, q) && !group.heading.toLowerCase().includes(q)) continue;
+      items.push({ bucket: ref.bucket, key: ref.key, def });
+    }
+    const hasAction = group.action === "wipe" && (!q || "wipe browser profile".includes(q));
+    if (items.length || hasAction) {
+      out.push({ heading: group.heading, hint: group.hint, items, action: hasAction ? group.action : undefined });
+    }
+  }
+  return out;
+});
+
 const visibleSections = computed(() => {
   const schemaSections = Object.entries(SCHEMA)
     .filter(([key]) => !key.startsWith("_"))
+    .filter(([key]) => !CRAWLING_MERGED_INTO.has(key))
     .filter(([, section]) => {
       // Hide sections whose every item is explicitly hidden.
       return Object.values(section.items).some((def) => !def.hidden);
     })
-    .filter(([, section]) => sectionMatches(section, searchQuery.value))
+    .filter(([key, section]) => {
+      if (key === "crawling") {
+        // Crawling tab is visible if any of its subgroups have a visible item.
+        return visibleCrawlingSubgroups.value.length > 0;
+      }
+      return sectionMatches(section, searchQuery.value);
+    })
     .map(([key, section]) => ({ key, section }));
 
   const q = searchQuery.value.toLowerCase();
@@ -152,8 +252,11 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       <header class="panel-header">
         <div class="panel-title">SETTINGS</div>
         <div class="header-controls">
+          <div v-if="editingPinned" class="profile-select profile-select--locked" title="A saved crawl is loaded — editing its pinned settings.">
+            Pinned (this crawl)
+          </div>
           <select
-            v-if="profiles.length"
+            v-else-if="profiles.length"
             class="profile-select"
             :value="activeProfile?.id ?? ''"
             @change="handleSwitchProfile"
@@ -172,6 +275,10 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         </div>
       </header>
 
+      <div v-if="editingPinned" class="pin-banner">
+        Editing the loaded crawl's pinned settings. Changes apply only to this crawl. New crawls use the default profile.
+      </div>
+
       <div class="panel-body">
         <nav class="section-nav" aria-label="Settings sections">
           <button
@@ -189,6 +296,44 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           <CrawlConfigsPanel
             v-if="activeSection && activeSection.key === VIRTUAL_CRAWL_CONFIGS_KEY"
           />
+          <template v-else-if="activeSection && activeSection.key === 'crawling' && draft">
+            <section
+              v-for="group in visibleCrawlingSubgroups"
+              :key="group.heading"
+              class="subgroup"
+            >
+              <h2 class="subgroup-label">{{ group.heading }}</h2>
+              <p v-if="group.hint" class="subgroup-hint">{{ group.hint }}</p>
+              <ul class="item-list">
+                <li v-for="it in group.items" :key="`${it.bucket}.${it.key}`" class="item">
+                  <SettingsItem
+                    :item-key="it.key"
+                    :def="it.def"
+                    :value="(localValues as unknown as Record<string, Record<string, unknown>>)[it.bucket]?.[it.key]"
+                    @update="(v) => updateItem(it.bucket, it.key, v)"
+                  />
+                </li>
+                <li v-if="group.action === 'wipe'" class="item">
+                  <div class="action-row">
+                    <div class="action-text">
+                      <div class="action-label">Wipe browser profile</div>
+                      <p class="action-help">
+                        Deletes cookies, cache, and anti-bot tokens (Akamai _abck, Cloudflare __cf_bm).
+                        Use when a site starts instant-403ing. Sign-in sessions will be lost.
+                      </p>
+                    </div>
+                    <button
+                      class="btn-pill btn-wipe"
+                      :disabled="wipeState === 'wiping'"
+                      @click="handleWipeProfile"
+                    >
+                      {{ wipeState === 'wiping' ? 'WIPING…' : wipeState === 'done' ? 'WIPED' : 'WIPE PROFILE' }}
+                    </button>
+                  </div>
+                </li>
+              </ul>
+            </section>
+          </template>
           <SettingsSection
             v-else-if="activeSection && draft"
             :section="activeSection.section"
@@ -201,14 +346,6 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       </div>
 
       <footer class="panel-footer">
-        <button
-          class="btn-pill btn-wipe"
-          :disabled="wipeState === 'wiping'"
-          title="Delete cookies, cache, and anti-bot tokens. Use when a site starts instant-403ing."
-          @click="handleWipeProfile"
-        >
-          {{ wipeState === 'wiping' ? 'WIPING…' : wipeState === 'done' ? 'WIPED' : '🧹 WIPE BROWSER PROFILE' }}
-        </button>
         <span v-if="dirty" class="dirty-flag">UNSAVED CHANGES</span>
         <div class="footer-actions">
           <button class="btn-pill btn-cancel" @click="emit('close')">CLOSE</button>
@@ -299,6 +436,26 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   background: #141a2e;
   color: #ffffff;
   font-size: 11px;
+}
+
+.profile-select--locked {
+  background: rgba(220, 220, 170, 0.08);
+  border-color: rgba(220, 220, 170, 0.3);
+  color: #dcdcaa;
+  cursor: default;
+  display: flex;
+  align-items: center;
+  height: 28px;
+}
+
+.pin-banner {
+  padding: 10px 20px;
+  background: rgba(220, 220, 170, 0.06);
+  border-bottom: 1px solid rgba(220, 220, 170, 0.18);
+  color: #dcdcaa;
+  font-size: 11px;
+  line-height: 1.4;
+  flex-shrink: 0;
 }
 
 .search-input {
@@ -442,15 +599,86 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 }
 
 .btn-wipe {
-  color: #dcdcaa;
-  border-color: rgba(220, 220, 170, 0.3);
+  color: #f44747;
+  border-color: rgba(244, 71, 71, 0.3);
 }
 .btn-wipe:hover:not(:disabled) {
-  background: rgba(220, 220, 170, 0.08);
-  border-color: #dcdcaa;
+  background: rgba(244, 71, 71, 0.08);
+  border-color: #f44747;
+  box-shadow: 0 0 16px rgba(244, 71, 71, 0.15);
 }
 .btn-wipe:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.subgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.subgroup:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.subgroup-label {
+  margin: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: #569cd6;
+}
+
+.subgroup-hint {
+  margin: -8px 0 0 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.item-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.item {
+  padding: 0;
+}
+
+.action-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.action-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.action-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.action-help {
+  margin: 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.4;
 }
 </style>

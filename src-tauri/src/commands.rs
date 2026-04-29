@@ -148,6 +148,7 @@ pub async fn start_crawl(
     capture_vitals: Option<bool>,
     stealth_config: Option<String>,
     per_host_delay: Option<u32>,
+    per_host_delay_max: Option<u32>,
     per_host_concurrency: Option<u32>,
     session_warmup: Option<bool>,
     exclude_urls: Option<Vec<String>>,
@@ -257,6 +258,11 @@ pub async fn start_crawl(
         args.push(d.to_string());
     }
 
+    if let Some(d) = per_host_delay_max {
+        args.push("--per-host-delay-max".to_string());
+        args.push(d.to_string());
+    }
+
     if let Some(c) = per_host_concurrency {
         args.push("--per-host-concurrency".to_string());
         args.push(c.to_string());
@@ -326,7 +332,7 @@ pub async fn start_crawl(
             match event {
                 CommandEvent::Stdout(line) => {
                     let line_str = String::from_utf8_lossy(&line);
-                    route_sidecar_stdout(&app_handle, &line_str, Some(gen));
+                    route_sidecar_stdout_lines(&app_handle, &line_str, Some(gen));
                 }
                 CommandEvent::Stderr(line) => {
                     let line_str = String::from_utf8_lossy(&line);
@@ -430,6 +436,20 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, from_gen: Option<u64>) {
                 }),
             );
         }
+    }
+}
+
+fn route_sidecar_stdout_lines(app: &AppHandle, chunk: &str, from_gen: Option<u64>) {
+    let mut routed = false;
+    for line in chunk.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        routed = true;
+        route_sidecar_stdout(app, line, from_gen);
+    }
+    if !routed && !chunk.trim().is_empty() {
+        route_sidecar_stdout(app, chunk, from_gen);
     }
 }
 
@@ -991,7 +1011,7 @@ pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), 
             match event {
                 CommandEvent::Stdout(line) => {
                     let line_str = String::from_utf8_lossy(&line);
-                    route_sidecar_stdout(&app_handle, &line_str, None);
+                    route_sidecar_stdout_lines(&app_handle, &line_str, None);
                 }
                 CommandEvent::Stderr(line) => {
                     let line_str = String::from_utf8_lossy(&line);

@@ -31,6 +31,9 @@ import { RobotsCache } from "./robots.js";
 import { discoverSitemapUrls } from "./sitemap.js";
 import type { CrawlConfig, CrawlResult, MetaTag } from "./types.js";
 
+const PATCHRIGHT_BROWSERS = ["chromium", "chromium-headless-shell"];
+let browserInstallPromise: Promise<string | undefined> | null = null;
+
 /** Ensures a URL has a protocol prefix. */
 export function ensureProtocol(url: string): string {
   if (!/^https?:\/\//i.test(url)) return "https://" + url;
@@ -132,6 +135,72 @@ export function findChromium(): string | undefined {
   }
 
   return undefined;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isMissingPatchrightBrowserError(err: unknown): boolean {
+  const msg = errorMessage(err);
+  return (
+    msg.includes("Executable doesn't exist at") &&
+    (msg.includes("ms-playwright") ||
+      msg.includes("Looks like Playwright was just installed or updated") ||
+      msg.includes("Patchright Team"))
+  );
+}
+
+async function installPatchrightBrowsers(reason: string): Promise<string | undefined> {
+  if (browserInstallPromise) {
+    phase("browser-install-start", { reason, alreadyRunning: true, browsers: PATCHRIGHT_BROWSERS });
+    log("info", "Patchright browser download already running", { reason });
+    return browserInstallPromise;
+  }
+
+  browserInstallPromise = (async () => {
+    phase("browser-install-start", { reason, browsers: PATCHRIGHT_BROWSERS });
+    log("warn", "Patchright browser runtime missing; downloading browser files", {
+      reason,
+      browsers: PATCHRIGHT_BROWSERS,
+    });
+
+    try {
+      // Patchright does not publish declarations for this internal installer,
+      // but this is the same registry path its CLI uses for `patchright install`.
+      // @ts-expect-error no declaration file for Patchright's registry internals
+      const mod = await import("patchright-core/lib/server/registry/index");
+      const didInstall = await mod.installBrowsersForNpmInstall(PATCHRIGHT_BROWSERS);
+      if (didInstall === false) {
+        throw new Error("Patchright browser download was skipped by PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD");
+      }
+
+      const executablePath = findChromium();
+      if (!executablePath) {
+        throw new Error("Patchright install completed, but Fera could not find the Chromium executable");
+      }
+      phase("browser-install-complete", { chromium: executablePath ?? null });
+      log("info", "Patchright browser runtime installed", { chromium: executablePath ?? null });
+      return executablePath;
+    } catch (err) {
+      const message = errorMessage(err);
+      phase("browser-install-failed", { error: message });
+      log("error", "Patchright browser runtime download failed", { error: message });
+      throw new Error(`Fera could not download Patchright browser files automatically: ${message}`);
+    }
+  })();
+
+  try {
+    return await browserInstallPromise;
+  } finally {
+    browserInstallPromise = null;
+  }
+}
+
+export async function ensureChromiumExecutable(reason: string): Promise<string | undefined> {
+  const executablePath = findChromium();
+  if (executablePath) return executablePath;
+  return installPatchrightBrowsers(reason);
 }
 
 export function getBrowserProfileDir(profileArg?: string): string {
@@ -814,7 +883,7 @@ function canEnqueue(queueLen: number, processed: number, maxRequests: number): b
 }
 
 export async function runCrawler(config: CrawlConfig): Promise<void> {
-  const executablePath = findChromium();
+  let executablePath = await ensureChromiumExecutable("crawl-startup");
   const userDataDir = getBrowserProfileDir(config.browserProfile);
 
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -863,7 +932,8 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     downloadOgImage: !!config.downloadOgImage,
     stealth: stealthEnabled,
     sessionWarmup: !!config.sessionWarmup,
-    perHostDelay: config.perHostDelay ?? 500,
+    perHostDelayMin: config.perHostDelay ?? 500,
+    perHostDelayMax: config.perHostDelayMax ?? config.perHostDelay ?? 500,
     perHostConcurrency: config.perHostConcurrency ?? 2,
     chromium: executablePath ?? "(patchright-bundled)",
     profileDir: userDataDir,
@@ -892,9 +962,9 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   //   - viewport: null (don't override window dimensions)
   //   - do NOT inject userAgent or custom headers (breaks their stealth)
   // When stealth is ON we keep our own full stack (UA + Sec-CH-UA + init script).
-  const launchOpts = {
+  const buildLaunchOpts = (browserPath?: string) => ({
     headless,
-    executablePath,
+    ...(browserPath ? { executablePath: browserPath } : {}),
     args: headless ? STEALTH_ARGS : [...STEALTH_ARGS, "--start-maximized"],
     ignoreDefaultArgs: ["--enable-automation"] as string[],
     ...(stealthEnabled
@@ -906,7 +976,8 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         }),
     ...(stealthEnabled && effectiveUa ? { userAgent: effectiveUa } : {}),
     ...(stealthEnabled && mergedHeaders ? { extraHTTPHeaders: mergedHeaders } : {}),
-  };
+  });
+  let launchOpts = buildLaunchOpts(executablePath);
 
   let context: BrowserContext;
   phase("browser-launch");
@@ -914,12 +985,31 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     context = await chromium.launchPersistentContext(userDataDir, launchOpts);
     log("info", "browser launched", { headless });
   } catch (err: any) {
-    log("warn", "browser launch failed; retrying after profile cleanup", { error: String(err?.message ?? err) });
-    if (err.message?.includes("existing browser session") || err.message?.includes("Target page, context or browser has been closed")) {
+    if (isMissingPatchrightBrowserError(err)) {
+      log("warn", "browser launch missing Patchright browser; downloading and retrying", {
+        error: errorMessage(err),
+      });
+      executablePath = await installPatchrightBrowsers("browser-launch");
+      launchOpts = buildLaunchOpts(executablePath);
+      context = await chromium.launchPersistentContext(userDataDir, launchOpts);
+      log("info", "browser launched after browser runtime download", { headless });
+    } else if (err.message?.includes("existing browser session") || err.message?.includes("Target page, context or browser has been closed")) {
+      log("warn", "browser launch failed; retrying after profile cleanup", { error: String(err?.message ?? err) });
       await new Promise((r) => setTimeout(r, 2000));
       await killChromeForProfile(userDataDir);
-      context = await chromium.launchPersistentContext(userDataDir, launchOpts);
-      log("info", "browser launched on retry");
+      try {
+        context = await chromium.launchPersistentContext(userDataDir, launchOpts);
+        log("info", "browser launched on retry");
+      } catch (retryErr) {
+        if (!isMissingPatchrightBrowserError(retryErr)) throw retryErr;
+        log("warn", "browser retry missing Patchright browser; downloading and retrying", {
+          error: errorMessage(retryErr),
+        });
+        executablePath = await installPatchrightBrowsers("browser-launch-retry");
+        launchOpts = buildLaunchOpts(executablePath);
+        context = await chromium.launchPersistentContext(userDataDir, launchOpts);
+        log("info", "browser launched after browser runtime download", { headless });
+      }
     } else {
       recordError();
       log("error", "browser launch fatal", { error: String(err?.message ?? err) });
@@ -955,13 +1045,17 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     await context.addInitScript(VITALS_INIT_SCRIPT);
   }
 
-  // Per-host rate limiter (defaults: 500ms between request starts, 2 concurrent per host).
-  const rateLimiter = new PerHostRateLimiter(
-    config.perHostDelay ?? 500,
-    config.perHostConcurrency ?? 2,
-  );
+  // Per-host rate limiter. delayMin/Max define the uniform-random range
+  // sampled per request; if max <= min, jitter is disabled and the limiter
+  // behaves like fixed delayMin (back-compat with old single-value config).
+  const rateLimiter = new PerHostRateLimiter({
+    delayMinMs: config.perHostDelay ?? 500,
+    delayMaxMs: config.perHostDelayMax,
+    maxConcurrency: config.perHostConcurrency ?? 2,
+  });
   log("info", "rate limiter configured", {
-    perHostDelayMs: rateLimiter.delayMs,
+    perHostDelayMinMs: rateLimiter.delayMinMs,
+    perHostDelayMaxMs: rateLimiter.delayMaxMs,
     perHostConcurrency: rateLimiter.maxConcurrency,
   });
 
@@ -1325,7 +1419,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
  */
 export async function openBrowser(rawUrl: string, profileDir?: string): Promise<void> {
   const url = ensureProtocol(rawUrl);
-  const executablePath = findChromium();
+  const executablePath = await ensureChromiumExecutable("open-browser");
   const userDataDir = getBrowserProfileDir(profileDir);
 
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -1335,7 +1429,7 @@ export async function openBrowser(rawUrl: string, profileDir?: string): Promise<
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    executablePath,
+    ...(executablePath ? { executablePath } : {}),
     args: [...STEALTH_ARGS, "--start-maximized"],
     ignoreDefaultArgs: ["--enable-automation"],
     viewport: null,
@@ -1380,7 +1474,7 @@ export async function openBrowser(rawUrl: string, profileDir?: string): Promise<
  */
 export async function dumpProfile(rawUrl: string, profileDir?: string): Promise<void> {
   const url = ensureProtocol(rawUrl);
-  const executablePath = findChromium();
+  const executablePath = await ensureChromiumExecutable("dump-profile");
   const userDataDir = getBrowserProfileDir(profileDir);
 
   if (!fs.existsSync(userDataDir)) {
@@ -1392,7 +1486,7 @@ export async function dumpProfile(rawUrl: string, profileDir?: string): Promise<
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: true,
-    executablePath,
+    ...(executablePath ? { executablePath } : {}),
     args: STEALTH_ARGS,
     ignoreDefaultArgs: ["--enable-automation"],
   });

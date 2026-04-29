@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "patchright";
-import { ensureProtocol, findChromium, STEALTH_ARGS } from "./crawler.js";
+import { ensureProtocol, ensureChromiumExecutable, STEALTH_ARGS } from "./crawler.js";
 import {
   DEFAULT_STEALTH_PATCHES,
   buildHeaders,
@@ -245,7 +245,7 @@ async function sampleSpeed(page: Page, urls: string[]): Promise<SpeedSignals["sa
 
 async function tryRung(url: string, step: number, rung: ProbeRung): Promise<ProbeAttempt> {
   const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "fera-probe-"));
-  const executablePath = findChromium();
+  const executablePath = await ensureChromiumExecutable("probe-config");
   const runStart = Date.now();
 
   const patches: StealthPatchConfig = { ...DEFAULT_STEALTH_PATCHES, enabled: rung.stealth };
@@ -255,7 +255,7 @@ async function tryRung(url: string, step: number, rung: ProbeRung): Promise<Prob
 
   const launchOpts: Parameters<typeof chromium.launchPersistentContext>[1] = {
     headless: rung.headless,
-    executablePath,
+    ...(executablePath ? { executablePath } : {}),
     args: rung.headless ? STEALTH_ARGS : [...STEALTH_ARGS, "--start-maximized"],
     ignoreDefaultArgs: ["--enable-automation"],
     ...((!rung.headless || !rung.stealth) ? { viewport: null } : {}),

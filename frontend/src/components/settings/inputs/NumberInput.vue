@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { computed, ref, watch } from "vue";
+import { clamp, commitNumericDraft, formatNumber, parseNumericDraft } from "../../../utils/numericInput";
+
 const props = defineProps<{
   id?: string;
   modelValue: number;
@@ -9,14 +12,43 @@ const props = defineProps<{
 
 const emit = defineEmits<{ "update:modelValue": [value: number] }>();
 
+const focused = ref(false);
+const draft = ref<string>(String(props.modelValue ?? 0));
+
+const displayValue = computed(() =>
+  focused.value ? draft.value : formatNumber(Number(props.modelValue))
+);
+
+watch(
+  () => props.modelValue,
+  (v) => {
+    if (!focused.value) draft.value = String(v ?? 0);
+  }
+);
+
+function onFocus(e: FocusEvent) {
+  focused.value = true;
+  draft.value = String(props.modelValue ?? 0);
+  (e.target as HTMLInputElement).select();
+}
+
 function onInput(e: Event) {
   const raw = (e.target as HTMLInputElement).value;
-  const n = raw === "" ? 0 : Number(raw);
-  if (Number.isNaN(n)) return;
-  let clamped = n;
-  if (props.min !== undefined) clamped = Math.max(props.min, clamped);
-  if (props.max !== undefined) clamped = Math.min(props.max, clamped);
-  emit("update:modelValue", clamped);
+  const cleaned = raw.replace(/[^\d,-]/g, "");
+  draft.value = cleaned;
+  const parsed = parseNumericDraft(cleaned);
+  if (parsed === null) return;
+  emit("update:modelValue", clamp(parsed, { min: props.min, max: props.max }));
+}
+
+function onBlur() {
+  focused.value = false;
+  const committed = commitNumericDraft(draft.value, props.modelValue, {
+    min: props.min,
+    max: props.max,
+  });
+  if (committed !== props.modelValue) emit("update:modelValue", committed);
+  draft.value = String(committed);
 }
 </script>
 
@@ -24,12 +56,13 @@ function onInput(e: Event) {
   <div class="num-wrap">
     <input
       :id="id"
-      type="number"
+      type="text"
+      inputmode="numeric"
       class="num-input"
-      :value="modelValue"
-      :min="min"
-      :max="max"
+      :value="displayValue"
+      @focus="onFocus"
       @input="onInput"
+      @blur="onBlur"
     />
     <span v-if="unit" class="unit">{{ unit }}</span>
   </div>
@@ -52,7 +85,18 @@ function onInput(e: Event) {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: textfield;
   transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.num-input::-webkit-inner-spin-button,
+.num-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  display: none;
 }
 
 .num-input:focus {

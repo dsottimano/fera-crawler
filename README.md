@@ -23,7 +23,7 @@ sudo apt-get update && sudo apt-get install -y \
 git clone https://github.com/dsottimano/fera-crawler.git
 cd fera-crawler
 npm install
-npx playwright install chromium
+npx patchright install chromium
 npx tauri icon app-icon.png   # generate icons (or provide your own)
 ```
 

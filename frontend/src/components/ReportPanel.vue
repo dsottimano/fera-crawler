@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, onMounted } from "vue";
 import type { CrawlResult } from "../types/crawl";
 
 const props = defineProps<{ report: string; results: CrawlResult[] }>();
 const emit = defineEmits<{ close: [] }>();
+const ready = ref(false);
+onMounted(() => { setTimeout(() => { ready.value = true; }, 100); });
 
 const title = computed(() => {
   const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages" };
@@ -38,7 +40,7 @@ const orphanPages = computed(() => props.results.filter((r) => r.internalLinks =
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
+  <div class="overlay" @click.self="ready && emit('close')">
     <div class="modal report-modal">
       <div class="modal-header">
         <h3>{{ title }}</h3>

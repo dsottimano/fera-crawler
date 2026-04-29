@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onMounted } from "vue";
 import type { ProfileData } from "../composables/useBrowser";
 
 const props = defineProps<{ data: ProfileData }>();
 const emit = defineEmits<{ close: [] }>();
+const ready = ref(false);
+onMounted(() => { setTimeout(() => { ready.value = true; }, 100); });
 
 const cookieCount = computed(() => props.data.cookies.length);
 const localStorageCount = computed(() => Object.keys(props.data.localStorage || {}).length);
@@ -29,11 +31,10 @@ watch(domains, (newDomains) => {
 }, { immediate: true });
 
 function toggleDomain(domain: string) {
-  if (expandedDomains.value.has(domain)) {
-    expandedDomains.value.delete(domain);
-  } else {
-    expandedDomains.value.add(domain);
-  }
+  const next = new Set(expandedDomains.value);
+  if (next.has(domain)) next.delete(domain);
+  else next.add(domain);
+  expandedDomains.value = next;
 }
 
 function formatExpiry(expires: number): string {
@@ -48,7 +49,7 @@ function truncate(val: string, max: number): string {
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
+  <div class="overlay" @click.self="ready && emit('close')">
     <div class="pv-modal">
       <div class="pv-header">
         <h3>Browser Profile Data</h3>

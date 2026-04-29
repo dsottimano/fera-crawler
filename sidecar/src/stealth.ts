@@ -7,8 +7,7 @@
  * the in-page script has no external dependencies.
  *
  * Every patch is individually gate-able via StealthPatchConfig so the user
- * (UI → schema) or an MCP client can toggle any fingerprinting defense
- * independently. Defaults are all-on.
+ * can toggle any fingerprinting defense independently. Defaults are all-on.
  */
 
 import { createHash } from "node:crypto";

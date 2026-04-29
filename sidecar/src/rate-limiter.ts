@@ -21,17 +21,52 @@ interface HostState {
   waiters: Array<() => void>;
 }
 
+export interface PerHostRateLimiterOpts {
+  /**
+   * Minimum ms between successive request starts to the same host.
+   * If delayMaxMs > delayMinMs, each request samples a fresh uniform random
+   * delay from [min, max] — this defeats interval-regularity bot detectors
+   * (DataDome, PerimeterX, Akamai's adaptive layer all watch for "exact
+   * 1000ms between requests" as a bot signal). Mean stays the same so
+   * throughput is unchanged.
+   */
+  delayMinMs: number;
+  /**
+   * Maximum ms (inclusive) for the per-request delay. If undefined or
+   * <= delayMinMs, jitter is disabled and the limiter behaves as fixed
+   * delayMinMs (preserves old single-value behavior).
+   */
+  delayMaxMs?: number;
+  /** Maximum concurrent in-flight requests per host. */
+  maxConcurrency: number;
+}
+
 export class PerHostRateLimiter {
   private states = new Map<string, HostState>();
+  public readonly delayMinMs: number;
+  public readonly delayMaxMs: number;
+  public readonly maxConcurrency: number;
 
-  constructor(
-    /** Minimum milliseconds between successive request starts to the same host. */
-    public readonly delayMs: number,
-    /** Maximum concurrent in-flight requests per host. */
-    public readonly maxConcurrency: number,
-  ) {
-    if (delayMs < 0) throw new Error("delayMs must be >= 0");
-    if (maxConcurrency < 1) throw new Error("maxConcurrency must be >= 1");
+  constructor(opts: PerHostRateLimiterOpts) {
+    if (opts.delayMinMs < 0) throw new Error("delayMinMs must be >= 0");
+    if (opts.maxConcurrency < 1) throw new Error("maxConcurrency must be >= 1");
+    this.delayMinMs = opts.delayMinMs;
+    this.delayMaxMs = opts.delayMaxMs !== undefined && opts.delayMaxMs > opts.delayMinMs
+      ? opts.delayMaxMs
+      : opts.delayMinMs;
+    this.maxConcurrency = opts.maxConcurrency;
+  }
+
+  /** Average delay (mean of the uniform range). Used for telemetry / display. */
+  get delayMs(): number {
+    return Math.round((this.delayMinMs + this.delayMaxMs) / 2);
+  }
+
+  /** Pick the next delay for a request — fresh draw per call. */
+  private nextDelayMs(): number {
+    if (this.delayMaxMs === this.delayMinMs) return this.delayMinMs;
+    const span = this.delayMaxMs - this.delayMinMs;
+    return this.delayMinMs + Math.floor(Math.random() * (span + 1));
   }
 
   private getState(host: string): HostState {
@@ -57,11 +92,13 @@ export class PerHostRateLimiter {
     }
     state.inFlight++;
 
-    // Gate 2: min delay since last request start to this host.
-    if (this.delayMs > 0) {
+    // Gate 2: per-request randomized delay since last request start. Fresh
+    // draw each acquire — never per-session, which would leak the seed.
+    const delay = this.nextDelayMs();
+    if (delay > 0) {
       const elapsed = Date.now() - state.lastRequestStartMs;
-      if (elapsed < this.delayMs) {
-        await sleep(this.delayMs - elapsed);
+      if (elapsed < delay) {
+        await sleep(delay - elapsed);
       }
     }
     state.lastRequestStartMs = Date.now();

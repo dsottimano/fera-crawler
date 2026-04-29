@@ -82,7 +82,10 @@ const donutPaths = computed(() => {
 });
 
 // ── Config tab ────────────────────────────────────────────────────────────
-const { settings } = useSettings();
+// effectiveSettings = pinned snapshot when a saved crawl is loaded, else
+// the default-settings profile. The Config tab must reflect what the running
+// crawl will actually use, not what's currently selected as default.
+const { effectiveSettings: settings } = useSettings();
 const { config } = useConfig();
 
 // Roll up the active stealth tier the way probeMatrix.ts maps it, so the
@@ -150,7 +153,7 @@ const customHeaderCount = computed(() => Object.keys(config.customHeaders).lengt
 
       <div class="config-section">
         <div class="config-section-title">PERFORMANCE</div>
-        <div class="config-row"><span class="config-label">Per-host delay</span><span class="config-value">{{ settings.performance.perHostDelay }}ms</span></div>
+        <div class="config-row"><span class="config-label">Per-host delay</span><span class="config-value">{{ settings.performance.perHostDelayMax > settings.performance.perHostDelay ? `${settings.performance.perHostDelay}–${settings.performance.perHostDelayMax}ms` : `${settings.performance.perHostDelay}ms` }}</span></div>
         <div class="config-row"><span class="config-label">Per-host concurrency</span><span class="config-value">{{ settings.performance.perHostConcurrency }}</span></div>
         <div class="config-row"><span class="config-label">Session warmup</span><span class="config-value" :class="{ 'config-value--off': !settings.performance.sessionWarmup }">{{ settings.performance.sessionWarmup ? 'On' : 'Off' }}</span></div>
         <div class="config-row"><span class="config-label">Auto-probe on block</span><span class="config-value" :class="{ 'config-value--off': !settings.performance.autoProbeOnBlock }">{{ settings.performance.autoProbeOnBlock ? 'On' : 'Off' }}</span></div>

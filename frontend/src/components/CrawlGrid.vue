@@ -5,7 +5,7 @@ import type { CrawlResult } from "../types/crawl";
 import { useConfig } from "../composables/useConfig";
 import "tabulator-tables/dist/css/tabulator_midnight.min.css";
 
-const props = defineProps<{ results: CrawlResult[]; activeTab: string; filterType?: string; selectAll?: number }>();
+const props = defineProps<{ results: CrawlResult[]; activeTab: string; filterType?: string; selectAll?: number; seoVersion?: number }>();
 const emit = defineEmits<{ rowSelect: [result: CrawlResult | null]; recrawl: [urls: string[]]; filteredCount: [count: number] }>();
 
 const { config } = useConfig();
@@ -30,10 +30,51 @@ function showContextMenu(x: number, y: number) {
 }
 
 function handleRecrawl() {
-  const selected = table?.getSelectedRows() ?? [];
-  const urls = selected.map((r: any) => (r.getData() as CrawlResult).url);
+  const urls = selectedUrls();
   ctxMenu.value = null;
   if (urls.length) emit("recrawl", urls);
+}
+
+function selectedUrls(): string[] {
+  const selected = table?.getSelectedRows() ?? [];
+  return selected.map((r: any) => (r.getData() as CrawlResult).url);
+}
+
+async function handleCopyUrls() {
+  const urls = selectedUrls();
+  ctxMenu.value = null;
+  if (!urls.length) return;
+  const text = urls.join("\n");
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // Fallback for older webviews — create a textarea, select, exec copy.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+  } catch (e) {
+    console.error("clipboard write failed", e);
+  }
+}
+
+async function handleOpenInBrowser() {
+  const urls = selectedUrls();
+  ctxMenu.value = null;
+  if (!urls.length) return;
+  // Multi-select fallback: Tauri opens each URL in the default browser.
+  // Most users will only have one selected (single-click selection).
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  for (const url of urls) {
+    try { await openUrl(url); }
+    catch (e) { console.error("openUrl failed", url, e); }
+  }
 }
 
 /* ── Formatters ── */
@@ -312,6 +353,10 @@ function getFilteredData(tab: string) {
 
 onMounted(() => {
   if (!tableRef.value) return;
+  // Snapshot of results.length when the table mounts so the append-watch
+  // can distinguish "live append" from "first paint" — first paint already
+  // had data passed in to the constructor.
+  lastResultsLen = props.results.length;
 
   table = new Tabulator(tableRef.value, {
     data: getFilteredData(props.activeTab),
@@ -319,6 +364,9 @@ onMounted(() => {
     height: "100%",
     layout: "fitDataStretch",
     virtualDom: true,
+    // selectableRows: true keeps unlimited capacity (so SELECT ALL VISIBLE
+    // works). The rowClick handler below downgrades plain mouse-clicks to
+    // single-select; modifier-clicks (cmd/ctrl/shift) still multi-select.
     selectableRows: true,
     rowHeader: { formatter: "rownum", hozAlign: "center", width: 40, resizable: false, frozen: true },
     columns: getColumns(props.activeTab),
@@ -328,6 +376,17 @@ onMounted(() => {
   table.on("rowDeselected", () => {
     const selected = table?.getSelectedRows();
     if (!selected?.length) emit("rowSelect", null);
+  });
+
+  // Plain click → single-select. Modifier click (cmd/ctrl/shift) → keep
+  // Tabulator's default toggle so power users can still multi-pick.
+  table.on("rowClick", (e: MouseEvent, row: any) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+    const others = table?.getSelectedRows().filter((r: any) => r !== row) ?? [];
+    if (others.length) {
+      for (const r of others) r.deselect();
+    }
+    if (!row.isSelected()) row.select();
   });
 
   // Right-click context menu
@@ -349,14 +408,47 @@ onUnmounted(() => {
   }
 });
 
-watch(() => props.results.length, () => {
+// Tabulator's setData rebuilds the virtual-scroll viewport, which wipes
+// scroll. Use this only when the dataset actually changes wholesale
+// (filter / tab / shrink). For pure appends during a live crawl we use
+// addData below — that preserves scroll natively.
+function setDataPreservingScroll(data: CrawlResult[]) {
   if (!table) return;
-  const scrollLeft = table?.element?.querySelector('.tabulator-tableholder')?.scrollLeft ?? 0;
-  table.setData(getFilteredData(props.activeTab));
+  const holder = table.element?.querySelector(".tabulator-tableholder") as HTMLElement | null;
+  const scrollLeft = holder?.scrollLeft ?? 0;
+  const scrollTop = holder?.scrollTop ?? 0;
+  table.setData(data);
   setTimeout(() => {
-    const holder = table?.element?.querySelector('.tabulator-tableholder');
-    if (holder) holder.scrollLeft = scrollLeft;
+    const h = table?.element?.querySelector(".tabulator-tableholder") as HTMLElement | null;
+    if (h) { h.scrollLeft = scrollLeft; h.scrollTop = scrollTop; }
   }, 0);
+  requestAnimationFrame(() => {
+    const h = table?.element?.querySelector(".tabulator-tableholder") as HTMLElement | null;
+    if (h) { h.scrollLeft = scrollLeft; h.scrollTop = scrollTop; }
+  });
+}
+
+// During a live crawl rows are pure-appends to results.value (recrawls and
+// parked-stub replacements happen in-place, no length change). Detect that
+// case and use addData(newRows) — Tabulator extends the virtual-scroll
+// dataset without rebuilding, so the user's scroll position survives.
+let lastResultsLen = 0;
+
+watch(() => props.results.length, (newLen, oldLen) => {
+  if (!table) return;
+  // Append path: extend existing data set with the newly-arrived rows.
+  if (newLen > oldLen && oldLen > 0 && oldLen === lastResultsLen) {
+    const filterFn = filterForTab(props.activeTab);
+    const newRows = props.results.slice(oldLen).filter(filterFn);
+    lastResultsLen = newLen;
+    if (newRows.length) {
+      void table.addData(newRows, false);  // false = append at end
+    }
+    return;
+  }
+  // Reset / shrink / first-load: full setData with scroll preservation.
+  lastResultsLen = newLen;
+  setDataPreservingScroll(getFilteredData(props.activeTab));
 });
 
 // Recrawl tab filter snapshots config.recrawlQueue per render. When the
@@ -367,12 +459,7 @@ watch(() => props.results.length, () => {
 watch(() => config.recrawlQueue.length, () => {
   if (!table) return;
   if (props.activeTab === "Recrawl Queue") {
-    const scrollLeft = table?.element?.querySelector('.tabulator-tableholder')?.scrollLeft ?? 0;
-    table.setData(getFilteredData(props.activeTab));
-    setTimeout(() => {
-      const holder = table?.element?.querySelector('.tabulator-tableholder');
-      if (holder) holder.scrollLeft = scrollLeft;
-    }, 0);
+    setDataPreservingScroll(getFilteredData(props.activeTab));
   } else {
     // Other tabs that show the queueStatus column also need refresh, but
     // it's just a column mutator update — no scroll preservation needed.
@@ -383,27 +470,23 @@ watch(() => config.recrawlQueue.length, () => {
 watch(() => props.activeTab, (tab) => {
   if (!table) return;
   table.setColumns(getColumns(tab));
-  const scrollLeft = table?.element?.querySelector('.tabulator-tableholder')?.scrollLeft ?? 0;
-  table.setData(getFilteredData(tab));
-  setTimeout(() => {
-    const holder = table?.element?.querySelector('.tabulator-tableholder');
-    if (holder) holder.scrollLeft = scrollLeft;
-  }, 0);
+  setDataPreservingScroll(getFilteredData(tab));
 });
 
 watch(() => props.filterType, () => {
-  const data = getFilteredData(props.activeTab);
-  if (!table) return;
-  const scrollLeft = table?.element?.querySelector('.tabulator-tableholder')?.scrollLeft ?? 0;
-  table.setData(data);
-  setTimeout(() => {
-    const holder = table?.element?.querySelector('.tabulator-tableholder');
-    if (holder) holder.scrollLeft = scrollLeft;
-  }, 0);
+  setDataPreservingScroll(getFilteredData(props.activeTab));
 });
 
 watch(() => props.selectAll, () => {
   if (table) table.selectRow();
+});
+
+// Lazy seo_json enrichment mutates rows in place — length doesn't change, so
+// the length-watcher doesn't fire. seoVersion bumps each batch merge.
+// redraw(false) re-renders the visible rows with the freshly-mutated data
+// without touching scroll position.
+watch(() => props.seoVersion, () => {
+  if (table) table.redraw(false);
 });
 </script>
 
@@ -411,7 +494,16 @@ watch(() => props.selectAll, () => {
   <div ref="tableRef" class="crawl-table"></div>
   <Teleport to="body">
     <div v-if="ctxMenu" class="ctx-menu" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }">
-      <button class="ctx-item" @click="handleRecrawl">Recrawl {{ ctxMenu.count }} URL{{ ctxMenu.count !== 1 ? 's' : '' }}</button>
+      <button class="ctx-item" @click="handleOpenInBrowser">
+        Open {{ ctxMenu.count === 1 ? "page" : `${ctxMenu.count} pages` }} in browser
+      </button>
+      <button class="ctx-item" @click="handleCopyUrls">
+        Copy URL{{ ctxMenu.count !== 1 ? "s" : "" }}
+      </button>
+      <div class="ctx-divider"></div>
+      <button class="ctx-item" @click="handleRecrawl">
+        Recrawl {{ ctxMenu.count }} URL{{ ctxMenu.count !== 1 ? "s" : "" }}
+      </button>
     </div>
   </Teleport>
 </template>
@@ -507,5 +599,10 @@ watch(() => props.selectAll, () => {
 .ctx-item:hover {
   background: rgba(86,156,214,0.15);
   color: #ffffff;
+}
+.ctx-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: rgba(255, 255, 255, 0.06);
 }
 </style>

@@ -43,16 +43,24 @@ function findChromiumInCache(cacheDir) {
   entries.sort();
   const chromiumDir = path.join(cacheDir, entries[entries.length - 1]);
 
-  // Platform-specific binary paths within the Playwright cache
+  // Platform-specific binary paths within the Patchright/Playwright cache
   if (platform === "win32") {
-    const exe = path.join(chromiumDir, "chrome-win", "chrome.exe");
-    if (fs.existsSync(exe)) return path.join(chromiumDir, "chrome-win");
+    for (const subdir of ["chrome-win64", "chrome-win"]) {
+      const exe = path.join(chromiumDir, subdir, "chrome.exe");
+      if (fs.existsSync(exe)) return path.join(chromiumDir, subdir);
+    }
   } else if (platform === "darwin") {
-    const app = path.join(chromiumDir, "chrome-mac", "Chromium.app");
-    if (fs.existsSync(app)) return path.join(chromiumDir, "chrome-mac");
+    for (const subdir of ["chrome-mac-arm64", "chrome-mac-x64", "chrome-mac"]) {
+      for (const appName of ["Google Chrome for Testing.app", "Chromium.app"]) {
+        const app = path.join(chromiumDir, subdir, appName);
+        if (fs.existsSync(app)) return path.join(chromiumDir, subdir);
+      }
+    }
   } else {
-    const bin = path.join(chromiumDir, "chrome-linux", "chrome");
-    if (fs.existsSync(bin)) return path.join(chromiumDir, "chrome-linux");
+    for (const subdir of ["chrome-linux64", "chrome-linux"]) {
+      const bin = path.join(chromiumDir, subdir, "chrome");
+      if (fs.existsSync(bin)) return path.join(chromiumDir, subdir);
+    }
   }
 
   return null;

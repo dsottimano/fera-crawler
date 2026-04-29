@@ -38,7 +38,11 @@ export interface SettingsValues {
   performance: {
     blockResources: boolean;
     closeOnExtract: boolean;
+    // perHostDelay = MIN ms between same-host requests. When perHostDelayMax
+    // > perHostDelay, the sidecar samples a fresh uniform-random value from
+    // [min, max] per request. Defeats interval-regularity bot detection.
     perHostDelay: number;
+    perHostDelayMax: number;
     perHostConcurrency: number;
     sessionWarmup: boolean;
     // When a host gets gated by the block detector, automatically run the
@@ -58,12 +62,19 @@ export interface SettingsValues {
   storage: {
     retentionDays: number;
   };
-  aiMcp: Record<string, never>;
   stealth: StealthPatches;
   advanced: {
-    perHostDelay: number;
-    perHostConcurrency: number;
     debugLog: boolean;
+  };
+  // Per-crawl inputs (formerly the separate CrawlConfig blob). Stored in the
+  // profile so there is a single source of truth for everything the user can
+  // configure. Not surfaced in the schema-driven settings UI — edited via the
+  // crawl inputs modal, list-mode textarea, scraper modal, etc.
+  inputs: {
+    urls: string[];
+    customHeaders: Record<string, string>;
+    scraperRules: ScraperRule[];
+    recrawlQueue: string[];
   };
 }
 
@@ -75,5 +86,4 @@ export interface Profile {
   isDefault: boolean;
   createdAt: string;
   updatedAt: string;
-  startUrl?: string;
 }

@@ -26,6 +26,8 @@ interface ProbeConfig {
   warmup: boolean;
   freshProfile: boolean;
   residentialUa: boolean;
+  // Tier-3+ row: visible browser. Older sidecar builds don't emit this field.
+  headed?: boolean;
 }
 
 interface ProbeRow {
@@ -46,7 +48,7 @@ const probeHost = ref<string>("");
 const probeSampleUrl = ref<string>("");
 const probeRunning = ref(false);
 const probeRows = ref<ProbeRow[]>([]);
-const probeRowsExpected = ref(6);
+const probeRowsExpected = ref(7);
 
 const reasonLabel: Record<string, string> = {
   status_403: "403",
@@ -60,8 +62,11 @@ const reasonLabel: Record<string, string> = {
 const blockList = computed(() => Array.from(blocks.value.values()));
 
 const firstSuccessRow = computed(() => probeRows.value.find((r) => !r.blocked));
-const allDone = computed(() => probeRows.value.length >= probeRowsExpected.value);
-const allFailed = computed(() => allDone.value && !firstSuccessRow.value);
+// "Probe is finished" — true when probe-matrix-complete fires, regardless of
+// row count. Probe matrix early-exits on first real 200, so row count alone
+// no longer signals completion.
+const probeFinished = ref(false);
+const allFailed = computed(() => probeFinished.value && !firstSuccessRow.value);
 
 function reasonSummary(reasons: Record<string, number>): string {
   return Object.entries(reasons)
@@ -89,27 +94,19 @@ async function tryHostAgain(host: string) {
   }
 }
 
-async function abandonHost(host: string) {
-  // Tell the live sidecar: drop every parked URL for this host and don't try
-  // it again in this run. Other hosts (if any) keep crawling.
-  try {
-    await invoke("stop_host", { host });
-    blocks.value.delete(host);
-    blocks.value = new Map(blocks.value);
-  } catch (err) {
-    console.error("stop_host failed", err);
-  }
-}
-
 // Set when an auto-probe is running so probe-matrix-complete knows to
 // auto-apply the winning config (instead of waiting for a user click).
 const autoProbeMode = ref(false);
 const autoProbedHosts = ref<Set<string>>(new Set());
 
+const explainerOpen = ref(false);
+const probeApplyInFlight = ref(false);
+
 async function openProbe(info: BlockInfo) {
   probeHost.value = info.host;
   probeSampleUrl.value = info.sampleUrls[0] ?? `https://${info.host}/`;
   probeRows.value = [];
+  probeFinished.value = false;
   probeRunning.value = true;
   probeOpen.value = true;
   try {
@@ -117,6 +114,9 @@ async function openProbe(info: BlockInfo) {
   } catch (err) {
     console.error("run_probe_matrix failed", err);
     probeRunning.value = false;
+    // Without this, the modal would just sit empty forever and the user has
+    // no idea why nothing's happening.
+    alert(`Probe failed to start: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -131,6 +131,7 @@ async function startAutoProbe(info: BlockInfo) {
   probeHost.value = info.host;
   probeSampleUrl.value = info.sampleUrls[0] ?? `https://${info.host}/`;
   probeRows.value = [];
+  probeFinished.value = false;
   probeRunning.value = true;
   // Modal stays closed — this is silent recovery.
   try {
@@ -145,6 +146,7 @@ async function startAutoProbe(info: BlockInfo) {
 function closeProbe() {
   probeOpen.value = false;
   probeRunning.value = false;
+  probeFinished.value = false;
   probeRows.value = [];
   probeHost.value = "";
 }
@@ -163,6 +165,12 @@ async function openInExternal(url: string) {
 // are skipped via excludeUrls). The new sidecar boots with the working
 // stealth/rate/UA config that the probe just verified.
 async function applyRowAndResume(row: ProbeRow) {
+  if (!row) {
+    alert("No winning row to apply.");
+    return;
+  }
+  if (probeApplyInFlight.value) return;
+  probeApplyInFlight.value = true;
   const { patch } = useSettings();
   const cfg = row.config;
   const tier = cfg.stealth;
@@ -189,18 +197,33 @@ async function applyRowAndResume(row: ProbeRow) {
 
     await patch("performance", "sessionWarmup", !!cfg.warmup);
 
-    // Fresh profile means "wipe Akamai/CF cookies before resuming". Without
-    // this, poisoned _abck / __cf_bm cookies will keep us blocked even with
-    // perfect stealth.
-    if (cfg.freshProfile) {
-      try { await invoke("wipe_browser_profile"); }
-      catch (e) { console.error("wipe_browser_profile failed:", e); }
+    // Tier-3 (headed) rows mean "the wall only lets us through with a visible
+    // browser". Honor that on the live crawl; otherwise leave headless as the
+    // user had it, since headed mode is intrusive (visible window).
+    if (cfg.headed) {
+      await patch("authentication", "headless", false);
     }
+
+    // The probe ran in a fresh isolated context — its "real 200" verdict is
+    // only reproducible on the live crawl if the live profile is also clean.
+    // Existing _abck / __cf_bm cookies poisoned by the prior block-tripping
+    // run will keep blocking us with the new config otherwise.
+    try { await invoke("wipe_browser_profile"); }
+    catch (e) { console.error("wipe_browser_profile failed:", e); }
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
     console.error("Failed to apply probe row settings:", e);
+    probeApplyInFlight.value = false;
+    // Close the modal so the block-alert banner is visible again — the user
+    // needs a path forward (re-probe, manual settings) without the modal
+    // sitting in front. Without closeProbe(), they'd be stuck staring at a
+    // dismissed alert with the modal still occupying the screen.
+    closeProbe();
+    alert(`Failed to save probe settings: ${msg}\n\nThe crawl was not resumed. The block banner is still visible — try Probe configs again, or adjust settings manually.`);
     return;
   }
 
+  probeApplyInFlight.value = false;
   closeProbe();
   // App.vue handles the actual stop+restart since it owns the URL + handleStart.
   emit("apply-probe-and-resume");
@@ -249,16 +272,16 @@ onMounted(async () => {
   unlisteners.push(
     await listen("probe-matrix-complete", () => {
       probeRunning.value = false;
-      // Auto-mode: if a winning row was found, apply it immediately.
-      // Otherwise drop the auto-mode flag and leave the user to investigate
-      // (the banner is still showing, they can manually click Probe configs
-      // to see what failed and run the IP-ban diagnostic).
-      if (autoProbeMode.value) {
-        const winner = firstSuccessRow.value;
-        autoProbeMode.value = false;
-        if (winner) {
-          void applyRowAndResume(winner);
-        }
+      probeFinished.value = true;
+      // Manual + auto: apply the winning row automatically. The probe matrix
+      // now early-exits on the first real 200, so this fires after the first
+      // win without making the user wait through all rows + click. If the
+      // applied config doesn't actually beat the wall on the live crawl, the
+      // BlockAlert reappears and the user can re-probe.
+      const winner = firstSuccessRow.value;
+      autoProbeMode.value = false;
+      if (winner) {
+        void applyRowAndResume(winner);
       }
     }),
   );
@@ -296,11 +319,6 @@ onUnmounted(() => {
           @click="tryHostAgain(info.host)"
         >Try host again</button>
         <button
-          class="btn"
-          :title="'Drop all parked URLs for this host and skip them for the rest of this crawl. Other hosts keep crawling.'"
-          @click="abandonHost(info.host)"
-        >Abandon host</button>
-        <button
           class="btn btn-primary"
           :title="'Test 6 stealth/rate configs against this host to find one that returns a real 200. Doesn\'t change anything until you click \'Save settings & resume\' on a winning row.'"
           @click="openProbe(info)"
@@ -310,13 +328,14 @@ onUnmounted(() => {
     <div class="block-alert-hint">
       <strong>Try host again</strong>: clear the gate, settings unchanged.
       &nbsp;·&nbsp;
-      <strong>Abandon host</strong>: skip remaining URLs on this host.
-      &nbsp;·&nbsp;
       <strong>Probe configs</strong>: find a working stealth config without touching the running crawl.
     </div>
   </div>
 
-  <!-- Probe matrix modal -->
+  <!-- Probe matrix modal: teleported to <body> so position:fixed escapes any
+       ancestor stacking context (otherwise the overlay can render behind the
+       grid even with z-index: 1000). -->
+  <Teleport to="body">
   <div v-if="probeOpen" class="probe-overlay" @click.self="closeProbe">
     <div class="probe-modal">
       <div class="probe-header">
@@ -325,6 +344,34 @@ onUnmounted(() => {
       </div>
       <div class="probe-sample">
         Sample URL: <span class="mono">{{ probeSampleUrl }}</span>
+      </div>
+      <div class="probe-explainer">
+        <button class="probe-explainer-toggle" type="button" @click="explainerOpen = !explainerOpen">
+          {{ explainerOpen ? "▾" : "▸" }} What do these tiers and knobs mean?
+        </button>
+        <div v-if="explainerOpen" class="probe-explainer-body">
+          <div class="probe-explainer-section">
+            <strong>Stealth tier</strong> — which fingerprint patches are active.
+            <ul>
+              <li><code>off</code>: pure Patchright defaults. No init script, no UA override, no custom headers.</li>
+              <li><code>tier-1</code>: full stealth stack <em>except</em> canvas noise and <code>userAgentData</code> UA-CH spoof. ~18 patches active (webdriver hide, plugins, languages, platform, hardware, permissions, chrome stub, screen metrics, WebGL, mediaDevices, etc.) plus fingerprint-derived UA + matching Sec-CH-UA headers.</li>
+              <li><code>tier-2</code>: tier-1 plus canvas noise (RGB jitter on <code>toDataURL</code>/<code>getImageData</code>) and full UA-CH spoof. Maximum fingerprint coverage.</li>
+            </ul>
+          </div>
+          <div class="probe-explainer-section">
+            <strong>Other knobs</strong>
+            <ul>
+              <li><code>500ms / 1000ms / 2000ms</code>: minimum gap between same-host requests. Defeats per-host RPS detection.</li>
+              <li><code>warmup</code>: visit <code>origin/</code> once before the deep-link so Akamai's <code>_abck</code> / Cloudflare's <code>__cf_bm</code> challenge cookies set first.</li>
+              <li><code>fresh</code>: throwaway browser-profile dir for this row, so prior poisoned cookies don't carry in.</li>
+              <li><code>residential-UA</code>: forces a Chrome-on-Windows UA string instead of the fingerprint-derived one.</li>
+              <li><code>headed</code>: visible Chrome window. Catches walls that gate behavioral signals only in headless. Last-resort row.</li>
+            </ul>
+          </div>
+          <div class="probe-explainer-section">
+            <strong>Reading rows</strong> — each row gets more aggressive. The first <em>real 200</em> wins (cheapest config that beats the wall). If all rows fail, you're probably IP-banned: try a VPN or wait it out.
+          </div>
+        </div>
       </div>
       <div class="probe-table">
         <div class="probe-thead">
@@ -351,6 +398,7 @@ onUnmounted(() => {
               <template v-if="probeRows[n - 1].config.warmup"> · warmup</template>
               <template v-if="probeRows[n - 1].config.freshProfile"> · fresh</template>
               <template v-if="probeRows[n - 1].config.residentialUa"> · residential-UA</template>
+              <template v-if="probeRows[n - 1].config.headed"> · headed</template>
             </div>
             <div class="c-status">{{ probeRows[n - 1].status || "—" }}</div>
             <div class="c-title mono">{{ probeRows[n - 1].title || "—" }}</div>
@@ -370,35 +418,40 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div v-if="allDone && firstSuccessRow" class="probe-outcome probe-outcome-ok">
+      <div v-if="probeFinished && firstSuccessRow" class="probe-outcome probe-outcome-ok">
         <div class="probe-outcome-title">Row #{{ firstSuccessRow.row }} returned a real 200 — this config gets through the wall.</div>
         <div class="probe-outcome-body">
           Winning config: stealth <strong>{{ firstSuccessRow.config.stealth }}</strong>,
           per-host delay <strong>{{ firstSuccessRow.config.rate }}</strong>
           <template v-if="firstSuccessRow.config.warmup">, <strong>session warmup on</strong></template>
           <template v-if="firstSuccessRow.config.freshProfile">, <strong>fresh browser profile</strong> (wipes existing cookies)</template>
-          <template v-if="firstSuccessRow.config.residentialUa">, <strong>residential user-agent</strong></template>.
+          <template v-if="firstSuccessRow.config.residentialUa">, <strong>residential user-agent</strong></template>
+          <template v-if="firstSuccessRow.config.headed">, <strong>headed mode</strong> (visible browser window during crawl)</template>.
         </div>
         <div class="probe-outcome-howto">
-          Clicking the button below will:
+          Auto-applying:
           <ol>
-            <li>Save these settings to your active profile (replaces your current stealth + per-host delay + warmup values).</li>
-            <li v-if="firstSuccessRow.config.freshProfile">Wipe the browser profile directory (kills any poisoned Akamai/CloudFlare cookies).</li>
-            <li>Stop the running crawl.</li>
-            <li>Restart the crawl with the new config — already-crawled URLs will be skipped (no re-fetching).</li>
+            <li>Saving these settings (stealth + per-host delay + warmup) to whatever's currently active — pinned snapshot if a saved crawl is loaded, otherwise the default profile.</li>
+            <li>Wiping the browser profile (clears poisoned Akamai/Cloudflare cookies — the probe ran in a fresh context, so the live crawl needs to match).</li>
+            <li>Stopping the running crawl and restarting with the new config — already-crawled URLs are skipped via excludeUrls.</li>
           </ol>
+          <em>If the wall comes back, click <strong>Probe configs</strong> on the block banner to retry — the matrix will start over and pick a stronger row.</em>
         </div>
         <div class="probe-outcome-actions">
           <button
-            class="btn btn-primary"
-            :title="'Save the row\'s config to your profile, stop the sidecar, and restart with the new settings. Skips already-crawled URLs.'"
+            v-if="!probeApplyInFlight"
+            class="btn"
+            :title="'Re-run the apply step (use this if auto-apply errored).'"
             @click="applyRowAndResume(firstSuccessRow)"
-          >Save settings &amp; resume crawl (skips already-crawled URLs)</button>
+          >Retry apply</button>
+          <span v-else class="probe-applying">
+            <span class="spinner"></span> Applying…
+          </span>
         </div>
       </div>
 
       <div v-else-if="allFailed" class="probe-outcome probe-outcome-fail">
-        <div class="probe-outcome-title">All 6 configs were blocked.</div>
+        <div class="probe-outcome-title">All {{ probeRowsExpected }} configs were blocked.</div>
         <div class="probe-outcome-body">
           This may be an IP-level ban. Open the sample URL in your regular browser.
           If it loads fine there but not here, it's a fingerprint issue — try again later
@@ -412,6 +465,7 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -575,6 +629,54 @@ onUnmounted(() => {
   color: #ffffff;
 }
 
+.probe-explainer {
+  padding: 0 20px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.probe-explainer-toggle {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.probe-explainer-toggle:hover {
+  color: #ffffff;
+}
+.probe-explainer-body {
+  margin-top: 6px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.75);
+  line-height: 1.5;
+}
+.probe-explainer-section {
+  margin-bottom: 10px;
+}
+.probe-explainer-section:last-child {
+  margin-bottom: 0;
+}
+.probe-explainer-section ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.probe-explainer-section li {
+  margin: 2px 0;
+}
+.probe-explainer-section code {
+  background: rgba(86, 156, 214, 0.1);
+  color: #569cd6;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10px;
+}
+
 .probe-table {
   padding: 0 20px;
   font-size: 11px;
@@ -630,6 +732,16 @@ onUnmounted(() => {
   border-top-color: #569cd6;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+.probe-applying {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #569cd6;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 @keyframes spin {

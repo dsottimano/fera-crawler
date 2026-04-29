@@ -150,6 +150,10 @@ if (command === "open-browser") {
 
   const perHostDelayRaw = getFlag("--per-host-delay", "");
   const perHostDelay = perHostDelayRaw ? parseInt(perHostDelayRaw, 10) : undefined;
+  // --per-host-delay-max upper-bounds the random per-request delay range.
+  // If unset (or <= min), jitter is disabled and behavior is fixed delayMin.
+  const perHostDelayMaxRaw = getFlag("--per-host-delay-max", "");
+  const perHostDelayMax = perHostDelayMaxRaw ? parseInt(perHostDelayMaxRaw, 10) : undefined;
   const perHostConcurrencyRaw = getFlag("--per-host-concurrency", "");
   const perHostConcurrency = perHostConcurrencyRaw ? parseInt(perHostConcurrencyRaw, 10) : undefined;
   const sessionWarmup = hasFlag("--session-warmup");
@@ -192,6 +196,7 @@ if (command === "open-browser") {
     ...(captureVitals ? { captureVitals } : {}),
     ...(stealthConfig ? { stealthConfig } : {}),
     ...(perHostDelay !== undefined && !Number.isNaN(perHostDelay) ? { perHostDelay } : {}),
+    ...(perHostDelayMax !== undefined && !Number.isNaN(perHostDelayMax) ? { perHostDelayMax } : {}),
     ...(perHostConcurrency !== undefined && !Number.isNaN(perHostConcurrency) ? { perHostConcurrency } : {}),
     ...(sessionWarmup ? { sessionWarmup } : {}),
     ...(excludeUrls?.length ? { excludeUrls } : {}),

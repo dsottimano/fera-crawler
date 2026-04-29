@@ -3,7 +3,7 @@ import { PerHostRateLimiter, parseRetryAfter } from "../../src/rate-limiter.js";
 
 describe("PerHostRateLimiter", () => {
   it("three sequential acquires with 200ms delay take ~400ms+", async () => {
-    const rl = new PerHostRateLimiter(200, 1);
+    const rl = new PerHostRateLimiter({ delayMinMs: 200, maxConcurrency: 1 });
     const t0 = Date.now();
     for (let i = 0; i < 3; i++) {
       await rl.acquire("example.com");
@@ -16,7 +16,7 @@ describe("PerHostRateLimiter", () => {
   });
 
   it("concurrency slots block when full and release opens one", async () => {
-    const rl = new PerHostRateLimiter(0, 2);
+    const rl = new PerHostRateLimiter({ delayMinMs: 0, maxConcurrency: 2 });
     await rl.acquire("x"); // slot 1
     await rl.acquire("x"); // slot 2 — now full
 
@@ -33,7 +33,7 @@ describe("PerHostRateLimiter", () => {
   });
 
   it("different hosts don't block each other", async () => {
-    const rl = new PerHostRateLimiter(500, 1);
+    const rl = new PerHostRateLimiter({ delayMinMs: 500, maxConcurrency: 1 });
     await rl.acquire("a.com");
     const t0 = Date.now();
     await rl.acquire("b.com"); // different host — shouldn't wait
@@ -43,8 +43,45 @@ describe("PerHostRateLimiter", () => {
     rl.release("b.com");
   });
 
+  it("range delay produces variable intervals (jitter on)", async () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 100, delayMaxMs: 300, maxConcurrency: 1 });
+    const intervals: number[] = [];
+    let last = Date.now();
+    await rl.acquire("h"); rl.release("h"); last = Date.now();
+    for (let i = 0; i < 8; i++) {
+      await rl.acquire("h");
+      const now = Date.now();
+      intervals.push(now - last);
+      last = now;
+      rl.release("h");
+    }
+    for (const ms of intervals) {
+      expect(ms).toBeGreaterThanOrEqual(95);
+      expect(ms).toBeLessThan(380);
+    }
+    // Jitter present: at least two distinct ~10ms buckets across 8 samples.
+    const unique = new Set(intervals.map((m) => Math.round(m / 10)));
+    expect(unique.size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("delayMaxMs <= delayMinMs disables jitter (clamped to min)", async () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 200, delayMaxMs: 50, maxConcurrency: 1 });
+    expect(rl.delayMaxMs).toBe(200);
+    const t0 = Date.now();
+    await rl.acquire("h"); rl.release("h");
+    await rl.acquire("h"); rl.release("h");
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeGreaterThanOrEqual(180);
+    expect(elapsed).toBeLessThan(380);
+  });
+
+  it("delayMs getter returns the mean of the range", () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 500, delayMaxMs: 1500, maxConcurrency: 2 });
+    expect(rl.delayMs).toBe(1000);
+  });
+
   it("snapshot reports current inFlight counts", async () => {
-    const rl = new PerHostRateLimiter(0, 2);
+    const rl = new PerHostRateLimiter({ delayMinMs: 0, maxConcurrency: 2 });
     await rl.acquire("h");
     await rl.acquire("h");
     const snap = rl.snapshot();

@@ -1,6 +1,29 @@
 mod commands;
+mod voice_commands;
 
 use tauri_plugin_sql::{Builder as SqlBuilder, Migration, MigrationKind};
+
+// WebKitGTK denies media (mic/camera) by default, and even with permission
+// granted requires the media-stream feature to be enabled at the settings
+// level. We do both: flip the settings on, and auto-allow any permission
+// request the webview makes (we trust our own UI).
+#[cfg(target_os = "linux")]
+fn enable_webview_media_linux(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use webkit2gtk::{PermissionRequestExt, SettingsExt, WebViewExt};
+    window.with_webview(|webview| {
+        let wv = webview.inner();
+        if let Some(settings) = WebViewExt::settings(&wv) {
+            settings.set_enable_media_stream(true);
+            settings.set_enable_mediasource(true);
+            settings.set_enable_media(true);
+        }
+        wv.connect_permission_request(|_, request| {
+            request.allow();
+            true
+        });
+    })?;
+    Ok(())
+}
 
 pub fn run() {
     let migrations = vec![
@@ -123,6 +146,18 @@ pub fn run() {
                 .add_migrations("sqlite:fera.db", migrations)
                 .build(),
         )
+        .setup(|app| {
+            #[cfg(target_os = "linux")]
+            {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = enable_webview_media_linux(&window) {
+                        eprintln!("[fera] failed to enable webview media: {}", e);
+                    }
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::start_crawl,
             commands::stop_crawl,
@@ -137,6 +172,8 @@ pub fn run() {
             commands::resume_host,
             commands::stop_host,
             commands::run_probe_matrix,
+            voice_commands::claude_turn_streaming,
+            voice_commands::speak,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

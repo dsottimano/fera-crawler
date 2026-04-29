@@ -24,7 +24,12 @@ await build({
   target: "node22",
   format: "cjs",
   outfile: "dist/index.cjs",
-  external: ["chromium-bidi"],
+  external: [
+    "chromium-bidi",
+    "playwright-core/lib/zipBundle",
+    "./loader",
+    "./chromium/appIcon.png",
+  ],
   sourcemap: false,
   minify: true,
   plugins: [patchPlaywrightResolves],

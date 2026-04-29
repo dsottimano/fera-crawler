@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import MenuBar from "./components/MenuBar.vue";
 import CategoryTabs from "./components/CategoryTabs.vue";
 import FilterBar from "./components/FilterBar.vue";
@@ -16,9 +17,12 @@ import CrawlManager from "./components/CrawlManager.vue";
 import BlockAlert from "./components/BlockAlert.vue";
 import SettingsPanel from "./components/settings/SettingsPanel.vue";
 import DebugPanel from "./components/debug/DebugPanel.vue";
+import VoiceRecorderModal from "./components/VoiceRecorderModal.vue";
 import { useDebug } from "./composables/useDebug";
 import { useSettings } from "./composables/useSettings";
 import { useCrawl } from "./composables/useCrawl";
+import { preloadVoiceModel } from "./composables/useVoiceInput";
+import { useVoiceFlow } from "./composables/useVoiceFlow";
 import { useConfig } from "./composables/useConfig";
 import { useFileOps } from "./composables/useFileOps";
 import { useBrowser } from "./composables/useBrowser";
@@ -27,13 +31,37 @@ import type { CrawlResult } from "./types/crawl";
 
 const url = ref("");
 const crawlScope = ref("Subdomain");
-const { config, applyConfig } = useConfig();
-const { results, crawling, stopped, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
+const { config } = useConfig();
+const { results, crawling, stopped, seoVersion, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
+const voiceFlow = useVoiceFlow();
+const voiceModalOpen = ref(false);
+
+// Auto-close once the turn fully completes (idle after speaking).
+watch(() => voiceFlow.state.value, (s, prev) => {
+  if (voiceModalOpen.value && s === "idle" && prev && prev !== "idle") {
+    voiceModalOpen.value = false;
+  }
+});
+
+async function handleVoicePress() {
+  if (voiceFlow.state.value === "error") {
+    // Press during error state = dismiss + retry
+    voiceModalOpen.value = false;
+    await voiceFlow.press();
+    return;
+  }
+  if (!voiceModalOpen.value) voiceModalOpen.value = true;
+  await voiceFlow.press();
+}
+
+async function handleVoiceCancel() {
+  await voiceFlow.cancel();
+  voiceModalOpen.value = false;
+}
 const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
 const { profileData } = useBrowser();
-const { closeOrphanedSessions } = useDatabase();
 const { start: startDebugListeners } = useDebug();
-const { settings, init: initSettings, patch: patchSetting } = useSettings();
+const { settings, effectiveSettings, init: initSettings, patch: patchSetting } = useSettings();
 
 // Auto-show profile viewer when cookies arrive after sign-in
 watch(profileData, (data) => {
@@ -42,13 +70,11 @@ watch(profileData, (data) => {
   }
 });
 
-// On startup: close any orphaned sessions (but don't auto-load — start clean)
+// On startup: useCrawl() rehydrates the latest incomplete session (if any).
+// No more closeOrphanedSessions — that silently marked stopped crawls as
+// complete, hiding them from the user. Now they auto-resume; if the user
+// wants a fresh start they explicitly Clear.
 onMounted(async () => {
-  try {
-    await closeOrphanedSessions();
-  } catch (e) {
-    console.error("DB startup error:", e);
-  }
   // Start debug listeners app-wide so logs accumulate even when panel is closed.
   try {
     await startDebugListeners();
@@ -62,7 +88,57 @@ onMounted(async () => {
     console.error("Settings init error:", e);
   }
   window.addEventListener("keydown", onGlobalKeydown);
+
+  // Spin up the STT worker + start downloading the model in the background
+  // so the first "/" press doesn't block on a cold load.
+  preloadVoiceModel();
+
+  try {
+    browserInstallUnlisteners.push(
+      await listen<{ name: string; meta?: Record<string, unknown> }>("sidecar-phase", (event) => {
+        const name = event.payload.name;
+        if (name === "browser-install-start") {
+          if (browserInstallTimer) {
+            clearTimeout(browserInstallTimer);
+            browserInstallTimer = null;
+          }
+          browserInstallNotice.value = {
+            state: "running",
+            text: "Browser runtime is missing. Downloading Patchright Chromium now...",
+          };
+        } else if (name === "browser-install-complete") {
+          browserInstallNotice.value = {
+            state: "done",
+            text: "Browser runtime installed. Starting the crawl...",
+          };
+          browserInstallTimer = setTimeout(() => {
+            browserInstallNotice.value = null;
+            browserInstallTimer = null;
+          }, 5000);
+        } else if (name === "browser-install-failed") {
+          const msg = String(event.payload.meta?.error ?? "Download failed. Check your network and try again.");
+          browserInstallNotice.value = {
+            state: "failed",
+            text: `Browser runtime download failed. ${msg}`,
+          };
+        }
+      }),
+    );
+    browserInstallUnlisteners.push(
+      await listen("crawl-started", () => {
+        if (browserInstallTimer) {
+          clearTimeout(browserInstallTimer);
+          browserInstallTimer = null;
+        }
+        browserInstallNotice.value = null;
+      }),
+    );
+  } catch (e) {
+    console.error("Browser installer listener setup failed:", e);
+  }
 });
+
+const browserInstallUnlisteners: UnlistenFn[] = [];
 
 const showProfile = ref(false);
 const configSection = ref<string | null>(null);
@@ -76,6 +152,8 @@ const searchQuery = ref("");
 const filterType = ref("All");
 const selectAllTrigger = ref(0);
 const filteredCount = ref(0);
+const browserInstallNotice = ref<{ state: "running" | "done" | "failed"; text: string } | null>(null);
+let browserInstallTimer: ReturnType<typeof setTimeout> | null = null;
 
 const bottomPanelHeight = ref(parseInt(localStorage.getItem('fera-bottom-height') || '200', 10));
 const sidebarWidth = ref(parseInt(localStorage.getItem('fera-sidebar-width') || '250', 10));
@@ -125,6 +203,12 @@ function handleClearRecrawlQueue() {
   config.recrawlQueue = [];
 }
 
+// "Clicking the action button will resume" — true whenever there's data we
+// could pick up from. Matches handleStart's isResume check so the button
+// label never lies about what clicking does. Survives HMR-induced loss of
+// the `stopped` flag because results.length is the actual signal.
+const isResumable = computed(() => stopped.value || results.value.length > 0);
+
 const statusText = computed(() => {
   if (crawling.value) return "CRAWLING";
   if (stopped.value) return "STOPPED";
@@ -141,7 +225,7 @@ function normalizeUrl(raw: string): string {
 
 function canStart(): boolean {
   if (crawling.value) return false;
-  if (settings.value.crawling.mode === "list") return config.urls.length > 0;
+  if (effectiveSettings.value.crawling.mode === "list") return config.urls.length > 0;
   return !!url.value.trim();
 }
 
@@ -161,8 +245,13 @@ async function handleStart() {
   // Treat any START click with existing results as a resume — never silently
   // wipe a partial crawl. To start fresh, the user must explicitly Clear.
   const isResume = stopped.value || results.value.length > 0;
+  // Read mode from effectiveSettings — pinned snapshot when a saved crawl is
+  // loaded, default profile otherwise. Reading settings.value here would
+  // silently use the default profile's mode for a loaded list crawl, routing
+  // the resume through the spider branch.
+  const activeMode = effectiveSettings.value.crawling.mode;
   try {
-    if (settings.value.crawling.mode === "list") {
+    if (activeMode === "list") {
       if (!config.urls.length) return;
       await startCrawl(config.urls[0], { resume: isResume });
     } else {
@@ -191,11 +280,28 @@ function onGlobalKeydown(e: KeyboardEvent) {
   if (mod && e.key === ",") {
     e.preventDefault();
     showSettingsPanel.value = true;
+    return;
   }
   // Cmd/Ctrl+Shift+D opens debug
   if (mod && e.shiftKey && (e.key === "D" || e.key === "d")) {
     e.preventDefault();
     showDebugPanel.value = true;
+    return;
+  }
+  // "/" toggles voice mode (skip when user is typing in any input/textarea).
+  if (e.key === "/" && !mod && !e.altKey) {
+    const target = e.target as HTMLElement | null;
+    const tag = target?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+    e.preventDefault();
+    handleVoicePress();
+    return;
+  }
+  // Esc cancels recording / dismisses error modal.
+  if (e.key === "Escape" && voiceModalOpen.value) {
+    e.preventDefault();
+    handleVoiceCancel();
+    return;
   }
 }
 
@@ -250,6 +356,8 @@ function handleLoadSession(sessionUrl: string) {
 onUnmounted(() => {
   if (resizing) stopResize();
   window.removeEventListener("keydown", onGlobalKeydown);
+  for (const u of browserInstallUnlisteners) u();
+  if (browserInstallTimer) clearTimeout(browserInstallTimer);
 });
 
 async function handleMenuAction(menu: string, item: string) {
@@ -261,7 +369,12 @@ async function handleMenuAction(menu: string, item: string) {
       if (data) {
         setResults(data.results);
         if (data.config) {
-          applyConfig(data.config);
+          // .fera files store the legacy inputs slice — write it back into
+          // the active inputs blob (effectiveSettings via useConfig).
+          if (Array.isArray(data.config.urls)) config.urls = [...data.config.urls];
+          if (data.config.customHeaders) config.customHeaders = { ...data.config.customHeaders };
+          if (Array.isArray(data.config.scraperRules)) config.scraperRules = [...data.config.scraperRules];
+          if (Array.isArray(data.config.recrawlQueue)) config.recrawlQueue = [...data.config.recrawlQueue];
         }
       }
     }
@@ -359,21 +472,13 @@ async function handleMenuAction(menu: string, item: string) {
 
         <!-- Actions -->
         <div class="telem-actions">
-          <button class="btn-pill btn-go" :class="{ 'btn-resume': stopped }" :disabled="!canStart()" @click="handleStart">
-            {{ stopped ? '&#x25B6; RESUME' : '&#x25B6; START' }}
+          <button class="btn-pill btn-go" :class="{ 'btn-resume': isResumable }" :disabled="!canStart()" @click="handleStart">
+            {{ isResumable ? '&#x25B6; RESUME' : '&#x25B6; START' }}
           </button>
           <button v-if="crawling" class="btn-pill btn-stop" @click="stopCrawl">
             &#x25A0; STOP
           </button>
           <button class="btn-pill btn-reset" @click="handleClear">CLEAR</button>
-          <button
-            class="btn-pill btn-ogimage"
-            :class="{ 'btn-ogimage--on': settings.extraction.downloadOgImage }"
-            :disabled="crawling"
-            @click="patchSetting('extraction', 'downloadOgImage', !settings.extraction.downloadOgImage)"
-          >
-            {{ settings.extraction.downloadOgImage ? '&#x2713; OG:IMAGE' : 'OG:IMAGE' }}
-          </button>
           <button
             v-if="profileData"
             class="btn-pill btn-profile"
@@ -397,6 +502,7 @@ async function handleMenuAction(menu: string, item: string) {
           >
             &times; CLEAR QUEUE
           </button>
+          <span class="actions-sep" aria-hidden="true"></span>
           <button class="btn-pill btn-settings" @click="showSettingsPanel = true" title="Cmd/Ctrl+,">
             &#x2699; SETTINGS
           </button>
@@ -405,17 +511,27 @@ async function handleMenuAction(menu: string, item: string) {
           </button>
         </div>
 
-        <!-- Config indicators -->
-        <div class="telem-divider"></div>
-        <div class="config-badges">
-          <span v-if="settings.crawling.delay > 0" class="config-badge" :title="'Delay: ' + settings.crawling.delay + 'ms'">{{ settings.crawling.delay }}ms</span>
-          <span v-if="!settings.crawling.respectRobots" class="config-badge config-badge--warn" title="Ignoring robots.txt">NO ROBOTS</span>
+        <!-- Config badges: only show when set (delay + robots are visible
+             in the right-sidebar Config tab; surface non-default per-crawl
+             input state here as a heads-up). -->
+        <div
+          v-if="config.scraperRules.length > 0 || Object.keys(config.customHeaders).length > 0"
+          class="config-badges"
+        >
           <span v-if="config.scraperRules.length > 0" class="config-badge" :title="config.scraperRules.length + ' scraper rule(s)'">SCRAPER</span>
           <span v-if="Object.keys(config.customHeaders).length > 0" class="config-badge" :title="Object.keys(config.customHeaders).length + ' custom header(s)'">HEADERS</span>
         </div>
     </header>
 
     <BlockAlert @apply-probe-and-resume="onApplyProbeAndResume" />
+    <div
+      v-if="browserInstallNotice"
+      class="browser-install-banner"
+      :class="'browser-install-banner--' + browserInstallNotice.state"
+    >
+      <div class="browser-install-dot"></div>
+      <div class="browser-install-text">{{ browserInstallNotice.text }}</div>
+    </div>
       <CategoryTabs :active="activeCategory" :recrawl-count="config.recrawlQueue.length" @select="activeCategory = $event" />
       <FilterBar
         :total-results="results.length"
@@ -431,7 +547,7 @@ async function handleMenuAction(menu: string, item: string) {
       <div class="main-content">
         <div class="left-panels">
           <div class="grid-area">
-            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
+            <CrawlGrid :results="results" :active-tab="activeCategory" :filter-type="filterType" :select-all="selectAllTrigger" :seo-version="seoVersion" @row-select="onRowSelect" @recrawl="handleRecrawl" @filtered-count="filteredCount = $event" />
           </div>
           <div class="grid-status-bar">
             <span>Selected Cells: 0</span>
@@ -459,6 +575,13 @@ async function handleMenuAction(menu: string, item: string) {
     <ProfileViewer v-if="showProfile && profileData" :data="profileData" @close="showProfile = false" />
     <SettingsPanel v-if="showSettingsPanel" @close="showSettingsPanel = false" />
     <DebugPanel v-if="showDebugPanel" @close="showDebugPanel = false" />
+    <VoiceRecorderModal
+      :show="voiceModalOpen"
+      :state="voiceFlow.state.value"
+      :error-text="voiceFlow.errorText.value"
+      :user-transcript="voiceFlow.userTranscript.value"
+      :claude-text="voiceFlow.claudeText.value"
+    />
 
     <!-- Clear confirm dialog -->
     <div v-if="showClearConfirm" class="overlay" @click.self="showClearConfirm = false">
@@ -483,12 +606,49 @@ async function handleMenuAction(menu: string, item: string) {
   background: #0c111d;
 }
 
+.browser-install-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(220, 220, 170, 0.1);
+  color: #e6e1b5;
+  font-size: 12px;
+}
+
+.browser-install-banner--done {
+  background: rgba(78, 201, 176, 0.1);
+  color: #9de0d4;
+}
+
+.browser-install-banner--failed {
+  background: rgba(244, 71, 71, 0.12);
+  color: #ffb0b0;
+}
+
+.browser-install-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.browser-install-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* ── Telemetry bar ── */
 .telemetry-bar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 8px 16px;
+  gap: 16px;
+  padding: 10px 20px;
   background: #0c111d;
   border-bottom: 1px solid rgba(255,255,255,0.08);
   flex-shrink: 0;
@@ -601,10 +761,11 @@ async function handleMenuAction(menu: string, item: string) {
   50% { opacity: 0.3; }
 }
 
-/* URL input — compact 1/3 width */
+/* URL input — primary input, takes the lion's share of free horizontal space. */
 .telem-url-group {
-  flex: 0 1 320px;
-  min-width: 180px;
+  flex: 1 1 360px;
+  min-width: 240px;
+  max-width: 640px;
 }
 
 .telem-url-wrap {
@@ -622,12 +783,12 @@ async function handleMenuAction(menu: string, item: string) {
 
 .telem-url {
   width: 100%;
-  padding: 6px 16px;
+  padding: 8px 18px;
   border: none;
   background: transparent;
   color: #ffffff;
-  font-size: 11px;
-  font-family: 'Ubuntu Mono', monospace;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
   outline: none;
 }
 
@@ -679,11 +840,22 @@ async function handleMenuAction(menu: string, item: string) {
   padding: 8px;
 }
 
-/* Action buttons — rounded pill style */
+/* Action buttons — primary cluster (start/stop/clear/recrawl) gets tight
+   spacing; an in-cluster gap separates it from secondary actions
+   (cookies/settings/debug) so the eye groups them naturally. */
 .telem-actions {
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
+  align-items: center;
+}
+
+.actions-sep {
+  display: inline-block;
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 0 4px;
 }
 
 .btn-pill {
@@ -729,28 +901,6 @@ async function handleMenuAction(menu: string, item: string) {
 .btn-reset:hover {
   color: #ffffff;
   border-color: rgba(255,255,255,0.25);
-}
-
-.btn-ogimage {
-  color: rgba(255,255,255,0.4);
-  border-color: rgba(255,255,255,0.1);
-}
-.btn-ogimage:hover:not(:disabled) {
-  color: rgba(255,255,255,0.7);
-  border-color: rgba(255,255,255,0.25);
-}
-.btn-ogimage--on {
-  color: #c586c0;
-  border-color: rgba(197,134,192,0.3);
-}
-.btn-ogimage--on:hover:not(:disabled) {
-  background: rgba(197,134,192,0.1);
-  border-color: #c586c0;
-  box-shadow: 0 0 16px rgba(197,134,192,0.15);
-}
-.btn-ogimage:disabled {
-  opacity: 0.25;
-  cursor: default;
 }
 
 .btn-profile {
@@ -800,6 +950,7 @@ async function handleMenuAction(menu: string, item: string) {
   border-color: rgba(255,255,255,0.3);
   background: rgba(255,255,255,0.04);
 }
+
 
 /* ── Main layout ── */
 .main-content {
@@ -946,9 +1097,4 @@ async function handleMenuAction(menu: string, item: string) {
   white-space: nowrap;
 }
 
-.config-badge--warn {
-  color: #dcdcaa;
-  border-color: rgba(220,220,170,0.25);
-  background: rgba(220,220,170,0.06);
-}
 </style>

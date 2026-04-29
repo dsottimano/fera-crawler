@@ -1,6 +1,7 @@
 import { ref, type Ref } from "vue";
 import Database from "@tauri-apps/plugin-sql";
 import { invoke } from "@tauri-apps/api/core";
+import { serializeWrite } from "../utils/dbWrite";
 
 let dbPromise: Promise<Database> | null = null;
 function getDb(): Promise<Database> {
@@ -120,23 +121,25 @@ async function probeAndSave(url: string): Promise<ProbeResult> {
   try {
     const result = await invoke<ProbeResult>("probe_crawl_config", { url });
     const domain = domainOf(url);
-    const d = await getDb();
-    await d.execute(
-      `INSERT INTO crawl_configs (domain, config_json, winning_label, attempts_json, probed_at)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT(domain) DO UPDATE SET
-         config_json = excluded.config_json,
-         winning_label = excluded.winning_label,
-         attempts_json = excluded.attempts_json,
-         probed_at = excluded.probed_at`,
-      [
-        domain,
-        JSON.stringify(result.winningConfig ?? {}),
-        result.winningLabel,
-        JSON.stringify(result.attempts ?? []),
-        result.probedAt,
-      ]
-    );
+    await serializeWrite(async () => {
+      const d = await getDb();
+      await d.execute(
+        `INSERT INTO crawl_configs (domain, config_json, winning_label, attempts_json, probed_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT(domain) DO UPDATE SET
+           config_json = excluded.config_json,
+           winning_label = excluded.winning_label,
+           attempts_json = excluded.attempts_json,
+           probed_at = excluded.probed_at`,
+        [
+          domain,
+          JSON.stringify(result.winningConfig ?? {}),
+          result.winningLabel,
+          JSON.stringify(result.attempts ?? []),
+          result.probedAt,
+        ]
+      );
+    });
     await listConfigs();
     return result;
   } finally {
@@ -145,8 +148,10 @@ async function probeAndSave(url: string): Promise<ProbeResult> {
 }
 
 async function deleteConfig(domain: string): Promise<void> {
-  const d = await getDb();
-  await d.execute("DELETE FROM crawl_configs WHERE domain = $1", [domain]);
+  await serializeWrite(async () => {
+    const d = await getDb();
+    await d.execute("DELETE FROM crawl_configs WHERE domain = $1", [domain]);
+  });
   await listConfigs();
 }
 

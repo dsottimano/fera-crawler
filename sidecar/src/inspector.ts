@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { chromium, type Page } from "patchright";
 import { writeLine } from "./pipeline.js";
 import {
-  findChromium,
+  ensureChromiumExecutable,
   getBrowserProfileDir,
   ensureProtocol,
   killChromeForProfile,
@@ -133,7 +133,7 @@ const INSPECTOR_SCRIPT = `(() => {
 
 export async function openInspector(rawUrl: string, profileDir?: string): Promise<void> {
   const url = ensureProtocol(rawUrl);
-  const executablePath = findChromium();
+  const executablePath = await ensureChromiumExecutable("inspect");
   const userDataDir = getBrowserProfileDir(profileDir);
 
   fs.mkdirSync(userDataDir, { recursive: true });
@@ -143,7 +143,7 @@ export async function openInspector(rawUrl: string, profileDir?: string): Promis
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
-    executablePath,
+    ...(executablePath ? { executablePath } : {}),
     args: [...STEALTH_ARGS, "--start-maximized"],
     ignoreDefaultArgs: ["--enable-automation"],
     viewport: null,

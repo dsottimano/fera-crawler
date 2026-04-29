@@ -131,9 +131,13 @@ export interface CrawlConfig {
   // Partial patch config for stealth — unset patches take their defaults.
   // Omit stealthConfig entirely to get the full default patch set.
   stealthConfig?: Record<string, boolean>;
-  // Per-host rate limiting (ms between request starts per host, max concurrent per host).
-  // Defaults in crawler: 500ms / 2 concurrent. Set to 0 / 1 respectively to disable.
+  // Per-host rate limiting. perHostDelay is the MIN ms between request
+  // starts to the same host; perHostDelayMax (when > min) is the upper end
+  // of a uniform-random range — fresh draw per request to defeat
+  // interval-regularity bot detectors. Defaults: 500ms / 500ms (no jitter)
+  // / 2 concurrent. Set delay to 0 to disable, concurrency to 1 to serialize.
   perHostDelay?: number;
+  perHostDelayMax?: number;
   perHostConcurrency?: number;
   // Visit each unique origin's root with a brief wait before the main crawl
   // loop, so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm)

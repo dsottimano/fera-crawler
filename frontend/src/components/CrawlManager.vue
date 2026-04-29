@@ -2,8 +2,8 @@
 import { ref, computed, onMounted } from "vue";
 import { useDatabase, type CrawlSession } from "../composables/useDatabase";
 import { useCrawl } from "../composables/useCrawl";
-import type { CrawlConfig } from "../types/crawl";
-import { useConfig } from "../composables/useConfig";
+import { sessionMeta } from "../utils/sessionMeta";
+import type { SettingsValues } from "../settings/types";
 
 const emit = defineEmits<{
   close: [];
@@ -17,7 +17,6 @@ onMounted(() => {
 
 const { listSessions, deleteSession, clearAllSessions } = useDatabase();
 const { loadSession } = useCrawl();
-const { applyConfig } = useConfig();
 
 const sessions = ref<CrawlSession[]>([]);
 const loading = ref(true);
@@ -31,6 +30,19 @@ async function refresh() {
   loading.value = false;
 }
 
+// Memoized sessionMeta lookup. Without this each row's template hits
+// sessionMeta(s) ~4× per render, and each call JSON.parses the session's
+// config_json — for a 32k-URL list crawl that blob is ~1.7MB, so the modal
+// could spend hundreds of ms re-parsing the same JSON every render.
+const metaBySessionId = computed(() => {
+  const m = new Map<number, ReturnType<typeof sessionMeta>>();
+  for (const s of sessions.value) m.set(s.id, sessionMeta(s));
+  return m;
+});
+function meta(s: CrawlSession) {
+  return metaBySessionId.value.get(s.id) ?? sessionMeta(s);
+}
+
 
 
 const openingId = ref<number | null>(null);
@@ -38,8 +50,10 @@ const openingId = ref<number | null>(null);
 async function handleOpen(session: CrawlSession) {
   openingId.value = session.id;
   try {
-    const savedConfig = await loadSession(session.id);
-    if (savedConfig) applyConfig(savedConfig);
+    // loadSession pins this snapshot inside useCrawl so resume/stop/sidebar
+    // all read from it. No more applyConfig — the default-settings profile
+    // stays untouched.
+    await loadSession(session.id);
     emit("load", session.start_url);
   } catch (e) {
     console.error("Failed to load session:", e);
@@ -47,10 +61,8 @@ async function handleOpen(session: CrawlSession) {
   }
 }
 
-// Historical session configs — older sessions may include schema-migrated
-// keys (mode, headless, delay, downloadOgImage) that are no longer on
-// CrawlConfig. Accept any shape for display purposes.
-const infoConfig = computed<Record<string, unknown> & Partial<CrawlConfig>>(() => {
+// Display-only view of the session's pinned snapshot for the info panel.
+const infoConfig = computed<Partial<SettingsValues>>(() => {
   const json = infoSession.value?.config_json;
   if (!json) return {};
   try { return JSON.parse(json); }
@@ -89,49 +101,6 @@ function formatUrl(url: string): string {
   }
 }
 
-interface SessionMeta {
-  mode: "list" | "spider";
-  listTotal: number | null;
-  status: "in progress" | "complete" | "stopped";
-  statusColor: string;
-  progressLabel: string;
-}
-
-// Derive display metadata from a session row + its config_json. Done at
-// render time (not during the SQL query) so we can change the display
-// without touching the schema.
-function sessionMeta(s: CrawlSession): SessionMeta {
-  let listTotal: number | null = null;
-  if (s.config_json && s.config_json !== "{}") {
-    try {
-      const cfg = JSON.parse(s.config_json);
-      if (Array.isArray(cfg?.urls) && cfg.urls.length > 0) {
-        listTotal = cfg.urls.length;
-      }
-    } catch { /* ignore */ }
-  }
-  const mode: "list" | "spider" = listTotal !== null ? "list" : "spider";
-  const crawled = s.result_count ?? 0;
-
-  let status: SessionMeta["status"];
-  let statusColor: string;
-  if (s.completed_at == null) {
-    status = "in progress";
-    statusColor = "#dcdcaa";
-  } else if (mode === "list" && listTotal !== null && crawled < listTotal) {
-    status = "stopped";
-    statusColor = "#ce9178";
-  } else {
-    status = "complete";
-    statusColor = "#4ec9b0";
-  }
-
-  const progressLabel = mode === "list" && listTotal !== null
-    ? `${crawled.toLocaleString()} / ${listTotal.toLocaleString()} URLs`
-    : `${crawled.toLocaleString()} URLs`;
-
-  return { mode, listTotal, status, statusColor, progressLabel };
-}
 </script>
 
 <template>
@@ -155,9 +124,9 @@ function sessionMeta(s: CrawlSession): SessionMeta {
               <span class="session-url" :title="s.start_url">{{ formatUrl(s.start_url) }}</span>
               <span class="session-meta">
                 <span>{{ formatDate(s.started_at) }}</span>
-                <span class="session-mode" :title="sessionMeta(s).mode === 'list' ? 'List mode — fixed URL list' : 'Spider mode — discovers links'">{{ sessionMeta(s).mode }}</span>
-                <span class="session-count">{{ sessionMeta(s).progressLabel }}</span>
-                <span class="session-status" :style="{ color: sessionMeta(s).statusColor }">{{ sessionMeta(s).status }}</span>
+                <span class="session-mode" :title="meta(s).mode === 'list' ? 'List mode — fixed URL list' : 'Spider mode — discovers links'">{{ meta(s).mode }}</span>
+                <span class="session-count">{{ meta(s).progressLabel }}</span>
+                <span class="session-status" :style="{ color: meta(s).statusColor }">{{ meta(s).status }}</span>
               </span>
             </div>
             <div class="session-actions">
@@ -182,11 +151,11 @@ function sessionMeta(s: CrawlSession): SessionMeta {
               <div class="info-row"><span class="info-label">COMPLETED</span><span class="info-value">{{ s.completed_at ? formatDate(s.completed_at) : 'In progress' }}</span></div>
               <div class="info-row"><span class="info-label">URLS CRAWLED</span><span class="info-value">{{ s.result_count ?? 0 }}</span></div>
               <template v-if="infoSession?.id === s.id && s.config_json && s.config_json !== '{}'">
-                <div class="info-row"><span class="info-label">MODE</span><span class="info-value">{{ infoConfig.mode ?? 'spider' }}</span></div>
-                <div class="info-row"><span class="info-label">HEADLESS</span><span class="info-value">{{ infoConfig.headless !== false ? 'Yes' : 'No' }}</span></div>
-                <div v-if="infoConfig.delay" class="info-row"><span class="info-label">DELAY</span><span class="info-value">{{ infoConfig.delay }}ms</span></div>
-                <div v-if="infoConfig.downloadOgImage" class="info-row"><span class="info-label">OG:IMAGE</span><span class="info-value">Downloading</span></div>
-                <div v-if="(infoConfig.scraperRules ?? []).length > 0" class="info-row"><span class="info-label">SCRAPER</span><span class="info-value">{{ infoConfig.scraperRules!.length }} rule(s)</span></div>
+                <div class="info-row"><span class="info-label">MODE</span><span class="info-value">{{ infoConfig.crawling?.mode ?? 'spider' }}</span></div>
+                <div class="info-row"><span class="info-label">HEADLESS</span><span class="info-value">{{ infoConfig.authentication?.headless ? 'Yes' : 'No' }}</span></div>
+                <div v-if="infoConfig.crawling?.delay" class="info-row"><span class="info-label">DELAY</span><span class="info-value">{{ infoConfig.crawling.delay }}ms</span></div>
+                <div v-if="infoConfig.extraction?.downloadOgImage" class="info-row"><span class="info-label">OG:IMAGE</span><span class="info-value">Downloading</span></div>
+                <div v-if="(infoConfig.inputs?.scraperRules ?? []).length > 0" class="info-row"><span class="info-label">SCRAPER</span><span class="info-value">{{ infoConfig.inputs!.scraperRules.length }} rule(s)</span></div>
               </template>
             </div>
           </div>

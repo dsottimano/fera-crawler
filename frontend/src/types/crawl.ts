@@ -70,20 +70,12 @@ export interface CrawlResult {
   scraper: Record<string, { value: string; appears: boolean }>;
 }
 
-// Transient per-crawl state. Persistent crawl knobs (concurrency, delay, mode,
-// headless, …) live in the active profile (useSettings / SettingsPanel).
+// Legacy on-disk shape for `.fera` export files. Live config has moved into
+// SettingsValues['inputs'] — this type only exists so useFileOps can read
+// older .fera bundles. New saves serialize the same fields.
 export interface CrawlConfig {
   customHeaders: Record<string, string>;
   urls: string[];
   scraperRules: ScraperRule[];
-  scraperUrl: string;
   recrawlQueue: string[];
 }
-
-export const defaultConfig: CrawlConfig = {
-  customHeaders: {},
-  urls: [],
-  scraperRules: [],
-  scraperUrl: "",
-  recrawlQueue: [],
-};

@@ -23,3 +23,9 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "process", "time"] }
+
+# Linux-only: enable getUserMedia (microphone) inside WebKitGTK and
+# auto-grant permission requests so STT works in the webview.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "=2.0.2"
