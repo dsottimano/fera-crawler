@@ -5,22 +5,22 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useDebug, type LogLevel } from "../../composables/useDebug";
 
+// Per the post-METRICS-tab cleanup: this panel is now logs + process only.
+// Operational metrics (pages/sec, ETA, queue, in-flight, phase) live on
+// HEALTH where they belong. Memory/heap stats are dropped entirely — they
+// were never user-actionable and the architecture memory stays flat.
 const {
   logs,
-  metrics,
-  phases,
-  latestMetric,
   currentPhase,
   snapshot,
   start,
   clearLogs,
-  clearMetrics,
   refreshSnapshot,
   killSidecar,
   wipeBrowserProfile,
 } = useDebug();
 
-type Tab = "logs" | "metrics" | "process";
+type Tab = "logs" | "process";
 const activeTab = ref<Tab>("logs");
 
 const logLevelFilter = ref<Set<LogLevel>>(
@@ -90,24 +90,6 @@ function fmtDuration(sec: number): string {
   return `${h}h ${m % 60}m`;
 }
 
-// Sparkline: last 60 metric samples, pick a numeric field.
-function sparklinePath(field: keyof import("../../composables/useDebug").MetricSample): string {
-  const series = metrics.value.slice(-60).map((m) => Number(m[field]) || 0);
-  if (series.length < 2) return "";
-  const w = 120;
-  const h = 28;
-  const max = Math.max(...series, 1);
-  const min = Math.min(...series, 0);
-  const span = max - min || 1;
-  return series
-    .map((v, i) => {
-      const x = (i / (series.length - 1)) * w;
-      const y = h - ((v - min) / span) * h;
-      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-}
-
 let snapTimer: ReturnType<typeof setInterval> | null = null;
 
 onMounted(async () => {
@@ -151,7 +133,7 @@ async function handleWipeProfile() {
       </div>
       <div class="tab-group">
         <button
-          v-for="t in (['logs', 'metrics', 'process'] as const)"
+          v-for="t in (['logs', 'process'] as const)"
           :key="t"
           class="tab"
           :class="{ 'tab--active': activeTab === t }"
@@ -200,80 +182,6 @@ async function handleWipeProfile() {
         <footer class="log-footer">
           <span v-if="!autoScroll" class="scroll-hint">auto-scroll paused — scroll to bottom to resume</span>
           <span v-else class="scroll-hint scroll-hint--on">auto-scroll on</span>
-        </footer>
-      </div>
-
-      <!-- METRICS TAB -->
-      <div v-if="activeTab === 'metrics'" class="tab-body">
-        <div v-if="!latestMetric" class="empty">No metrics yet. Start a crawl.</div>
-        <div v-else class="metric-grid">
-          <div class="metric-card">
-            <div class="metric-label">SIDECAR RSS</div>
-            <div class="metric-value">{{ fmtBytes(latestMetric.rss) }}</div>
-            <svg class="spark" viewBox="0 0 120 28" preserveAspectRatio="none">
-              <path :d="sparklinePath('rss')" />
-            </svg>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">HEAP USED</div>
-            <div class="metric-value">{{ fmtBytes(latestMetric.heapUsed) }}</div>
-            <svg class="spark" viewBox="0 0 120 28" preserveAspectRatio="none">
-              <path :d="sparklinePath('heapUsed')" />
-            </svg>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">HEAP TOTAL</div>
-            <div class="metric-value">{{ fmtBytes(latestMetric.heapTotal) }}</div>
-            <svg class="spark" viewBox="0 0 120 28" preserveAspectRatio="none">
-              <path :d="sparklinePath('heapTotal')" />
-            </svg>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">PAGES/SEC</div>
-            <div class="metric-value metric-value--num">{{ latestMetric.pagesPerSec.toFixed(2) }}</div>
-            <svg class="spark" viewBox="0 0 120 28" preserveAspectRatio="none">
-              <path :d="sparklinePath('pagesPerSec')" />
-            </svg>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">QUEUE</div>
-            <div class="metric-value metric-value--num">{{ latestMetric.queueSize }}</div>
-            <svg class="spark" viewBox="0 0 120 28" preserveAspectRatio="none">
-              <path :d="sparklinePath('queueSize')" />
-            </svg>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">IN FLIGHT</div>
-            <div class="metric-value metric-value--num">{{ latestMetric.inFlight }}</div>
-            <svg class="spark" viewBox="0 0 120 28" preserveAspectRatio="none">
-              <path :d="sparklinePath('inFlight')" />
-            </svg>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">PROCESSED</div>
-            <div class="metric-value metric-value--num">{{ latestMetric.processed }}</div>
-          </div>
-          <div class="metric-card metric-card--err">
-            <div class="metric-label">ERRORS</div>
-            <div class="metric-value metric-value--num">{{ latestMetric.errors }}</div>
-          </div>
-        </div>
-
-        <section class="phase-log">
-          <h3 class="section-label">RECENT PHASES</h3>
-          <ul v-if="phases.length" class="phase-list">
-            <li v-for="(p, i) in phases.slice(-12).reverse()" :key="i">
-              <span class="log-ts">{{ fmtTs(p.ts) }}</span>
-              <span class="phase-name">{{ p.name }}</span>
-              <span v-if="p.meta" class="log-meta">{{ JSON.stringify(p.meta) }}</span>
-            </li>
-          </ul>
-          <div v-else class="empty">No phase transitions recorded.</div>
-        </section>
-
-        <footer class="metric-footer">
-          <button class="btn-mini btn-mini--warn" @click="clearMetrics">CLEAR HISTORY</button>
-          <span class="metric-hint">{{ metrics.length }} samples retained (last {{ Math.ceil(metrics.length) }}s)</span>
         </footer>
       </div>
 
@@ -554,87 +462,6 @@ async function handleWipeProfile() {
   letter-spacing: 1px;
 }
 .scroll-hint--on { color: #4ec9b0; }
-
-/* ── METRICS ── */
-.metric-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  margin-bottom: 16px;
-}
-@media (max-width: 780px) {
-  .metric-grid { grid-template-columns: repeat(2, 1fr); }
-}
-
-.metric-card {
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.metric-card--err { border-color: rgba(244, 71, 71, 0.15); }
-
-.metric-label {
-  font-size: 8px;
-  font-weight: 600;
-  letter-spacing: 1.5px;
-  color: rgba(255, 255, 255, 0.25);
-  text-transform: uppercase;
-}
-.metric-value {
-  font-size: 16px;
-  font-weight: 700;
-  color: #ffffff;
-  font-variant-numeric: tabular-nums;
-  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
-}
-.metric-value--num { color: #569cd6; }
-.metric-card--err .metric-value { color: #f44747; }
-
-.spark {
-  width: 100%;
-  height: 28px;
-  stroke: rgba(86, 156, 214, 0.8);
-  stroke-width: 1;
-  fill: none;
-}
-.metric-card--err .spark { stroke: rgba(244, 71, 71, 0.8); }
-
-.phase-log {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  padding-top: 12px;
-  overflow-y: auto;
-  flex: 1;
-  min-height: 0;
-}
-.phase-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
-  font-size: 11px;
-}
-.phase-list li { display: flex; gap: 8px; }
-.phase-name { color: #c586c0; font-weight: 600; }
-
-.metric-footer {
-  padding-top: 8px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
-}
-.metric-hint {
-  font-size: 9px;
-  letter-spacing: 1px;
-  color: rgba(255, 255, 255, 0.25);
-}
 
 /* ── PROCESS ── */
 .proc-grid {

@@ -147,4 +147,8 @@ export interface CrawlConfig {
   // re-walk pages the frontend already has. Spider-mode start URL is never
   // skipped (we still need its links for discovery).
   excludeUrls?: string[];
+  // DB session id, used to scope og:image downloads under a per-session
+  // directory so deleting a session can rm -rf its images. 0 / undefined =
+  // unattached crawl (no og:image download).
+  sessionId?: number;
 }

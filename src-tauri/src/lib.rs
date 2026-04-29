@@ -190,6 +190,8 @@ pub fn run() {
             commands::debug_snapshot,
             commands::kill_sidecar,
             commands::wipe_browser_profile,
+            commands::get_session_image_stats,
+            commands::delete_session_images,
             commands::resume_host,
             commands::stop_host,
             commands::run_probe_matrix,

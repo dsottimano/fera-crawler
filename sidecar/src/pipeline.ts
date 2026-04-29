@@ -13,10 +13,6 @@ export interface LogEvent {
 export interface MetricEvent {
   type: "metric";
   ts: number;
-  rss: number;
-  heapUsed: number;
-  heapTotal: number;
-  external: number;
   queueSize: number;
   inFlight: number;
   processed: number;

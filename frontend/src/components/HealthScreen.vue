@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useCrawl } from "../composables/useCrawl";
+import { useDebug } from "../composables/useDebug";
 
 // Phase 5: top-level Health view. Cards summarize the crawl in
 // SQL-aggregate terms (per the plan: "every card is one SQL aggregate
@@ -65,6 +66,14 @@ const health = ref<HealthSnapshot>(EMPTY);
 const loading = ref(false);
 const lastError = ref<string | null>(null);
 const { crawlProgress } = useCrawl();
+
+// Live operational metrics. Used to be on a hidden DEBUG tab; promoted to
+// HEALTH because pages/sec + ETA + queue depth are the questions users
+// actually have during a long crawl. Subscribes to the same `sidecar-metric`
+// stream from observability.ts.
+const debug = useDebug();
+const latestMetric = debug.latestMetric;
+const currentPhase = debug.currentPhase;
 
 // Per-resource-type counts for the donut card. Same Rust aggregate the
 // old right-sidebar Stats tab consumed; refreshed on the same cadence
@@ -207,7 +216,11 @@ function cancelScheduledRefresh() {
   pendingRefresh = false;
 }
 
-onMounted(() => { void refreshNow(); });
+onMounted(() => {
+  void refreshNow();
+  // Idempotent — DEBUG screen also calls start(); both share one set of listeners.
+  void debug.start();
+});
 onUnmounted(cancelScheduledRefresh);
 watch(() => props.sessionId, () => {
   cancelScheduledRefresh();
@@ -231,6 +244,29 @@ const heroStatus = computed(() => {
 });
 const heroRowCount = computed(() => props.crawling ? crawlProgress.value.rowCount : health.value.total);
 const heroErrorCount = computed(() => props.crawling ? crawlProgress.value.errorCount : health.value.errors);
+
+// Live throughput, queue, and ETA — only meaningful while a crawl is active.
+// pps / queue / inFlight come straight from the sidecar metric stream.
+const pagesPerSec = computed(() => latestMetric.value?.pagesPerSec ?? 0);
+const queueRemaining = computed(() => latestMetric.value?.queueSize ?? 0);
+const inFlight = computed(() => latestMetric.value?.inFlight ?? 0);
+const phaseLabel = computed(() => (currentPhase.value ?? "idle").toUpperCase());
+
+// ETA = queue / rate. Only shown when both are > 0; below 0.05 pps the
+// estimate is too noisy to trust (a single 30s page renders huge ETAs).
+const etaLabel = computed(() => {
+  if (!props.crawling) return "—";
+  const q = queueRemaining.value;
+  const r = pagesPerSec.value;
+  if (!q || r < 0.05) return "—";
+  const seconds = q / r;
+  if (seconds < 60) return `~${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  if (m < 60) return `~${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `~${h}h ${m % 60}m`;
+});
 
 // Capture-rate metrics. Empty-h1 / empty-title rates flip the card
 // amber→red according to the plan's threshold rules.
@@ -294,10 +330,17 @@ function maxResponseTime(): string {
   <div class="health-screen">
     <!-- Hero status card -->
     <div class="hero-card" :class="`hero-card--${heroStatus.toLowerCase()}`">
-      <div class="hero-status-label">CRAWL STATUS</div>
-      <div class="hero-status-value">
-        <span class="hero-status-dot" :class="`hero-status-dot--${heroStatus.toLowerCase()}`"></span>
-        {{ heroStatus }}
+      <div class="hero-status-row">
+        <div class="hero-status-block">
+          <div class="hero-status-label">CRAWL STATUS</div>
+          <div class="hero-status-value">
+            <span class="hero-status-dot" :class="`hero-status-dot--${heroStatus.toLowerCase()}`"></span>
+            {{ heroStatus }}
+          </div>
+        </div>
+        <span v-if="props.crawling" class="phase-chip" :title="`Sidecar phase: ${phaseLabel.toLowerCase()}`">
+          {{ phaseLabel }}
+        </span>
       </div>
       <div class="hero-stats">
         <div class="hero-stat">
@@ -327,6 +370,20 @@ function maxResponseTime(): string {
             <span class="info-tip" data-tip="Slowest single response in this session. A 20000ms value usually means the page navigation hit the timeout cap.">i</span>
           </div>
           <div class="hero-stat-value">{{ maxResponseTime() }}</div>
+        </div>
+        <div v-if="props.crawling" class="hero-stat">
+          <div class="hero-stat-label">
+            PAGES/SEC
+            <span class="info-tip" data-tip="Throughput averaged over the last ~10s. Settles after warmup; lower when rate-limiting kicks in.">i</span>
+          </div>
+          <div class="hero-stat-value">{{ pagesPerSec.toFixed(2) }}</div>
+        </div>
+        <div v-if="props.crawling" class="hero-stat">
+          <div class="hero-stat-label">
+            ETA
+            <span class="info-tip" data-tip="Estimated time remaining = queue depth ÷ pages/sec. Reads — when rate is too low to make a meaningful estimate.">i</span>
+          </div>
+          <div class="hero-stat-value">{{ etaLabel }}</div>
         </div>
       </div>
       <div v-if="crawlProgress.lastUrl && crawling" class="hero-last-url" :title="crawlProgress.lastUrl">
@@ -444,6 +501,28 @@ function maxResponseTime(): string {
         </div>
       </div>
 
+      <!-- Workload — only meaningful during an active crawl. Tells the user
+           how far the queue has drained and how many workers are actually
+           moving right now. -->
+      <div v-if="props.crawling" class="card card--ok">
+        <div class="card-title">
+          WORKLOAD
+          <span class="info-tip" data-tip="Live sidecar state — queue is what's still to crawl, in-flight is the number of pages mid-fetch right now.">i</span>
+        </div>
+        <div class="card-body status-mix">
+          <div class="status-row" style="cursor: default;">
+            <span class="status-dot status-dot--info"></span>
+            <span class="status-label">Queue remaining</span>
+            <span class="status-count">{{ queueRemaining.toLocaleString() }}</span>
+          </div>
+          <div class="status-row" style="cursor: default;">
+            <span class="status-dot status-dot--ok"></span>
+            <span class="status-label">In flight</span>
+            <span class="status-count">{{ inFlight }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Resource type breakdown (replaces the old right-sidebar STATS donut). -->
       <div v-if="resourceSegments.length" class="card card--ok card--wide">
         <div class="card-title">
@@ -511,6 +590,32 @@ function maxResponseTime(): string {
   letter-spacing: 1.2px;
   color: rgba(255, 255, 255, 0.45);
   text-transform: uppercase;
+}
+
+.hero-status-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.hero-status-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.phase-chip {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(86, 156, 214, 0.08);
+  border: 1px solid rgba(86, 156, 214, 0.3);
+  color: #569cd6;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 .hero-status-value {

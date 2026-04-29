@@ -122,14 +122,35 @@ export function useDatabase() {
       await d.execute("DELETE FROM crawl_results WHERE session_id = $1", [sessionId]);
       await d.execute("DELETE FROM crawl_sessions WHERE id = $1", [sessionId]);
     });
+    // Reclaim per-session og:image disk space. Best-effort — if the FS op
+    // fails (permissions, race with active crawler), the rows are already
+    // gone so the orphaned dir is harmless and the user can wipe via Process.
+    try {
+      await invoke("delete_session_images", { sessionId });
+    } catch (e) {
+      console.warn("delete_session_images failed (orphan dir left behind):", e);
+    }
   }
 
   async function clearAllSessions(): Promise<void> {
+    // Snapshot ids BEFORE the SQL DELETE so we know which image dirs to nuke.
+    const ids = (await listSessions()).map((s) => s.id);
     await serializeWrite(async () => {
       const d = await getDb();
       await d.execute("DELETE FROM crawl_results");
       await d.execute("DELETE FROM crawl_sessions");
     });
+    for (const id of ids) {
+      try { await invoke("delete_session_images", { sessionId: id }); } catch {}
+    }
+  }
+
+  async function getSessionImageStats(sessionId: number): Promise<{ count: number; bytes: number }> {
+    try {
+      return await invoke<{ count: number; bytes: number }>("get_session_image_stats", { sessionId });
+    } catch {
+      return { count: 0, bytes: 0 };
+    }
   }
 
   // Latest crawl that has rows AND wasn't marked complete. Used at boot /
@@ -226,5 +247,6 @@ export function useDatabase() {
     loadSessionConfig,
     updateSessionConfig,
     getSessionStatus,
+    getSessionImageStats,
   };
 }

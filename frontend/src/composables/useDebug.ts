@@ -14,10 +14,6 @@ export interface LogEntry {
 
 export interface MetricSample {
   ts: number;
-  rss: number;
-  heapUsed: number;
-  heapTotal: number;
-  external: number;
   queueSize: number;
   inFlight: number;
   processed: number;

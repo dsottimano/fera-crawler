@@ -15,7 +15,7 @@ onMounted(() => {
   setTimeout(() => { ready.value = true; }, 100);
 });
 
-const { listSessions, deleteSession, clearAllSessions } = useDatabase();
+const { listSessions, deleteSession, clearAllSessions, getSessionImageStats } = useDatabase();
 const { loadSession } = useCrawl();
 
 const sessions = ref<CrawlSession[]>([]);
@@ -24,10 +24,27 @@ const infoSession = ref<CrawlSession | null>(null);
 const confirmDeleteId = ref<number | null>(null);
 const confirmClearAll = ref(false);
 
+// Per-session og:image disk usage. Loaded lazily after the session list
+// arrives — one Tauri call per session, parallelized so a long list doesn't
+// stall the modal open. Empty stats render as "no images" / nothing visible.
+const imageStats = ref<Map<number, { count: number; bytes: number }>>(new Map());
+
 async function refresh() {
   loading.value = true;
   sessions.value = await listSessions();
   loading.value = false;
+  // Fan out image-stat lookups in parallel so the badges appear together.
+  const entries = await Promise.all(
+    sessions.value.map(async (s) => [s.id, await getSessionImageStats(s.id)] as const),
+  );
+  imageStats.value = new Map(entries);
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 // Memoized sessionMeta lookup. Without this each row's template hits
@@ -127,6 +144,11 @@ function formatUrl(url: string): string {
                 <span class="session-mode" :title="meta(s).mode === 'list' ? 'List mode — fixed URL list' : 'Spider mode — discovers links'">{{ meta(s).mode }}</span>
                 <span class="session-count">{{ meta(s).progressLabel }}</span>
                 <span class="session-status" :style="{ color: meta(s).statusColor }">{{ meta(s).status }}</span>
+                <span
+                  v-if="(imageStats.get(s.id)?.count ?? 0) > 0"
+                  class="session-images"
+                  :title="`${imageStats.get(s.id)!.count} og:images on disk — deleted with this crawl`"
+                >IMAGES {{ imageStats.get(s.id)!.count.toLocaleString() }} · {{ fmtBytes(imageStats.get(s.id)!.bytes) }}</span>
               </span>
             </div>
             <div class="session-actions">
@@ -311,6 +333,13 @@ function formatUrl(url: string): string {
   text-transform: uppercase;
   font-weight: 700;
   letter-spacing: 1px;
+}
+
+.session-images {
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: #c586c0;
 }
 
 .session-actions {

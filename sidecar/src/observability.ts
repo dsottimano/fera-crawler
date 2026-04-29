@@ -61,22 +61,27 @@ export function recordError(): void {
   state.errors++;
 }
 
+// Rate = completions in the wall-clock window / window seconds. Dividing by
+// the *span between samples* (previous formula) collapses the denominator
+// toward 0 when several workers finish in the same millisecond, producing
+// nonsense like 5000 pages/sec right after warmup. Floor the denominator
+// at MIN_WINDOW_MS so a freshly-started crawl can't divide by ~0 either.
+const MIN_WINDOW_MS = 1000;
 function pagesPerSec(): number {
-  if (recentCompletions.length < 2) return 0;
-  const spanMs = recentCompletions[recentCompletions.length - 1] - recentCompletions[0];
-  if (spanMs <= 0) return 0;
-  return +((recentCompletions.length / (spanMs / 1000)).toFixed(2));
+  if (recentCompletions.length === 0) return 0;
+  const now = Date.now();
+  const oldest = recentCompletions[0];
+  const elapsedMs = Math.max(now - oldest, MIN_WINDOW_MS);
+  return +((recentCompletions.length / (elapsedMs / 1000)).toFixed(2));
 }
 
 function emitMetric(): void {
-  const mem = process.memoryUsage();
+  // HEALTH consumes only the operational fields (queue/inFlight/pps and the
+  // counters). The Node memory stats that used to ride this event were never
+  // user-actionable — the budget is flat regardless — so they're omitted.
   writeEvent({
     type: "metric",
     ts: Date.now(),
-    rss: mem.rss,
-    heapUsed: mem.heapUsed,
-    heapTotal: mem.heapTotal,
-    external: mem.external,
     queueSize: state.queueSize,
     inFlight: state.inFlight,
     processed: state.processed,

@@ -142,6 +142,8 @@ if (command === "open-browser") {
   const perHostConcurrency = perHostConcurrencyRaw ? parseInt(perHostConcurrencyRaw, 10) : undefined;
   const sessionWarmup = hasFlag("--session-warmup");
   setDebugEnabled(hasFlag("--debug-log"));
+  const sessionIdRaw = getFlag("--session-id", "");
+  const sessionId = sessionIdRaw ? parseInt(sessionIdRaw, 10) : undefined;
 
   const excludeUrlsFile = getFlag("--exclude-urls-file", "");
   let excludeUrls: string[] | undefined;
@@ -185,6 +187,7 @@ if (command === "open-browser") {
     ...(perHostConcurrency !== undefined && !Number.isNaN(perHostConcurrency) ? { perHostConcurrency } : {}),
     ...(sessionWarmup ? { sessionWarmup } : {}),
     ...(excludeUrls?.length ? { excludeUrls } : {}),
+    ...(sessionId !== undefined && !Number.isNaN(sessionId) ? { sessionId } : {}),
   };
 
   startMetricEmitter(1000);

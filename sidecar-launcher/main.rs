@@ -1,3 +1,11 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+// Build as a windows-subsystem (GUI) binary on Windows so the OS doesn't
+// allocate a console window when a GUI parent (the Tauri app) spawns us.
+// Without this, every sidecar spawn pops up a cmd window — and worse, the
+// fresh console can hijack stdin/stdout/stderr handles, breaking the IPC
+// pipe that Tauri uses to read NDJSON from the crawler. The launcher itself
+// has no UI; Tauri pipes our stdio to the sidecar via Stdio::inherit() below.
+
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

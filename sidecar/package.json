@@ -14,8 +14,7 @@
     "postinstall": "patchright install chromium"
   },
   "dependencies": {
-    "patchright": "1.59.4",
-    "sharp": "0.34.5"
+    "patchright": "1.59.4"
   },
   "devDependencies": {
     "@types/node": "^22.12.0",

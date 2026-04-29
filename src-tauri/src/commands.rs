@@ -144,6 +144,16 @@ fn browser_profile_dir(app: &AppHandle) -> String {
         .to_string()
 }
 
+/// `<app_data>/og-images/<session_id>` — the per-session bucket the sidecar
+/// writes to when og:image download is enabled. Lives next to browser-profile.
+fn og_images_dir_for_session(app: &AppHandle, session_id: i64) -> std::path::PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("og-images")
+        .join(session_id.to_string())
+}
+
 /// Kills any Chrome/Chromium processes using the given user-data-dir.
 /// Necessary because killing the Node sidecar doesn't kill its Chrome child.
 fn kill_chrome_for_profile(profile_dir: &str) {
@@ -265,6 +275,8 @@ pub async fn start_crawl(
         concurrency.to_string(),
         "--browser-profile".to_string(),
         profile,
+        "--session-id".to_string(),
+        session_id.to_string(),
     ];
 
     if let Some(ua) = user_agent {
@@ -833,6 +845,50 @@ pub async fn debug_snapshot(app: AppHandle) -> Result<serde_json::Value, String>
 /// that persist across sessions and cause instant 403s on every subsequent
 /// crawl. Kills any running sidecar + chrome first so the directory isn't
 /// locked when we try to remove it.
+/// Walks `<app_data>/og-images/<session_id>` and reports image count + total
+/// bytes on disk. Returns zeros if the dir doesn't exist (no images yet).
+#[tauri::command]
+pub async fn get_session_image_stats(app: AppHandle, session_id: i64) -> Result<serde_json::Value, String> {
+    let dir = og_images_dir_for_session(&app, session_id);
+    let mut count: u64 = 0;
+    let mut bytes: u64 = 0;
+    if dir.exists() {
+        let mut stack = vec![dir];
+        while let Some(d) = stack.pop() {
+            let entries = match std::fs::read_dir(&d) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_dir() {
+                        stack.push(path);
+                    } else if meta.is_file() {
+                        count += 1;
+                        bytes += meta.len();
+                    }
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({ "count": count, "bytes": bytes }))
+}
+
+/// Removes the per-session og:images directory. Called from the frontend
+/// alongside the SQL `DELETE FROM crawl_results / crawl_sessions` so deleting
+/// a saved crawl also reclaims its image disk usage. Idempotent — silent
+/// success when the dir doesn't exist.
+#[tauri::command]
+pub async fn delete_session_images(app: AppHandle, session_id: i64) -> Result<(), String> {
+    let dir = og_images_dir_for_session(&app, session_id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| format!("Failed to remove {}: {}", dir.display(), e))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn wipe_browser_profile(app: AppHandle) -> Result<String, String> {
     let crawl_state: State<CrawlChild> = app.state();

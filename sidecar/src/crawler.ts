@@ -4,7 +4,12 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chromium, type BrowserContext, type Page } from "patchright";
-import sharp from "sharp";
+// sharp was previously used to recompress og:images to WebP. It pulled in a
+// platform-specific native module that crashed the bundled sidecar on Windows
+// (couldn't find `@img/sharp-win32-x64`). Dropped in favor of saving images
+// in their original format. Tradeoff: ~2-3x more disk per saved image, no
+// native deps. Dimension reading was always handled by getImageDimensions
+// (manual byte-header parse) — sharp was strictly the compress-and-write step.
 import { writeLine, writeAnyEvent } from "./pipeline.js";
 import { BlockDetector, hostOf } from "./blockDetector.js";
 import {
@@ -280,27 +285,12 @@ function getImageDimensions(buffer: Buffer): { width: number; height: number } |
   return null;
 }
 
-// ── Bounded-concurrency sharp writer ──
-// Unbounded fire-and-forget sharp tasks can OOM on image-heavy crawls.
-const SHARP_MAX_CONCURRENT = 4;
-let sharpActive = 0;
-const sharpQueue: Array<() => void> = [];
-
-function enqueueSharpWrite(buffer: Buffer, filePath: string): void {
-  const run = () => {
-    sharpActive++;
-    sharp(buffer)
-      .webp({ quality: 80 })
-      .toFile(filePath)
-      .catch(() => {})
-      .finally(() => {
-        sharpActive--;
-        const next = sharpQueue.shift();
-        if (next) next();
-      });
-  };
-  if (sharpActive < SHARP_MAX_CONCURRENT) run();
-  else sharpQueue.push(run);
+// ── og:image disk write ──
+// Plain async write of the raw downloaded buffer. No CPU-bound compression,
+// so unbounded concurrency is fine — the bottleneck is the network fetch
+// upstream, not the disk I/O here.
+function writeOgImage(buffer: Buffer, filePath: string): void {
+  fs.promises.writeFile(filePath, buffer).catch(() => {});
 }
 
 // ── og:image download + dimension extraction ──
@@ -317,12 +307,10 @@ async function downloadOgImageFile(
 
     const parsedImg = new URL(imageUrl);
     let baseName = path.basename(parsedImg.pathname) || "og-image";
+    const origExt = path.extname(baseName).toLowerCase();
     baseName = baseName.replace(path.extname(baseName), "").replace(/[^a-zA-Z0-9._-]/g, "_");
     const hash = crypto.createHash("md5").update(imageUrl).digest("hex").slice(0, 8);
-    // Always save as .webp after compression
-    const filename = `${baseName}-${hash}.webp`;
 
-    const filePath = path.join(domainDir, filename);
     const headers: Record<string, string> = {};
     if (userAgent) headers["User-Agent"] = userAgent;
     const response = await fetch(imageUrl, { signal: AbortSignal.timeout(15000), headers });
@@ -330,11 +318,27 @@ async function downloadOgImageFile(
 
     const buffer = Buffer.from(await response.arrayBuffer());
 
+    // Pick an extension: trust the URL's existing one if it looks like an
+    // image, otherwise infer from content-type header. Falls back to .img.
+    const KNOWN_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg"]);
+    let ext = KNOWN_EXTS.has(origExt) ? origExt : "";
+    if (!ext) {
+      const ct = (response.headers.get("content-type") ?? "").toLowerCase();
+      if (ct.includes("jpeg")) ext = ".jpg";
+      else if (ct.includes("png")) ext = ".png";
+      else if (ct.includes("gif")) ext = ".gif";
+      else if (ct.includes("webp")) ext = ".webp";
+      else if (ct.includes("avif")) ext = ".avif";
+      else if (ct.includes("svg")) ext = ".svg";
+      else ext = ".img";
+    }
+    const filePath = path.join(domainDir, `${baseName}-${hash}${ext}`);
+
     // Read dimensions from raw buffer (instant, no I/O)
     const dims = getImageDimensions(buffer);
 
-    // Compress and save with bounded concurrency to prevent OOM on image-heavy crawls
-    enqueueSharpWrite(buffer, filePath);
+    // Save in original format — no recompression. Async, fire-and-forget.
+    writeOgImage(buffer, filePath);
 
     if (!dims) return null;
     return { width: dims.width, height: dims.height, fileSize: buffer.length };
@@ -1105,10 +1109,12 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     }
   }
 
-  // Set up og:image download directory
+  // Set up og:image download directory. Scoped per session so the Tauri side
+  // can compute disk usage / delete by session — without sessionId there's
+  // no way to attribute images, so skip downloads.
   let ogImageDownloadDir: string | undefined;
-  if (config.downloadOgImage) {
-    ogImageDownloadDir = path.join(userDataDir, "..", "og-images");
+  if (config.downloadOgImage && config.sessionId && config.sessionId > 0) {
+    ogImageDownloadDir = path.join(userDataDir, "..", "og-images", String(config.sessionId));
     fs.mkdirSync(ogImageDownloadDir, { recursive: true });
   }
   const crawlPageOpts: CrawlPageOpts = {
