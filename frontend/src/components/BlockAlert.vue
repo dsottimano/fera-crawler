@@ -74,6 +74,19 @@ function reasonSummary(reasons: Record<string, number>): string {
     .join(", ");
 }
 
+// Patchright/Chromium errors can be 500-char paragraphs ('Looks like
+// Playwright was just installed... here are next steps...'). Show the
+// first useful sentence inline; full text is in the row's title attr
+// so hovering reveals it.
+function shortenError(err: string): string {
+  const trimmed = err.trim();
+  // Strip the "launch: " / "probe: " prefix so the user sees the meat.
+  const stripped = trimmed.replace(/^(launch|probe):\s*/, "");
+  // First line, capped at 120 chars.
+  const firstLine = stripped.split("\n")[0];
+  return firstLine.length > 120 ? firstLine.slice(0, 117) + "…" : firstLine;
+}
+
 async function tryHostAgain(host: string) {
   // Send stdin command to the live sidecar: clear the gate, re-queue parked
   // URLs. Settings are unchanged — if the wall is still up, the gate will
@@ -402,9 +415,12 @@ onUnmounted(() => {
             </div>
             <div class="c-status">{{ probeRows[n - 1].status || "—" }}</div>
             <div class="c-title mono">{{ probeRows[n - 1].title || "—" }}</div>
-            <div class="c-result">
+            <div class="c-result" :title="probeRows[n - 1].error ?? ''">
               <template v-if="!probeRows[n - 1].blocked">✓ real 200</template>
-              <template v-else>✗ {{ reasonLabel[probeRows[n - 1].reason ?? ""] ?? probeRows[n - 1].reason ?? "blocked" }}</template>
+              <template v-else>
+                ✗ {{ reasonLabel[probeRows[n - 1].reason ?? ""] ?? probeRows[n - 1].reason ?? "blocked" }}
+                <span v-if="probeRows[n - 1].error" class="c-result-detail">— {{ shortenError(probeRows[n - 1].error!) }}</span>
+              </template>
             </div>
             <div class="c-dur">{{ probeRows[n - 1].durationMs }}</div>
           </template>
@@ -716,6 +732,21 @@ onUnmounted(() => {
 
 .probe-trow.row-blocked .c-result {
   color: #f44747;
+}
+
+/* Inline error excerpt next to the reason label — same row as
+   "✗ launch error" but in muted color so the eye reads label first
+   and detail second. Ellipsis on overflow; full text in title attr. */
+.c-result-detail {
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 400;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 10px;
+}
+.probe-trow .c-result {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .c-title {

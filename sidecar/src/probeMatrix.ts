@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { chromium, type Page } from "patchright";
-import { crawlPage, ensureChromiumExecutable, getBrowserProfileDir } from "./crawler.js";
+import { crawlPage, ensureChromiumExecutable, getBrowserProfileDir, killChromeForProfile } from "./crawler.js";
 import { BlockDetector, hostOf, type BlockReason } from "./blockDetector.js";
 import { writeAnyEvent } from "./pipeline.js";
 import {
@@ -85,6 +85,14 @@ async function runRow(
     : baseProfileDir;
   if (cfg.freshProfile) fs.mkdirSync(userDataDir, { recursive: true });
 
+  // Kill any zombie chromium still holding the SingletonLock on this
+  // user-data-dir. Without this, rows 2..N on the shared baseProfileDir
+  // (and even cross-row stragglers from a failed launch) hit
+  // 'profile already in use' and fail in <100ms before the binary even
+  // starts. killChromeForProfile also sleeps 500ms so the OS releases
+  // file handles before the next launch.
+  await killChromeForProfile(userDataDir);
+
   const executablePath = await ensureChromiumExecutable("probe-matrix");
 
   let status = 0;
@@ -140,6 +148,12 @@ async function runRow(
     errorMsg = `probe: ${(err as Error).message}`;
   } finally {
     if (context) await context.close().catch(() => {});
+    // Don't trust context.close() to cleanly drop the lock — Chromium
+    // sometimes leaves SingletonLock pointing at a dead pid for ~1s.
+    // Force-clean now so the NEXT row's killChromeForProfile is a no-op
+    // on the happy path and the persistent baseProfileDir doesn't carry
+    // stale state into the rest of the matrix.
+    await killChromeForProfile(userDataDir);
     if (cfg.freshProfile && userDataDir !== baseProfileDir) {
       try {
         fs.rmSync(userDataDir, { recursive: true, force: true });
