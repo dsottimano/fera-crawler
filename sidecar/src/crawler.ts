@@ -1248,7 +1248,17 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     try { host = new URL(url).host; } catch {}
 
     const doOnce = async () => {
-      if (host) await rateLimiter.acquire(host);
+      if (host) {
+        await rateLimiter.acquire(host);
+        // Log the actual gap between request starts so the user can
+        // verify pacing in DEBUG. The "headed mode doesn't respect
+        // delays" complaint was hard to validate without hard data;
+        // this lands the wallclock answer right next to the URL.
+        const gapMs = rateLimiter.lastGapMs(host);
+        if (gapMs > 0) {
+          log("debug", "rate-limit gap", { host, gapMs });
+        }
+      }
       try {
         return await crawlPage(page, url, crawlPageOpts);
       } finally {

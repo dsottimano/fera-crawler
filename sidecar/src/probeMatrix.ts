@@ -40,19 +40,26 @@ export interface ProbeRowConfig {
   wipeBaseProfile: boolean;
 }
 
-// Row order matters: cheapest no-op first, then the strongest single
-// block-buster (profile wipe), then progressively heavier
-// fingerprint/network changes. Probe early-exits on the first 200, so
-// putting the wipe at row 2 means a typical re-block recovery costs
-// just two attempts instead of running the whole matrix.
+// Row order: lead with delay escalation (the user's empirically-validated
+// #1 lever — most adaptive walls release on slower pacing), then layer
+// in profile resets and fingerprint changes. Probe early-exits on the
+// first 200, so a typical re-block recovers in 1–2 attempts.
+//
+// Speed-first ordering: rows 1 → 2 → 3 walk the per-host delay from the
+// new app default (2s) up to 10s before any structural changes. Wipe
+// runs at the same pace tier the user is most likely to win at (5s),
+// not at the cheapest tier — wiping the profile at 1s when 1s is what
+// got you blocked is a wasted attempt. The wipe+headed combination row
+// captures the user's strongest manual recovery move (memory:
+// feedback_block_recovery.md).
 export const DEFAULT_MATRIX: ProbeRowConfig[] = [
-  { row: 1, stealth: "off",    perHostDelayMs: 500,  warmup: false, freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
-  { row: 2, stealth: "tier-2", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: true  },
-  { row: 3, stealth: "tier-1", perHostDelayMs: 1000, warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
-  { row: 4, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
-  { row: 5, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: false, headed: false, wipeBaseProfile: false },
-  { row: 6, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: false, wipeBaseProfile: false },
-  { row: 7, stealth: "tier-2", perHostDelayMs: 2000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: true,  wipeBaseProfile: false },
+  { row: 1, stealth: "tier-2", perHostDelayMs: 2000,  warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
+  { row: 2, stealth: "tier-2", perHostDelayMs: 5000,  warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: false },
+  { row: 3, stealth: "tier-2", perHostDelayMs: 5000,  warmup: true,  freshProfile: false, residentialUa: false, headed: false, wipeBaseProfile: true  },
+  { row: 4, stealth: "tier-2", perHostDelayMs: 10000, warmup: true,  freshProfile: true,  residentialUa: false, headed: false, wipeBaseProfile: false },
+  { row: 5, stealth: "tier-2", perHostDelayMs: 10000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: false, wipeBaseProfile: false },
+  { row: 6, stealth: "tier-2", perHostDelayMs: 10000, warmup: true,  freshProfile: false, residentialUa: false, headed: true,  wipeBaseProfile: true  },
+  { row: 7, stealth: "tier-2", perHostDelayMs: 15000, warmup: true,  freshProfile: true,  residentialUa: true,  headed: true,  wipeBaseProfile: false },
 ];
 
 function patchesFor(tier: StealthTier) {

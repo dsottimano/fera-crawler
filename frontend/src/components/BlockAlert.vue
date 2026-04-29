@@ -455,7 +455,7 @@ onUnmounted(() => {
           <div class="probe-explainer-section">
             <strong>Other knobs</strong>
             <ul>
-              <li><code>500ms / 1000ms / 2000ms</code>: minimum gap between same-host requests. Defeats per-host RPS detection.</li>
+              <li><code>2s / 5s / 10s / 15s</code>: minimum gap between same-host requests. The single biggest lever on adaptive walls (Akamai, Cloudflare, DataDome) — they gate on RPS and release when pace drops. Matrix leads with delay escalation BEFORE fingerprint changes for this reason.</li>
               <li><code>warmup</code>: visit <code>origin/</code> once before the deep-link so Akamai's <code>_abck</code> / Cloudflare's <code>__cf_bm</code> challenge cookies set first.</li>
               <li><code>WIPE</code>: rm -rf the persistent browser profile dir before launching. Resets poisoned anti-bot cookies (Akamai's <code>~-1~</code>-stamped <code>_abck</code>; invalidated <code>__cf_bm</code>) that pre-judge every subsequent request. One of the strongest single moves; runs early so a typical re-block recovers in 2 attempts. Destructive — also clears any other site's login state in this profile.</li>
               <li><code>fresh</code>: throwaway browser-profile dir for this row, so prior poisoned cookies don't carry in (does NOT touch your persistent profile).</li>

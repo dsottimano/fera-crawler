@@ -28,6 +28,13 @@ interface HostState {
    * the bot-walled host's slowdown.
    */
   delayMultiplier: number;
+  /**
+   * Gap (ms) between the most recent acquire's start and the previous
+   * one for the same host. Surfaced so the crawler can log actual
+   * pacing to DEBUG — answers "is the rate limiter doing what its
+   * config says" without the user having to wallclock pages by hand.
+   */
+  lastGapMs: number;
 }
 
 export interface PerHostRateLimiterOpts {
@@ -83,7 +90,7 @@ export class PerHostRateLimiter {
   private getState(host: string): HostState {
     let s = this.states.get(host);
     if (!s) {
-      s = { lastRequestStartMs: 0, inFlight: 0, waiters: [], delayMultiplier: 1 };
+      s = { lastRequestStartMs: 0, inFlight: 0, waiters: [], delayMultiplier: 1, lastGapMs: 0 };
       this.states.set(host, s);
     }
     return s;
@@ -133,7 +140,23 @@ export class PerHostRateLimiter {
         await sleep(delay - elapsed);
       }
     }
+    const previousStart = state.lastRequestStartMs;
     state.lastRequestStartMs = Date.now();
+    // Stash the gap-since-last-start on state so callers (the crawler)
+    // can surface it via the DEBUG log. Lets the user verify pacing
+    // without trusting the configured numbers — "is the rate limiter
+    // actually waiting?" answered with hard data.
+    state.lastGapMs = previousStart === 0 ? 0 : state.lastRequestStartMs - previousStart;
+  }
+
+  /**
+   * Time elapsed (ms) between the most recent acquire's start and the
+   * one immediately before it for `host`. 0 if this is the first
+   * acquire on the host. Used by the crawler to log actual pacing
+   * to DEBUG so the user can sanity-check the limiter.
+   */
+  lastGapMs(host: string): number {
+    return this.states.get(host)?.lastGapMs ?? 0;
   }
 
   release(host: string): void {
