@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -84,6 +84,26 @@ impl ProgressState {
 struct CrawlCtx {
     gen: u64,
     session_id: i64,
+}
+
+/// Single-flight lock for the probe matrix. The probe is the only probe
+/// path now, and concurrent matrices were causing havoc — two sidecars
+/// fighting over the shared browser-profile dir, headed-row Chromium
+/// windows from a second probe popping up while a first one was on-screen,
+/// and probe-result events from both runs interleaving into the same UI
+/// list. AtomicBool flipped via compare_exchange is enough — there's
+/// no useful queue at the Rust layer; the frontend keeps its own
+/// pending-host queue and drains it after each probe completes.
+pub struct ProbeState {
+    pub running: AtomicBool,
+}
+
+impl Default for ProbeState {
+    fn default() -> Self {
+        Self {
+            running: AtomicBool::new(false),
+        }
+    }
 }
 
 /// App-start time in epoch seconds — exposed via debug_snapshot for uptime.
@@ -1058,59 +1078,6 @@ pub async fn dump_profile(app: AppHandle, url: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn probe_crawl_config(
-    app: AppHandle,
-    url: String,
-) -> Result<serde_json::Value, String> {
-    let shell = app.shell();
-    let args = vec!["probe-config".to_string(), url];
-
-    let mut cmd = shell
-        .sidecar("fera-crawler")
-        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
-        .args(&args);
-
-    if let Some(res_dir) = resource_dir(&app) {
-        cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
-    }
-
-    let (mut rx, _child) = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn probe: {e}"))?;
-
-    use tauri_plugin_shell::process::CommandEvent;
-    let mut stdout_buf = String::new();
-    let mut stderr_buf = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            CommandEvent::Stdout(line) => {
-                stdout_buf.push_str(&String::from_utf8_lossy(&line));
-                stdout_buf.push('\n');
-            }
-            CommandEvent::Stderr(line) => {
-                stderr_buf.push_str(&String::from_utf8_lossy(&line));
-                stderr_buf.push('\n');
-            }
-            CommandEvent::Terminated(_) => break,
-            _ => {}
-        }
-    }
-
-    for line in stdout_buf.lines().rev() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v.get("attempts").is_some() {
-                return Ok(v);
-            }
-        }
-    }
-
-    Err(format!(
-        "probe-config produced no result (stderr: {})",
-        stderr_buf.trim()
-    ))
-}
-
 fn write_crawl_stdin(app: &AppHandle, cmd_json: &str) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
     let mut guard = lock_or_recover(&state.child);
@@ -1138,8 +1105,24 @@ pub async fn stop_host(app: AppHandle, host: String) -> Result<(), String> {
 /// Streams probe-result events back through the normal route_sidecar_stdout path
 /// (same `block-detected`/`probe-result` routing). Non-blocking — returns once
 /// the probe child is spawned.
+///
+/// Single-flight: rejects with an error if another probe matrix is already
+/// running. The lock releases when the probe sidecar terminates so the
+/// frontend's queued-host-probe drain can pick up the next host. Without
+/// this guard a second invocation (manual probe during auto-probe, or two
+/// hosts blocking nearly simultaneously) used to spawn a second sidecar
+/// that fought the first over the shared browser profile.
 #[tauri::command]
 pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), String> {
+    let probe_state: State<ProbeState> = app.state();
+    if probe_state
+        .running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Another probe matrix is already running".to_string());
+    }
+
     let shell = app.shell();
     // Use an isolated profile dir so the probe doesn't collide with the
     // main crawl's Playwright process on the shared user-data-dir (Chrome
@@ -1161,18 +1144,34 @@ pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), 
     ];
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-    let mut cmd = shell
-        .sidecar("fera-crawler")
-        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
-        .args(&args_refs);
+    // Helper to release the probe lock — called from every exit path so a
+    // setup failure doesn't strand the lock and bake "probe stuck" into the
+    // app for the rest of the session.
+    let release_lock = |handle: &AppHandle| {
+        if let Some(state) = handle.try_state::<ProbeState>() {
+            state.running.store(false, Ordering::SeqCst);
+        }
+    };
+
+    let mut cmd = match shell.sidecar("fera-crawler") {
+        Ok(c) => c.args(&args_refs),
+        Err(e) => {
+            release_lock(&app);
+            return Err(format!("Failed to create sidecar command: {e}"));
+        }
+    };
 
     if let Some(res_dir) = resource_dir(&app) {
         cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
     }
 
-    let (mut rx, child) = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn probe-matrix: {e}"))?;
+    let (mut rx, child) = match cmd.spawn() {
+        Ok(v) => v,
+        Err(e) => {
+            release_lock(&app);
+            return Err(format!("Failed to spawn probe-matrix: {e}"));
+        }
+    };
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -1192,6 +1191,11 @@ pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), 
                 CommandEvent::Terminated(_) => break,
                 _ => {}
             }
+        }
+        // Sidecar exited (normal completion OR crash). Release lock so the
+        // next queued probe can run.
+        if let Some(state) = app_handle.try_state::<ProbeState>() {
+            state.running.store(false, Ordering::SeqCst);
         }
     });
 

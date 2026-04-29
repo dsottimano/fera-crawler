@@ -5,10 +5,7 @@ import { useSettings } from "../../composables/useSettings";
 import { useDebug } from "../../composables/useDebug";
 import SettingsSection from "./SettingsSection.vue";
 import SettingsItem from "./SettingsItem.vue";
-import CrawlConfigsPanel from "./CrawlConfigsPanel.vue";
 import type { SettingsValues } from "../../settings/types";
-
-const VIRTUAL_CRAWL_CONFIGS_KEY = "_crawlConfigs";
 
 // Sections folded into the "Crawling" tab so users see one merged surface
 // instead of four near-identical knob lists. Data shape in SettingsValues is
@@ -116,11 +113,6 @@ function itemMatches(key: string, def: SettingDef, q: string): boolean {
   );
 }
 
-const virtualCrawlConfigsSection: Section = {
-  label: "Crawl Configs",
-  items: {},
-};
-
 type ResolvedCrawlingItem = { bucket: string; key: string; def: SettingDef };
 type ResolvedCrawlingSubgroup = {
   heading: string;
@@ -150,7 +142,7 @@ const visibleCrawlingSubgroups = computed<ResolvedCrawlingSubgroup[]>(() => {
 });
 
 const visibleSections = computed(() => {
-  const schemaSections = Object.entries(SCHEMA)
+  return Object.entries(SCHEMA)
     .filter(([key]) => !key.startsWith("_"))
     .filter(([key]) => !CRAWLING_MERGED_INTO.has(key))
     .filter(([, section]) => {
@@ -165,21 +157,6 @@ const visibleSections = computed(() => {
       return sectionMatches(section, searchQuery.value);
     })
     .map(([key, section]) => ({ key, section }));
-
-  const q = searchQuery.value.toLowerCase();
-  const virtualMatches =
-    !q ||
-    virtualCrawlConfigsSection.label.toLowerCase().includes(q) ||
-    "crawl config probe stealth domain".includes(q);
-
-  if (virtualMatches) {
-    schemaSections.push({
-      key: VIRTUAL_CRAWL_CONFIGS_KEY,
-      section: virtualCrawlConfigsSection,
-    });
-  }
-
-  return schemaSections;
 });
 
 const activeSection = computed(() => {
@@ -293,10 +270,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         </nav>
 
         <div class="section-content">
-          <CrawlConfigsPanel
-            v-if="activeSection && activeSection.key === VIRTUAL_CRAWL_CONFIGS_KEY"
-          />
-          <template v-else-if="activeSection && activeSection.key === 'crawling' && draft">
+          <template v-if="activeSection && activeSection.key === 'crawling' && draft">
             <section
               v-for="group in visibleCrawlingSubgroups"
               :key="group.heading"

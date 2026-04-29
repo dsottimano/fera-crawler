@@ -139,6 +139,7 @@ pub fn run() {
         .manage(commands::CrawlChild::default())
         .manage(commands::BrowserChild::default())
         .manage(commands::AppStart::default())
+        .manage(commands::ProbeState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -189,7 +190,6 @@ pub fn run() {
             commands::debug_snapshot,
             commands::kill_sidecar,
             commands::wipe_browser_profile,
-            commands::probe_crawl_config,
             commands::resume_host,
             commands::stop_host,
             commands::run_probe_matrix,

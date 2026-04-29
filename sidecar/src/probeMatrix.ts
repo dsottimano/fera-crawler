@@ -202,6 +202,10 @@ async function runRow(
   writeAnyEvent({
     type: "probe-result",
     ts: Date.now(),
+    // Tag every row with the sample URL the matrix was started against so
+    // the UI can demux events per probe — defensive belt against the lock
+    // ever leaking and two probes running in parallel.
+    sampleUrl,
     row: cfg.row,
     config: {
       stealth: cfg.stealth,

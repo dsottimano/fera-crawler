@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { runCrawler, openBrowser, dumpProfile } from "./crawler.js";
 import { openInspector } from "./inspector.js";
-import { probeConfig } from "./probe.js";
 import { runProbeMatrix } from "./probeMatrix.js";
 import type { CrawlConfig } from "./types.js";
 import { startMetricEmitter, stopMetricEmitter, log } from "./observability.js";
@@ -57,21 +56,6 @@ if (command === "open-browser") {
     .then(() => process.exit(0))
     .catch((err) => {
       console.error("Inspector error:", err);
-      process.exit(1);
-    });
-} else if (command === "probe-config") {
-  const url = args[1];
-  if (!url) {
-    console.error("Usage: fera-crawler probe-config <url>");
-    process.exit(1);
-  }
-  probeConfig(url)
-    .then((res) => {
-      process.stdout.write(JSON.stringify(res) + "\n");
-      process.exit(res.winningConfig ? 0 : 2);
-    })
-    .catch((err) => {
-      console.error("Probe error:", err);
       process.exit(1);
     });
 } else if (command === "probe-matrix") {

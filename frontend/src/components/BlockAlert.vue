@@ -36,6 +36,10 @@ interface ProbeConfig {
 
 interface ProbeRow {
   row: number;
+  // Defensive demux key — the Rust lock prevents concurrent matrices,
+  // but if it ever leaks we still want the modal to render only the
+  // active probe's rows. Older sidecar builds don't emit this field.
+  sampleUrl?: string;
   config: ProbeConfig;
   status: number;
   title: string;
@@ -116,10 +120,40 @@ async function tryHostAgain(host: string) {
 const autoProbeMode = ref(false);
 const autoProbedHosts = ref<Set<string>>(new Set());
 
+// Pending hosts whose auto-probe was deferred because another probe was
+// already running. Drained on probe-matrix-complete-with-no-winner. (A
+// winning probe restarts the crawl, which makes the queue moot — those
+// hosts will either get unblocked by the new settings or re-trigger a
+// fresh block-detected.) Kept as an array, not a Set, because the
+// arrival order is the order the user observed the blocks.
+const pendingAutoProbeHosts = ref<BlockInfo[]>([]);
+
+function drainPendingAutoProbe() {
+  while (pendingAutoProbeHosts.value.length > 0) {
+    const next = pendingAutoProbeHosts.value.shift()!;
+    if (autoProbedHosts.value.has(next.host)) continue;
+    void startAutoProbe(next);
+    return;
+  }
+}
+
 const explainerOpen = ref(false);
 const probeApplyInFlight = ref(false);
 
 async function openProbe(info: BlockInfo) {
+  // Single-flight guard: the Rust side now rejects a second probe matrix
+  // while one is in flight, but we surface the constraint earlier so the
+  // user gets a useful message instead of a generic 'Probe failed to
+  // start' alert. If they really want to switch hosts, they can wait
+  // for the running probe to finish.
+  if (probeRunning.value) {
+    alert(
+      `Another probe is already running for ${probeHost.value || "another host"}.\n\n` +
+      "Wait for it to finish, then click PROBE again. Multiple probes can't run in parallel — " +
+      "they'd fight over the shared browser profile and emit interleaved results.",
+    );
+    return;
+  }
   probeHost.value = info.host;
   probeSampleUrl.value = info.sampleUrls[0] ?? `https://${info.host}/`;
   probeRows.value = [];
@@ -131,8 +165,6 @@ async function openProbe(info: BlockInfo) {
   } catch (err) {
     console.error("run_probe_matrix failed", err);
     probeRunning.value = false;
-    // Without this, the modal would just sit empty forever and the user has
-    // no idea why nothing's happening.
     alert(`Probe failed to start: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
@@ -141,8 +173,17 @@ async function openProbe(info: BlockInfo) {
 // On probe-matrix-complete, applyRowAndResume is called automatically if a
 // winning row exists.
 async function startAutoProbe(info: BlockInfo) {
-  if (probeRunning.value) return;  // user already probing — don't collide
   if (autoProbedHosts.value.has(info.host)) return;  // already tried this host
+  if (probeRunning.value) {
+    // Another probe (manual or auto) is in flight. Queue this host so
+    // it runs after — drainPendingAutoProbe picks it up on the next
+    // probe-matrix-complete-with-no-winner. De-dup so a host that
+    // re-blocks doesn't double-queue.
+    if (!pendingAutoProbeHosts.value.some((p) => p.host === info.host)) {
+      pendingAutoProbeHosts.value.push(info);
+    }
+    return;
+  }
   autoProbedHosts.value.add(info.host);
   autoProbeMode.value = true;
   probeHost.value = info.host;
@@ -283,6 +324,13 @@ onMounted(async () => {
   );
   unlisteners.push(
     await listen<ProbeRow>("probe-result", (e) => {
+      // Defensive: only render rows whose sampleUrl matches the active
+      // probe. With the Rust lock there should never be a mismatch, but
+      // a stray late-arriving result from a prior probe (e.g. user
+      // closed the modal mid-probe and reopened for a different host)
+      // would otherwise leak into the new modal's row list.
+      const fromUrl = e.payload.sampleUrl;
+      if (fromUrl && probeSampleUrl.value && fromUrl !== probeSampleUrl.value) return;
       probeRows.value.push(e.payload);
     }),
   );
@@ -296,9 +344,21 @@ onMounted(async () => {
       // applied config doesn't actually beat the wall on the live crawl, the
       // BlockAlert reappears and the user can re-probe.
       const winner = firstSuccessRow.value;
+      const wasAuto = autoProbeMode.value;
       autoProbeMode.value = false;
       if (winner) {
+        // applyRowAndResume restarts the whole crawl, so any queued
+        // pending-host probes are moot — the new sidecar starts fresh
+        // with the working config.
+        pendingAutoProbeHosts.value = [];
         void applyRowAndResume(winner);
+        return;
+      }
+      // No winner. If this was an auto-probe, drain the next queued host
+      // (a different host that blocked while this probe was running).
+      // Manual probes don't drain — the user owns the modal flow.
+      if (wasAuto) {
+        drainPendingAutoProbe();
       }
     }),
   );
@@ -306,6 +366,7 @@ onMounted(async () => {
     blocks.value = new Map();
     // Reset auto-probe history so a new crawl gets fresh attempts.
     autoProbedHosts.value = new Set();
+    pendingAutoProbeHosts.value = [];
   };
   // Clear only when a NEW crawl starts — keep the banner visible after a
   // crawl ends so the user can see why it stopped and decide what to do.
