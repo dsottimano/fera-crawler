@@ -66,6 +66,72 @@ const loading = ref(false);
 const lastError = ref<string | null>(null);
 const { crawlProgress } = useCrawl();
 
+// Per-resource-type counts for the donut card. Same Rust aggregate the
+// old right-sidebar Stats tab consumed; refreshed on the same cadence
+// as the rest of the health snapshot.
+type ResourcePair = readonly [string, number];
+const resourcePairs = ref<ResourcePair[]>([]);
+const RESOURCE_COLORS: Record<string, string> = {
+  HTML: "#569cd6",
+  JavaScript: "#4ec9b0",
+  CSS: "#dcdcaa",
+  Image: "#c586c0",
+  Other: "#d7ba7d",
+  Font: "#9cdcfe",
+  PDF: "#f44747",
+  Unknown: "#6a7a8a",
+  Media: "#ce9178",
+  XML: "#b5cea8",
+};
+
+interface DonutSeg { type: string; count: number; pct: number; color: string }
+const resourceSegments = computed<DonutSeg[]>(() => {
+  const total = resourcePairs.value.reduce((n, [, c]) => n + c, 0);
+  if (!total) return [];
+  return resourcePairs.value
+    .filter(([, c]) => c > 0)
+    .map(([t, c]) => ({
+      type: t || "Unknown",
+      count: c,
+      pct: c / total,
+      color: RESOURCE_COLORS[t] ?? RESOURCE_COLORS.Unknown,
+    }));
+});
+
+interface DonutPath { d: string; color: string }
+const resourceDonutPaths = computed<DonutPath[]>(() => {
+  const segs = resourceSegments.value;
+  if (!segs.length) return [];
+  const paths: DonutPath[] = [];
+  let cum = -90;
+  const cx = 100, cy = 100, r = 70, ir = 48;
+  for (const seg of segs) {
+    const a = seg.pct * 360;
+    const sr = (cum * Math.PI) / 180;
+    const er = ((cum + a) * Math.PI) / 180;
+    const x1 = cx + r * Math.cos(sr), y1 = cy + r * Math.sin(sr);
+    const x2 = cx + r * Math.cos(er), y2 = cy + r * Math.sin(er);
+    const ix1 = cx + ir * Math.cos(er), iy1 = cy + ir * Math.sin(er);
+    const ix2 = cx + ir * Math.cos(sr), iy2 = cy + ir * Math.sin(sr);
+    const la = a > 180 ? 1 : 0;
+    paths.push({
+      d: `M ${x1} ${y1} A ${r} ${r} 0 ${la} 1 ${x2} ${y2} L ${ix1} ${iy1} A ${ir} ${ir} 0 ${la} 0 ${ix2} ${iy2} Z`,
+      color: seg.color,
+    });
+    cum += a;
+  }
+  return paths;
+});
+
+async function refreshResourcePairs(sessionId: number) {
+  try {
+    resourcePairs.value = await invoke<ResourcePair[]>("aggregate_resource_types", { sessionId });
+  } catch (e) {
+    console.error("aggregate_resource_types failed:", e);
+    resourcePairs.value = [];
+  }
+}
+
 // Refresh debouncer — multiple rapid crawl-progress ticks coalesce into
 // one aggregate_health round-trip so we don't hammer SQLite during a fast
 // crawl. 300ms keeps the cards feeling live without blowing the budget.
@@ -83,6 +149,7 @@ let pendingRefresh = false;
 async function refreshNow() {
   if (props.sessionId == null) {
     health.value = EMPTY;
+    resourcePairs.value = [];
     return;
   }
   if (refreshInFlight) {
@@ -96,7 +163,13 @@ async function refreshNow() {
   // different session and must not overwrite the new session's value.
   const requestedSessionId = props.sessionId;
   try {
-    const snap = await invoke<HealthSnapshot>("aggregate_health", { sessionId: requestedSessionId });
+    // Health snapshot + resource-type pairs in parallel — they're
+    // independent SQL aggregates and the donut shouldn't lag the
+    // rest of the cards.
+    const [snap] = await Promise.all([
+      invoke<HealthSnapshot>("aggregate_health", { sessionId: requestedSessionId }),
+      refreshResourcePairs(requestedSessionId),
+    ]);
     if (props.sessionId !== requestedSessionId) return;
     health.value = snap;
     lastError.value = null;
@@ -343,6 +416,29 @@ function maxResponseTime(): string {
           </button>
         </div>
       </div>
+
+      <!-- Resource type breakdown (replaces the old right-sidebar STATS donut). -->
+      <div v-if="resourceSegments.length" class="card card--ok card--wide">
+        <div class="card-title">RESOURCE TYPES</div>
+        <div class="card-body resource-card">
+          <svg viewBox="0 0 200 200" class="donut-chart" aria-hidden="true">
+            <circle cx="100" cy="100" r="70" fill="none" stroke="rgba(255,255,255,0.04)" stroke-width="22" />
+            <path v-for="(seg, i) in resourceDonutPaths" :key="i" :d="seg.d" :fill="seg.color" stroke="#0c111d" stroke-width="1.5" />
+          </svg>
+          <div class="resource-legend">
+            <button
+              v-for="seg in resourceSegments"
+              :key="seg.type"
+              class="status-row"
+              @click="emit('drill', { tab: 'Internal', filterType: seg.type })"
+            >
+              <span class="status-dot" :style="{ background: seg.color }"></span>
+              <span class="status-label">{{ seg.type }}</span>
+              <span class="status-count">{{ seg.count.toLocaleString() }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div v-if="lastError" class="health-error">aggregate_health failed: {{ lastError }}</div>
@@ -467,6 +563,30 @@ function maxResponseTime(): string {
 .card--ok { border-left-color: #4ec9b0; }
 .card--amber { border-left-color: #dcdcaa; }
 .card--red { border-left-color: #f44747; }
+
+/* Wide card for the resource-type donut + legend — the donut needs a
+   horizontal layout, doesn't fit the 280px column. */
+.card--wide {
+  grid-column: 1 / -1;
+}
+.resource-card {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.donut-chart {
+  width: 180px;
+  height: 180px;
+  flex-shrink: 0;
+}
+.resource-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 4px;
+  flex: 1;
+  min-width: 200px;
+}
 
 .card-title {
   font-size: 9px;

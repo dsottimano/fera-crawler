@@ -7,7 +7,7 @@ import CategoryTabs from "./components/CategoryTabs.vue";
 import FilterBar from "./components/FilterBar.vue";
 import CrawlGrid from "./components/CrawlGrid.vue";
 import HealthScreen from "./components/HealthScreen.vue";
-import RightSidebar from "./components/RightSidebar.vue";
+import ConfigScreen from "./components/ConfigScreen.vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import ConfigModal from "./components/ConfigModal.vue";
 import ScraperModal from "./components/ScraperModal.vue";
@@ -161,11 +161,16 @@ const filteredCount = ref(0);
 const gridRefreshKey = ref(0);
 watch(() => crawlProgress.value.rowCount, () => { gridRefreshKey.value++; });
 
-// Phase 5: top-level HEALTH | DATA nav. Default HEALTH per the plan —
-// a fresh launch lands on the dashboard summary, the grid is one click
-// away. Click-throughs from health cards switch screen + seed the grid
-// filter inputs in lockstep.
-type Screen = "HEALTH" | "DATA";
+// Top-level nav: HEALTH | DATA | CONFIG | DEBUG. Default HEALTH per
+// the plan — a fresh launch lands on the dashboard summary, the grid
+// is one click away. Click-throughs from health cards switch screen +
+// seed the grid filter inputs in lockstep.
+//
+// The right-sidebar's content (config + resource-type donut) folds
+// into CONFIG and HEALTH respectively. The debug modal becomes a
+// peer screen so diagnostic info doesn't fight the rest of the UI for
+// space.
+type Screen = "HEALTH" | "DATA" | "CONFIG" | "DEBUG";
 const screen = ref<Screen>("HEALTH");
 
 function handleHealthDrill(args: { tab: string; filterType?: string }) {
@@ -177,36 +182,32 @@ const browserInstallNotice = ref<{ state: "running" | "done" | "failed"; text: s
 let browserInstallTimer: ReturnType<typeof setTimeout> | null = null;
 
 const bottomPanelHeight = ref(parseInt(localStorage.getItem('fera-bottom-height') || '200', 10));
-const sidebarWidth = ref(parseInt(localStorage.getItem('fera-sidebar-width') || '250', 10));
-let resizing: 'bottom' | 'sidebar' | null = null;
+let resizing = false;
 let startPos = 0;
 let startSize = 0;
 
-function startResize(type: 'bottom' | 'sidebar', e: MouseEvent) {
-  resizing = type;
-  startPos = type === 'bottom' ? e.clientY : e.clientX;
-  startSize = type === 'bottom' ? bottomPanelHeight.value : sidebarWidth.value;
+// Bottom-panel resize handle on the DATA screen. The right-sidebar
+// resizer was nuked along with the sidebar itself when CONFIG / DEBUG
+// became top-level screens.
+function startResize(_type: 'bottom', e: MouseEvent) {
+  resizing = true;
+  startPos = e.clientY;
+  startSize = bottomPanelHeight.value;
   document.addEventListener('mousemove', onResize);
   document.addEventListener('mouseup', stopResize);
-  document.body.style.cursor = type === 'bottom' ? 'row-resize' : 'col-resize';
+  document.body.style.cursor = 'row-resize';
   document.body.style.userSelect = 'none';
 }
 
 function onResize(e: MouseEvent) {
   if (!resizing) return;
-  if (resizing === 'bottom') {
-    const delta = startPos - e.clientY;
-    bottomPanelHeight.value = Math.max(80, Math.min(500, startSize + delta));
-  } else {
-    const delta = startPos - e.clientX;
-    sidebarWidth.value = Math.max(150, Math.min(500, startSize + delta));
-  }
+  const delta = startPos - e.clientY;
+  bottomPanelHeight.value = Math.max(80, Math.min(500, startSize + delta));
 }
 
 function stopResize() {
-  if (resizing === 'bottom') localStorage.setItem('fera-bottom-height', String(bottomPanelHeight.value));
-  else if (resizing === 'sidebar') localStorage.setItem('fera-sidebar-width', String(sidebarWidth.value));
-  resizing = null;
+  if (resizing) localStorage.setItem('fera-bottom-height', String(bottomPanelHeight.value));
+  resizing = false;
   document.removeEventListener('mousemove', onResize);
   document.removeEventListener('mouseup', stopResize);
   document.body.style.cursor = '';
@@ -306,7 +307,6 @@ async function handleStart() {
 
 const showClearConfirm = ref(false);
 const showSettingsPanel = ref(false);
-const showDebugPanel = ref(false);
 
 function onGlobalKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey;
@@ -315,10 +315,10 @@ function onGlobalKeydown(e: KeyboardEvent) {
     showSettingsPanel.value = true;
     return;
   }
-  // Cmd/Ctrl+Shift+D opens debug
+  // Cmd/Ctrl+Shift+D jumps to the DEBUG screen.
   if (mod && e.shiftKey && (e.key === "D" || e.key === "d")) {
     e.preventDefault();
-    showDebugPanel.value = true;
+    screen.value = "DEBUG";
     return;
   }
   // "/" toggles voice mode (skip when user is typing in any input/textarea).
@@ -536,9 +536,6 @@ async function handleMenuAction(menu: string, item: string) {
           <button class="btn-pill btn-settings" @click="showSettingsPanel = true" title="Cmd/Ctrl+,">
             &#x2699; SETTINGS
           </button>
-          <button class="btn-pill btn-debug" @click="showDebugPanel = true" title="Cmd/Ctrl+Shift+D">
-            &#x1F527; DEBUG
-          </button>
         </div>
 
         <!-- Config badges: only show when set (delay + robots are visible
@@ -563,25 +560,20 @@ async function handleMenuAction(menu: string, item: string) {
       <div class="browser-install-text">{{ browserInstallNotice.text }}</div>
     </div>
 
-    <!-- Phase-5 top-level nav: HEALTH | DATA. The data screen below is
-         conditionally mounted; switching screens unmounts the other so
-         their watchers / Tabulator instance / aggregate fetch loop don't
-         keep running in the background. -->
+    <!-- Top-level nav: HEALTH | DATA | CONFIG | DEBUG. Each screen below
+         is conditionally mounted so their watchers / Tabulator instance
+         / aggregate fetch loops / debug log subscriptions don't keep
+         running in the background when not visible. -->
     <nav class="screen-nav" role="tablist">
       <button
+        v-for="s in (['HEALTH', 'DATA', 'CONFIG', 'DEBUG'] as const)"
+        :key="s"
         class="screen-nav-tab"
-        :class="{ 'screen-nav-tab--active': screen === 'HEALTH' }"
-        :aria-selected="screen === 'HEALTH'"
+        :class="{ 'screen-nav-tab--active': screen === s }"
+        :aria-selected="screen === s"
         role="tab"
-        @click="screen = 'HEALTH'"
-      >HEALTH</button>
-      <button
-        class="screen-nav-tab"
-        :class="{ 'screen-nav-tab--active': screen === 'DATA' }"
-        :aria-selected="screen === 'DATA'"
-        role="tab"
-        @click="screen = 'DATA'"
-      >DATA</button>
+        @click="screen = s"
+      >{{ s }}</button>
     </nav>
 
     <HealthScreen
@@ -619,12 +611,15 @@ async function handleMenuAction(menu: string, item: string) {
             <BottomPanel :selected-result="selectedResult" />
           </div>
         </div>
-        <div class="resize-handle resize-handle--v" @mousedown="startResize('sidebar', $event)"></div>
-        <div :style="{ width: sidebarWidth + 'px', flexShrink: 0, overflow: 'hidden' }">
-          <RightSidebar :session-id="currentSessionId" :refresh-key="gridRefreshKey" @edit-settings="showSettingsPanel = true" />
-        </div>
       </div>
     </template>
+
+    <ConfigScreen
+      v-if="screen === 'CONFIG'"
+      @edit-settings="showSettingsPanel = true"
+    />
+
+    <DebugPanel v-if="screen === 'DEBUG'" />
     <ConfigModal v-if="configSection" @close="configSection = null" />
     <ScraperModal v-if="scraperOpen" @close="scraperOpen = false" />
     <ReportPanel v-if="activeReport" :report="activeReport" :session-id="currentSessionId" @close="activeReport = null" />
@@ -636,7 +631,6 @@ async function handleMenuAction(menu: string, item: string) {
     />
     <ProfileViewer v-if="showProfile && profileData" :data="profileData" @close="showProfile = false" />
     <SettingsPanel v-if="showSettingsPanel" @close="showSettingsPanel = false" />
-    <DebugPanel v-if="showDebugPanel" @close="showDebugPanel = false" />
     <VoiceRecorderModal
       :show="voiceModalOpen"
       :state="voiceFlow.state.value"
@@ -1009,16 +1003,6 @@ async function handleMenuAction(menu: string, item: string) {
 .btn-recrawl-clear:hover {
   color: #f44747;
   border-color: rgba(244,71,71,0.3);
-}
-
-.btn-debug {
-  color: rgba(255,255,255,0.5);
-  border-color: rgba(255,255,255,0.12);
-}
-.btn-debug:hover {
-  color: #569cd6;
-  border-color: rgba(86,156,214,0.4);
-  background: rgba(86,156,214,0.08);
 }
 
 .btn-settings {

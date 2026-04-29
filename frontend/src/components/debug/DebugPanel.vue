@@ -1,8 +1,9 @@
 <script setup lang="ts">
+// Top-level DEBUG screen — was a modal, promoted to a peer of HEALTH /
+// DATA / CONFIG so the user can keep an eye on logs/metrics/process
+// without dismissing the rest of the UI to do it.
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useDebug, type LogLevel } from "../../composables/useDebug";
-
-const emit = defineEmits<{ close: [] }>();
 
 const {
   logs,
@@ -113,17 +114,11 @@ onMounted(async () => {
   await start();
   await refreshSnapshot();
   snapTimer = setInterval(() => { void refreshSnapshot(); }, 2000);
-  window.addEventListener("keydown", onKey);
 });
 
 onUnmounted(() => {
   if (snapTimer) clearInterval(snapTimer);
-  window.removeEventListener("keydown", onKey);
 });
-
-function onKey(e: KeyboardEvent) {
-  if (e.key === "Escape") emit("close");
-}
 
 async function handleKill() {
   if (!confirm("Kill sidecar process? The current crawl will terminate.")) return;
@@ -146,29 +141,26 @@ async function handleWipeProfile() {
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')">
-    <div class="panel" role="dialog" aria-label="Debug panel">
-      <header class="panel-header">
-        <div class="title-group">
-          <div class="panel-title">DEBUG</div>
-          <span class="phase-chip" :class="`phase-${currentPhase ?? 'idle'}`">
-            <span class="phase-dot"></span>
-            {{ (currentPhase ?? 'idle').toUpperCase() }}
-          </span>
-        </div>
-        <div class="tab-group">
-          <button
-            v-for="t in (['logs', 'metrics', 'process'] as const)"
-            :key="t"
-            class="tab"
-            :class="{ 'tab--active': activeTab === t }"
-            @click="activeTab = t"
-          >
-            {{ t.toUpperCase() }}
-          </button>
-        </div>
-        <button class="btn-close" @click="emit('close')" aria-label="Close">&#x2715;</button>
-      </header>
+  <div class="panel" role="region" aria-label="Debug panel">
+    <header class="panel-header">
+      <div class="title-group">
+        <span class="phase-chip" :class="`phase-${currentPhase ?? 'idle'}`">
+          <span class="phase-dot"></span>
+          {{ (currentPhase ?? 'idle').toUpperCase() }}
+        </span>
+      </div>
+      <div class="tab-group">
+        <button
+          v-for="t in (['logs', 'metrics', 'process'] as const)"
+          :key="t"
+          class="tab"
+          :class="{ 'tab--active': activeTab === t }"
+          @click="activeTab = t"
+        >
+          {{ t.toUpperCase() }}
+        </button>
+      </div>
+    </header>
 
       <!-- LOGS TAB -->
       <div v-if="activeTab === 'logs'" class="tab-body">
@@ -361,29 +353,17 @@ async function handleWipeProfile() {
           </div>
         </template>
       </div>
-    </div>
   </div>
 </template>
 
 <style scoped>
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 400;
-  backdrop-filter: blur(6px);
-}
-
+/* Embedded screen — fills the area between the top nav and the window
+   bottom. No overlay / no fixed sizing — the surrounding flex layout
+   gives this panel its dimensions. */
 .panel {
-  width: min(1100px, 94vw);
-  height: min(720px, 90vh);
-  background: #141a2e;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  flex: 1;
+  min-height: 0;
+  background: #0c111d;
   display: flex;
   flex-direction: column;
   color: #ffffff;
@@ -400,14 +380,6 @@ async function handleWipeProfile() {
 }
 
 .title-group { display: flex; align-items: center; gap: 12px; }
-
-.panel-title {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  color: #ffffff;
-}
 
 .phase-chip {
   display: inline-flex;
@@ -454,19 +426,6 @@ async function handleWipeProfile() {
   border-color: rgba(86, 156, 214, 0.5);
   background: rgba(86, 156, 214, 0.1);
 }
-
-.btn-close {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: transparent;
-  color: rgba(255, 255, 255, 0.7);
-  width: 24px; height: 24px;
-  border-radius: 50%;
-  cursor: pointer;
-  font-size: 10px;
-  display: flex; align-items: center; justify-content: center;
-  transition: all 0.15s;
-}
-.btn-close:hover { color: #ffffff; border-color: rgba(255, 255, 255, 0.25); }
 
 .tab-body {
   flex: 1;
