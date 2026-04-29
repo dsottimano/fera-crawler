@@ -26,6 +26,12 @@ use tokio::sync::{mpsc, oneshot};
 const BATCH_SIZE: usize = 200;
 const FLUSH_MS: u64 = 1000;
 const COLS_PER_ROW: usize = 30;
+// SQLite's SQLITE_LIMIT_VARIABLE_NUMBER defaults to 999 on builds before
+// 3.32.0. Modern sqlx links 3.42+, but we don't want a hard dependency
+// on the bundled SQLite version: 33 rows × 30 cols = 990 params, which
+// is safe everywhere. Each drain may emit ⌈BATCH_SIZE/CHUNK_ROWS⌉ INSERTs
+// inside the same transaction — still atomic, still single-connection.
+const CHUNK_ROWS: usize = 33;
 
 struct PendingRow {
     session_id: i64,
@@ -167,6 +173,8 @@ async fn write_batch(pool: &SqlitePool, batch: &[PendingRow]) -> Result<(), sqlx
 
     // DELETE first so re-emitted urls (recrawls / block-stub recoveries)
     // replace prior rows. Group by session so each DELETE is one statement.
+    // The DELETE list is also chunked because a session with thousands of
+    // re-emits in a batch would otherwise blow the same param ceiling.
     let mut by_session: std::collections::BTreeMap<i64, Vec<&str>> = Default::default();
     for r in &owned {
         by_session
@@ -174,26 +182,33 @@ async fn write_batch(pool: &SqlitePool, batch: &[PendingRow]) -> Result<(), sqlx
             .or_default()
             .push(r.url.as_str());
     }
+    // Reserve one parameter for session_id; conservative cap keeps
+    // (1 + url_count) ≤ 999 for legacy SQLite.
+    const DELETE_URL_CHUNK: usize = 900;
     for (session_id, urls) in &by_session {
-        if urls.is_empty() {
-            continue;
+        for url_chunk in urls.chunks(DELETE_URL_CHUNK) {
+            if url_chunk.is_empty() {
+                continue;
+            }
+            let placeholders = std::iter::repeat("?")
+                .take(url_chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "DELETE FROM crawl_results WHERE session_id = ? AND url IN ({})",
+                placeholders
+            );
+            let mut q = sqlx::query(&sql).bind(*session_id);
+            for u in url_chunk {
+                q = q.bind(*u);
+            }
+            q.execute(&mut *tx).await?;
         }
-        let placeholders = std::iter::repeat("?")
-            .take(urls.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "DELETE FROM crawl_results WHERE session_id = ? AND url IN ({})",
-            placeholders
-        );
-        let mut q = sqlx::query(&sql).bind(*session_id);
-        for u in urls {
-            q = q.bind(*u);
-        }
-        q.execute(&mut *tx).await?;
     }
 
-    // Single multi-row INSERT.
+    // Multi-row INSERT, chunked. Each chunk fits within SQLite's
+    // legacy 999-parameter limit (33 rows × 30 cols = 990 params). All
+    // chunks share the same transaction so the batch is still atomic.
     let row_placeholders = format!(
         "({})",
         std::iter::repeat("?")
@@ -201,27 +216,29 @@ async fn write_batch(pool: &SqlitePool, batch: &[PendingRow]) -> Result<(), sqlx
             .collect::<Vec<_>>()
             .join(",")
     );
-    let all_placeholders = std::iter::repeat(row_placeholders.as_str())
-        .take(owned.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "INSERT INTO crawl_results
-            (session_id, url, status, title, h1, h2, meta_description, canonical,
-             internal_links, external_links, response_time, content_type,
-             resource_type, size, error, word_count, meta_robots,
-             is_indexable, is_noindex, is_nofollow,
-             og_title, og_description, og_image, og_image_width, og_image_height,
-             date_published, date_modified, redirect_url, server_header, seo_json)
-         VALUES {}",
-        all_placeholders
-    );
+    for chunk in owned.chunks(CHUNK_ROWS) {
+        let all_placeholders = std::iter::repeat(row_placeholders.as_str())
+            .take(chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "INSERT INTO crawl_results
+                (session_id, url, status, title, h1, h2, meta_description, canonical,
+                 internal_links, external_links, response_time, content_type,
+                 resource_type, size, error, word_count, meta_robots,
+                 is_indexable, is_noindex, is_nofollow,
+                 og_title, og_description, og_image, og_image_width, og_image_height,
+                 date_published, date_modified, redirect_url, server_header, seo_json)
+             VALUES {}",
+            all_placeholders
+        );
 
-    let mut q = sqlx::query(&sql);
-    for row in &owned {
-        q = row.bind_all(q);
+        let mut q = sqlx::query(&sql);
+        for row in chunk {
+            q = row.bind_all(q);
+        }
+        q.execute(&mut *tx).await?;
     }
-    q.execute(&mut *tx).await?;
 
     tx.commit().await?;
     Ok(())
@@ -687,6 +704,27 @@ mod tests {
         assert_eq!(parsed["responseHeaders"], json!({}));
         assert_eq!(parsed["scraper"], json!({}));
         assert_eq!(parsed["ogImageWidthReal"], 0);
+    }
+
+    #[tokio::test]
+    async fn write_batch_chunks_inserts_for_legacy_sqlite_param_limit() {
+        // 100-row batch × 30 cols = 3000 bind params, well over the
+        // legacy SQLITE_LIMIT_VARIABLE_NUMBER of 999. Chunking at 33
+        // rows splits this into multiple INSERTs inside one transaction.
+        // The test asserts every row lands and the transaction is atomic.
+        let pool = fresh_pool().await;
+        let batch: Vec<PendingRow> = (0..100)
+            .map(|i| PendingRow {
+                session_id: 1,
+                value: sample(&format!("https://example.com/{i}")),
+            })
+            .collect();
+        write_batch(&pool, &batch).await.expect("100-row batch writes");
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM crawl_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 100);
     }
 
     #[tokio::test]

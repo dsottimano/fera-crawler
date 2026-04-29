@@ -1450,7 +1450,6 @@ export async function openBrowser(rawUrl: string, profileDir?: string): Promise<
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
   let cookiesDumped = false;
-  context.on("page", () => {});
 
   const dumpCookiesBeforeClose = async () => {
     if (cookiesDumped) return;

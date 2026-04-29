@@ -280,6 +280,14 @@ async function applyRowAndResume(row: ProbeRow) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("Failed to apply probe row settings:", e);
     probeApplyInFlight.value = false;
+    // Apply failed: take the host OFF the once-per-crawl auto-probed
+    // list so the user can manually re-probe (or so a future
+    // block-detected event re-fires the auto-probe path). Without this,
+    // a transient settings-save failure permanently strands the host
+    // in the "already tried" set for the rest of the crawl.
+    if (probeHost.value) {
+      autoProbedHosts.value.delete(probeHost.value);
+    }
     // Close the modal so the block-alert banner is visible again — the user
     // needs a path forward (re-probe, manual settings) without the modal
     // sitting in front. Without closeProbe(), they'd be stuck staring at a

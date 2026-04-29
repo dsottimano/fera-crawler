@@ -45,15 +45,21 @@ impl DbReadPool {
 async fn open_pool(db_path: PathBuf) -> Result<SqlitePool, String> {
     let opts = SqliteConnectOptions::new()
         .filename(&db_path)
-        .create_if_missing(true)
+        .create_if_missing(false)
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5))
-        // Read pool: more connections than the writer because the grid will
-        // pipeline page-fetches against health-card aggregates against
-        // detail-view loads. 4 is enough for our worst case.
-        .read_only(false);
+        // Read-only: this pool is for query/aggregate/health commands
+        // only. Without `read_only(true)` it could accidentally acquire
+        // SQLite's writer lock and starve the DbWriter — the original
+        // code had `read_only(false)` despite the comment claiming
+        // "Read pool", which was a contention hazard at high throughput.
+        // create_if_missing also flips false because by the time anyone
+        // queries we trust the writer/migrations have created the file.
+        .read_only(true);
     SqlitePoolOptions::new()
+        // 4 connections lets the grid pipeline page-fetches against
+        // health-card aggregates against detail-view loads.
         .max_connections(4)
         .connect_with(opts)
         .await

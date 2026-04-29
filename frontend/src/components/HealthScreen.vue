@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useCrawl } from "../composables/useCrawl";
 
@@ -91,11 +91,17 @@ async function refreshNow() {
   }
   refreshInFlight = true;
   loading.value = true;
+  // Capture sessionId at the start of the call. If the user switches
+  // sessions while we're awaiting, the resolved snapshot belongs to a
+  // different session and must not overwrite the new session's value.
+  const requestedSessionId = props.sessionId;
   try {
-    const snap = await invoke<HealthSnapshot>("aggregate_health", { sessionId: props.sessionId });
+    const snap = await invoke<HealthSnapshot>("aggregate_health", { sessionId: requestedSessionId });
+    if (props.sessionId !== requestedSessionId) return;
     health.value = snap;
     lastError.value = null;
   } catch (e) {
+    if (props.sessionId !== requestedSessionId) return;
     console.error("aggregate_health failed:", e);
     lastError.value = String(e);
   } finally {
@@ -116,8 +122,24 @@ function scheduleRefresh() {
   }, 300);
 }
 
+// Cancel any pending debounced refresh. Called from the sessionId watch
+// (so a debounced tick from the OLD session doesn't overwrite the new
+// session's freshly-loaded values) and from onUnmounted (so a fired-but-
+// pending timer doesn't write into a detached ref or burn an IPC call).
+function cancelScheduledRefresh() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  pendingRefresh = false;
+}
+
 onMounted(() => { void refreshNow(); });
-watch(() => props.sessionId, () => { void refreshNow(); });
+onUnmounted(cancelScheduledRefresh);
+watch(() => props.sessionId, () => {
+  cancelScheduledRefresh();
+  void refreshNow();
+});
 watch(() => crawlProgress.value.rowCount, scheduleRefresh);
 // Force a refresh whenever the crawl flips state — catches the moment
 // after a stop / completion where rowCount lands at its final value but

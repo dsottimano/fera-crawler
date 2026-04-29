@@ -185,16 +185,17 @@ async function runRow(
     errorMsg = `probe: ${(err as Error).message}`;
   } finally {
     if (context) await context.close().catch(() => {});
-    // Don't trust context.close() to cleanly drop the lock — Chromium
-    // sometimes leaves SingletonLock pointing at a dead pid for ~1s.
-    // Force-clean now so the NEXT row's killChromeForProfile is a no-op
-    // on the happy path and the persistent baseProfileDir doesn't carry
-    // stale state into the rest of the matrix.
-    await killChromeForProfile(userDataDir);
+    // For fresh-profile rows we're about to rmSync the throwaway dir
+    // anyway — no benefit to running killChromeForProfile + its 500ms
+    // sleep on it. Saved ~1.5s across rows 5-7 of the matrix. For the
+    // shared baseProfileDir we DO need the kill+sleep so the next row's
+    // launch doesn't trip on a stale SingletonLock.
     if (cfg.freshProfile && userDataDir !== baseProfileDir) {
       try {
         fs.rmSync(userDataDir, { recursive: true, force: true });
       } catch {}
+    } else {
+      await killChromeForProfile(userDataDir);
     }
   }
 

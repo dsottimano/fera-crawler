@@ -88,6 +88,11 @@ export function useCrawl() {
         if (crawling.value || currentSessionId.value !== null) return;
         await loadSession(session.id);
       } catch (e) {
+        // Reset the latch on failure so a transient DB error at boot
+        // (busy timeout, schema migration race) doesn't permanently
+        // disable rehydration for the rest of the session — the next
+        // useCrawl() caller (or HMR cycle) will retry.
+        rehydratePromise = null;
         console.error("Boot rehydration failed:", e);
       }
     })();
