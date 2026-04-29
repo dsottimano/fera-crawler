@@ -1,4 +1,5 @@
 mod commands;
+mod db_query;
 mod db_writer;
 mod voice_commands;
 
@@ -158,9 +159,10 @@ pub fn run() {
                 .map(|p| p.join("fera.db"))
                 .unwrap_or_else(|_| std::path::PathBuf::from("fera.db"));
             let writer = tauri::async_runtime::block_on(async {
-                db_writer::spawn(db_path)
+                db_writer::spawn(db_path.clone())
             });
             app.manage(writer);
+            app.manage(db_query::DbReadPool::new(db_path));
 
             #[cfg(target_os = "linux")]
             {
@@ -187,6 +189,10 @@ pub fn run() {
             commands::stop_host,
             commands::run_probe_matrix,
             commands::flush_crawl_writes,
+            db_query::query_results,
+            db_query::count_results,
+            db_query::get_result_full,
+            db_query::aggregate_health,
             voice_commands::claude_turn_streaming,
             voice_commands::speak,
         ])
