@@ -10,7 +10,6 @@ const openMenu = ref<string | null>(null);
 const menus: Record<string, string[]> = {
   File: ["New Crawl", "-", "Saved Crawls...", "-", "Open...", "Save As...", "-", "Export CSV", "Export Excel", "-", "Exit"],
   Configuration: ["Settings", "Scraper"],
-  Mode: ["Spider", "List"],
   Export: ["Internal HTML", "All Links", "Response Codes", "Page Titles", "Redirects"],
   Reports: ["Crawl Overview", "Redirect Chains", "Duplicate Content", "Orphan Pages"],
   Help: ["Documentation", "About Fera"],

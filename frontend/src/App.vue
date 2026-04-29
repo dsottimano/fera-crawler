@@ -28,12 +28,15 @@ import { useConfig } from "./composables/useConfig";
 import { useFileOps } from "./composables/useFileOps";
 import { useBrowser } from "./composables/useBrowser";
 import { useDatabase } from "./composables/useDatabase";
+import { extractPastedUrls } from "./utils/pastedUrls";
 import type { CrawlResult } from "./types/crawl";
 
 const url = ref("");
-// Scope dropdown was nuked from the toolbar; default behavior is now
-// always Subdomain. Exact-URL scope is still reachable via list-mode
-// (Mode menu → List) which is the same single-page semantics.
+// Scope dropdown and Mode menu were both nuked. Default behavior is
+// Subdomain spider. List mode is now triggered by pasting 2+ URLs into
+// the URL input — see onUrlPaste below. Single-URL "Exact URL" scope
+// is reachable by pasting one URL into a fresh input + clicking start
+// (same single-page semantics).
 const crawlScope = ref("Subdomain");
 const { config } = useConfig();
 const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
@@ -247,6 +250,23 @@ function normalizeUrl(raw: string): string {
   return s;
 }
 
+async function onUrlPaste(event: ClipboardEvent) {
+  const text = event.clipboardData?.getData("text") ?? "";
+  const urls = extractPastedUrls(text);
+  if (urls.length < 2) return; // single URL — let the native paste land in the input
+  event.preventDefault();
+  // Switch the active settings into list mode AND seed the URL list in
+  // one place. Two patches because they target different sections; the
+  // computed effectiveSettings recomputes after each so the badge and
+  // the readout update together on the next render.
+  await patchSetting("crawling", "mode", "list");
+  await patchSetting("inputs", "urls", urls);
+  // The input is unmounted by the v-if as soon as mode flips, but if
+  // some browser still holds focus on it, clear the visible value so a
+  // stale single URL doesn't sit there.
+  url.value = "";
+}
+
 function canStart(): boolean {
   if (crawling.value) return false;
   if (effectiveSettings.value.crawling.mode === "list") return config.urls.length > 0;
@@ -414,9 +434,6 @@ async function handleMenuAction(menu: string, item: string) {
     if (item === "Scraper") scraperOpen.value = true;
     else showSettingsPanel.value = true;
   }
-  if (menu === "Mode") {
-    await patchSetting("crawling", "mode", item === "List" ? "list" : "spider");
-  }
   if (menu === "Export") {
     const f: Record<string, (r: CrawlResult) => boolean> = {
       "Internal HTML": (r) => (r.resourceType || "HTML") === "HTML",
@@ -473,10 +490,11 @@ async function handleMenuAction(menu: string, item: string) {
               v-else
               v-model="url"
               type="url"
-              placeholder="https://example.com/"
+              placeholder="https://example.com/  (or paste a list)"
               class="telem-url"
               :disabled="crawling"
               @keyup.enter="handleStart"
+              @paste="onUrlPaste"
             />
           </div>
         </div>
