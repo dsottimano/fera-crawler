@@ -6,6 +6,7 @@ import MenuBar from "./components/MenuBar.vue";
 import CategoryTabs from "./components/CategoryTabs.vue";
 import FilterBar from "./components/FilterBar.vue";
 import CrawlGrid from "./components/CrawlGrid.vue";
+import HealthScreen from "./components/HealthScreen.vue";
 import RightSidebar from "./components/RightSidebar.vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import ConfigModal from "./components/ConfigModal.vue";
@@ -159,6 +160,19 @@ const filteredCount = ref(0);
 // without per-row events). 500ms cadence matches the Rust emitter.
 const gridRefreshKey = ref(0);
 watch(() => crawlProgress.value.rowCount, () => { gridRefreshKey.value++; });
+
+// Phase 5: top-level HEALTH | DATA nav. Default HEALTH per the plan —
+// a fresh launch lands on the dashboard summary, the grid is one click
+// away. Click-throughs from health cards switch screen + seed the grid
+// filter inputs in lockstep.
+type Screen = "HEALTH" | "DATA";
+const screen = ref<Screen>("HEALTH");
+
+function handleHealthDrill(args: { tab: string; filterType?: string }) {
+  activeCategory.value = args.tab;
+  filterType.value = args.filterType ?? "All";
+  screen.value = "DATA";
+}
 const browserInstallNotice = ref<{ state: "running" | "done" | "failed"; text: string } | null>(null);
 let browserInstallTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -539,6 +553,37 @@ async function handleMenuAction(menu: string, item: string) {
       <div class="browser-install-dot"></div>
       <div class="browser-install-text">{{ browserInstallNotice.text }}</div>
     </div>
+
+    <!-- Phase-5 top-level nav: HEALTH | DATA. The data screen below is
+         conditionally mounted; switching screens unmounts the other so
+         their watchers / Tabulator instance / aggregate fetch loop don't
+         keep running in the background. -->
+    <nav class="screen-nav" role="tablist">
+      <button
+        class="screen-nav-tab"
+        :class="{ 'screen-nav-tab--active': screen === 'HEALTH' }"
+        :aria-selected="screen === 'HEALTH'"
+        role="tab"
+        @click="screen = 'HEALTH'"
+      >HEALTH</button>
+      <button
+        class="screen-nav-tab"
+        :class="{ 'screen-nav-tab--active': screen === 'DATA' }"
+        :aria-selected="screen === 'DATA'"
+        role="tab"
+        @click="screen = 'DATA'"
+      >DATA</button>
+    </nav>
+
+    <HealthScreen
+      v-if="screen === 'HEALTH'"
+      :session-id="currentSessionId"
+      :crawling="crawling"
+      :stopped="stopped"
+      @drill="handleHealthDrill"
+    />
+
+    <template v-if="screen === 'DATA'">
       <CategoryTabs :active="activeCategory" :recrawl-count="config.recrawlQueue.length" @select="activeCategory = $event" />
       <FilterBar
         :total-results="results.length"
@@ -570,6 +615,7 @@ async function handleMenuAction(menu: string, item: string) {
           <RightSidebar :results="results" @edit-settings="showSettingsPanel = true" />
         </div>
       </div>
+    </template>
     <ConfigModal v-if="configSection" @close="configSection = null" />
     <ScraperModal v-if="scraperOpen" @close="scraperOpen = false" />
     <ReportPanel v-if="activeReport" :report="activeReport" :results="results" @close="activeReport = null" />
@@ -611,6 +657,38 @@ async function handleMenuAction(menu: string, item: string) {
   flex-direction: column;
   height: 100vh;
   background: #0c111d;
+}
+
+/* Phase-5 top-level HEALTH | DATA tabs. Underline-active style mirrors
+   the existing CategoryTabs row to feel like one navigation system. */
+.screen-nav {
+  display: flex;
+  gap: 4px;
+  padding: 0 16px;
+  background: #0c111d;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+.screen-nav-tab {
+  background: none;
+  border: none;
+  padding: 10px 16px 8px;
+  font-family: 'Ubuntu', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s ease;
+}
+.screen-nav-tab:hover {
+  color: rgba(255, 255, 255, 0.7);
+}
+.screen-nav-tab--active {
+  color: #569cd6;
+  border-bottom-color: #569cd6;
 }
 
 .browser-install-banner {

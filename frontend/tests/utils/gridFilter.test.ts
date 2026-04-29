@@ -84,6 +84,22 @@ describe("buildResultsFilter", () => {
     expect(f.statusMin).toBeUndefined();
     expect(f.statusMax).toBeUndefined();
   });
+
+  it("HEALTH-screen status-range tokens map to inclusive-exclusive ranges", () => {
+    // Phase-5 click-throughs set filterType="2xx"/"3xx"/"4xx"/"5xx" and
+    // expect the grid to land on Response Codes filtered by the matching
+    // 100-code range.
+    expect(buildResultsFilter({ ...noQueue, tab: "Response Codes", filterType: "2xx" })).toMatchObject({ statusMin: 200, statusMax: 300 });
+    expect(buildResultsFilter({ ...noQueue, tab: "Response Codes", filterType: "3xx" })).toMatchObject({ statusMin: 300, statusMax: 400 });
+    expect(buildResultsFilter({ ...noQueue, tab: "Response Codes", filterType: "4xx" })).toMatchObject({ statusMin: 400, statusMax: 500 });
+    expect(buildResultsFilter({ ...noQueue, tab: "Response Codes", filterType: "5xx" })).toMatchObject({ statusMin: 500, statusMax: 600 });
+  });
+
+  it("Status-range tokens work regardless of which tab is active (drill-through can land anywhere)", () => {
+    const f = buildResultsFilter({ ...noQueue, tab: "Internal", filterType: "4xx" });
+    expect(f.statusMin).toBe(400);
+    expect(f.statusMax).toBe(500);
+  });
 });
 
 describe("sortFieldToColumn", () => {

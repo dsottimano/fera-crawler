@@ -33,6 +33,16 @@ export interface BuildFilterArgs {
   recrawlQueue: string[];
 }
 
+// Status-range filterType tokens emitted by the HEALTH screen
+// drill-throughs. Map to inclusive-exclusive [min, max) ranges that
+// match the Rust query side.
+const STATUS_RANGES: Record<string, [number, number]> = {
+  "2xx": [200, 300],
+  "3xx": [300, 400],
+  "4xx": [400, 500],
+  "5xx": [500, 600],
+};
+
 // Tabs whose only constraint is "rows that came from an HTML page". The
 // SEO-data tabs (Page Titles, H1, …) all degrade meaningfully if we leak
 // CSS / JS rows into them — sort by status / size etc. starts mixing
@@ -79,7 +89,16 @@ export function buildResultsFilter(args: BuildFilterArgs): ResultsFilter {
 
   // FilterBar's secondary slicer.
   if (args.filterType && args.filterType !== "All") {
-    if (args.tab === "Response Codes") {
+    // Status-range tokens come from the Health screen drill-throughs
+    // ("Status 4xx" → Response Codes + filterType=4xx). They're not in
+    // FilterBar's dropdown today; handling them here means HEALTH cards
+    // can land the user on Response Codes with the right slice already
+    // applied without each card re-implementing the SQL mapping.
+    const range = STATUS_RANGES[args.filterType];
+    if (range) {
+      f.statusMin = range[0];
+      f.statusMax = range[1];
+    } else if (args.tab === "Response Codes") {
       const code = parseInt(args.filterType, 10);
       if (!Number.isNaN(code)) {
         f.statusMin = code;
