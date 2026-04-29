@@ -31,9 +31,13 @@ function shCapture(cmd, args) {
 }
 
 function ensureClean() {
-  const status = shCapture("git", ["status", "--porcelain"]);
+  // Only block on TRACKED changes — untracked scratch files (cli-plan.md,
+  // notes.txt, whatever) shouldn't gate a release. The release commit only
+  // touches package.json / Cargo.toml / tauri.conf.json so untracked files
+  // can't ride into it.
+  const status = shCapture("git", ["status", "--porcelain", "--untracked-files=no"]);
   if (status) {
-    console.error("Working tree is dirty. Commit or stash first:\n" + status);
+    console.error("Working tree has uncommitted tracked changes:\n" + status);
     process.exit(1);
   }
 }
