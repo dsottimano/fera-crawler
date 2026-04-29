@@ -127,4 +127,14 @@ describe("buildStartCrawlPayload", () => {
     const p = buildStartCrawlPayload("https://x.com", pinned);
     expect(p.urls?.length).toBe(32601);
   });
+
+  it("sessionId: caller-supplied id flows through; Rust uses it to attribute crawl-result rows", () => {
+    const p = buildStartCrawlPayload("https://x.com", buildDefaults(), { sessionId: 4242 });
+    expect(p.sessionId).toBe(4242);
+  });
+
+  it("sessionId: defaults to 0 when omitted (Rust treats 0 as 'no session attached')", () => {
+    const p = buildStartCrawlPayload("https://x.com", buildDefaults());
+    expect(p.sessionId).toBe(0);
+  });
 });

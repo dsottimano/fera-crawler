@@ -1,4 +1,5 @@
 mod commands;
+mod db_writer;
 mod voice_commands;
 
 use tauri_plugin_sql::{Builder as SqlBuilder, Migration, MigrationKind};
@@ -147,9 +148,22 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // Phase 1: Rust owns crawl_results writes. Spawn the background
+            // batched writer keyed off the same fera.db file the SQL plugin
+            // uses (resolved via app_data_dir to match plugin defaults).
+            use tauri::Manager;
+            let db_path = app
+                .path()
+                .app_data_dir()
+                .map(|p| p.join("fera.db"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("fera.db"));
+            let writer = tauri::async_runtime::block_on(async {
+                db_writer::spawn(db_path)
+            });
+            app.manage(writer);
+
             #[cfg(target_os = "linux")]
             {
-                use tauri::Manager;
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(e) = enable_webview_media_linux(&window) {
                         eprintln!("[fera] failed to enable webview media: {}", e);
@@ -172,6 +186,7 @@ pub fn run() {
             commands::resume_host,
             commands::stop_host,
             commands::run_probe_matrix,
+            commands::flush_crawl_writes,
             voice_commands::claude_turn_streaming,
             voice_commands::speak,
         ])

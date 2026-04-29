@@ -7,6 +7,9 @@ import type { SettingsValues } from "../settings/types";
 // the type so it matches Tauri's InvokeArgs constraint.
 export interface StartCrawlPayload {
   url: string;
+  // The DB session id this crawl writes rows to. Rust uses it to attribute
+  // crawl-result NDJSON lines to the right session in the background writer.
+  sessionId: number;
   maxRequests: number;
   concurrency: number;
   userAgent: string | null;
@@ -32,6 +35,10 @@ export interface BuildPayloadOpts {
   urls?: string[];
   maxRequests?: number;
   excludeUrls?: Iterable<string>;
+  // Required at call time but kept optional in the type so existing tests
+  // that don't care about it can still build a valid payload (sessionId
+  // defaults to 0, which Rust treats as "no session attached").
+  sessionId?: number;
 }
 
 // Builds the start_crawl payload from a SettingsValues snapshot + per-call
@@ -51,6 +58,7 @@ export function buildStartCrawlPayload(
 
   return {
     url,
+    sessionId: opts.sessionId ?? 0,
     maxRequests,
     concurrency: s.crawling.concurrency,
     userAgent: stealthUa || null,

@@ -1,9 +1,11 @@
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
+
+use crate::db_writer::DbWriter;
 
 pub struct CrawlChild {
     pub child: Mutex<Option<CommandChild>>,
@@ -11,6 +13,10 @@ pub struct CrawlChild {
     /// PID of the currently-running sidecar, or 0 if none. Set when spawn succeeds;
     /// cleared on Terminated. Exposed via debug_snapshot so the UI can monitor /proc.
     pub pid: AtomicI32,
+    /// DB session id the active sidecar is writing rows for. 0 = no active
+    /// crawl. Used by the stdout router to attribute crawl-result rows to
+    /// the right session when handing them to the DbWriter.
+    pub session_id: AtomicI64,
 }
 
 impl Default for CrawlChild {
@@ -19,8 +25,19 @@ impl Default for CrawlChild {
             child: Mutex::new(None),
             generation: AtomicU64::new(0),
             pid: AtomicI32::new(0),
+            session_id: AtomicI64::new(0),
         }
     }
+}
+
+/// Snapshot of the per-spawn context that travels with stdout lines from a
+/// running crawl. Carries both the generation (for stale-line filtering) and
+/// the DB session id (so crawl-result rows can be enqueued to the writer
+/// without re-querying state). None for non-crawl spawns (probe-matrix).
+#[derive(Copy, Clone)]
+struct CrawlCtx {
+    gen: u64,
+    session_id: i64,
 }
 
 /// App-start time in epoch seconds — exposed via debug_snapshot for uptime.
@@ -134,6 +151,7 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub async fn start_crawl(
     app: AppHandle,
     url: String,
+    session_id: i64,
     max_requests: u32,
     concurrency: u32,
     user_agent: Option<String>,
@@ -307,6 +325,7 @@ pub async fn start_crawl(
 
     let sidecar_pid = child.pid() as i32;
     state.pid.store(sidecar_pid, Ordering::SeqCst);
+    state.session_id.store(session_id, Ordering::SeqCst);
     *lock_or_recover(&state.child) = Some(child);
 
     // Tell the UI a fresh crawl is starting so banners from prior runs clear.
@@ -324,6 +343,7 @@ pub async fn start_crawl(
     );
 
     let app_handle = app.clone();
+    let ctx = CrawlCtx { gen, session_id };
 
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;
@@ -332,7 +352,7 @@ pub async fn start_crawl(
             match event {
                 CommandEvent::Stdout(line) => {
                     let line_str = String::from_utf8_lossy(&line);
-                    route_sidecar_stdout_lines(&app_handle, &line_str, Some(gen));
+                    route_sidecar_stdout_lines(&app_handle, &line_str, Some(ctx));
                 }
                 CommandEvent::Stderr(line) => {
                     let line_str = String::from_utf8_lossy(&line);
@@ -369,6 +389,7 @@ pub async fn start_crawl(
                 let _ = app_handle.emit("crawl-complete", ());
                 *lock_or_recover(&state.child) = None;
                 state.pid.store(0, Ordering::SeqCst);
+                state.session_id.store(0, Ordering::SeqCst);
             }
         }
 
@@ -391,11 +412,15 @@ fn now_ms() -> u64 {
 /// `type` field: log/metric/phase go to their own events; anything without
 /// `type` is treated as a legacy CrawlResult and routed to crawl-result.
 ///
-/// If `from_gen` is provided, `crawl-result` and `block-detected` events are
-/// dropped when their source generation no longer matches the active crawl —
+/// If `ctx` is provided, `crawl-result` and `block-detected` events are
+/// dropped when the source generation no longer matches the active crawl —
 /// prevents late-stdout from a killed sidecar contaminating the next crawl.
 /// Probe-matrix subprocesses pass None (they're not generation-scoped).
-fn route_sidecar_stdout(app: &AppHandle, line: &str, from_gen: Option<u64>) {
+///
+/// crawl-result rows from the active generation are also handed to the
+/// background DbWriter so SQLite is updated in Rust without crossing the
+/// JS bridge a second time.
+fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return;
@@ -415,10 +440,22 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, from_gen: Option<u64>) {
             };
             // Gate stale crawl data from replaced sidecars.
             if matches!(ev_name, "crawl-result" | "block-detected" | "block-cooldown-cleared") {
-                if let Some(gen) = from_gen {
+                if let Some(c) = ctx {
                     if let Some(state) = app.try_state::<CrawlChild>() {
-                        if state.generation.load(Ordering::SeqCst) != gen {
+                        if state.generation.load(Ordering::SeqCst) != c.gen {
                             return;
+                        }
+                    }
+                }
+            }
+            // Hand crawl-results to the background SQLite writer. We clone
+            // the value so the emit below still owns its copy — Phase 3 will
+            // remove the per-row emit and the clone with it.
+            if ev_name == "crawl-result" {
+                if let Some(c) = ctx {
+                    if c.session_id != 0 {
+                        if let Some(writer) = app.try_state::<DbWriter>() {
+                            writer.enqueue(c.session_id, val.clone());
                         }
                     }
                 }
@@ -439,17 +476,17 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, from_gen: Option<u64>) {
     }
 }
 
-fn route_sidecar_stdout_lines(app: &AppHandle, chunk: &str, from_gen: Option<u64>) {
+fn route_sidecar_stdout_lines(app: &AppHandle, chunk: &str, ctx: Option<CrawlCtx>) {
     let mut routed = false;
     for line in chunk.lines() {
         if line.trim().is_empty() {
             continue;
         }
         routed = true;
-        route_sidecar_stdout(app, line, from_gen);
+        route_sidecar_stdout(app, line, ctx);
     }
     if !routed && !chunk.trim().is_empty() {
-        route_sidecar_stdout(app, chunk, from_gen);
+        route_sidecar_stdout(app, chunk, ctx);
     }
 }
 
@@ -463,6 +500,7 @@ pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
         child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
     }
     state.pid.store(0, Ordering::SeqCst);
+    state.session_id.store(0, Ordering::SeqCst);
     // Also kill any Chrome processes using our profile dir
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
@@ -657,6 +695,7 @@ pub async fn kill_sidecar(app: AppHandle) -> Result<(), String> {
         child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
     }
     state.pid.store(0, Ordering::SeqCst);
+    state.session_id.store(0, Ordering::SeqCst);
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
     let _ = app.emit("crawl-stopped", ());
@@ -1011,7 +1050,7 @@ pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), 
             match event {
                 CommandEvent::Stdout(line) => {
                     let line_str = String::from_utf8_lossy(&line);
-                    route_sidecar_stdout_lines(&app_handle, &line_str, None);
+                    route_sidecar_stdout_lines(&app_handle, &line_str, None::<CrawlCtx>);
                 }
                 CommandEvent::Stderr(line) => {
                     let line_str = String::from_utf8_lossy(&line);
@@ -1024,4 +1063,16 @@ pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), 
     });
 
     Ok(())
+}
+
+/// Drain any pending crawl_results rows from the Rust DbWriter buffer and
+/// commit them. The frontend invokes this before any session-level read
+/// (list/load/count) that must observe in-flight rows — replaces the
+/// JS-side `flushPendingInserts` from the pre-Phase-1 design.
+#[tauri::command]
+pub async fn flush_crawl_writes(app: AppHandle) -> Result<(), String> {
+    let writer = app
+        .try_state::<DbWriter>()
+        .ok_or_else(|| "DbWriter state missing".to_string())?;
+    writer.flush().await
 }

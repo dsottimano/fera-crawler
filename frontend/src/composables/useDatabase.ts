@@ -1,4 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
+import { invoke } from "@tauri-apps/api/core";
 import type { CrawlResult } from "../types/crawl";
 import type { SettingsValues } from "../settings/types";
 import { mergeWithDefaults } from "../settings/defaults";
@@ -27,159 +28,26 @@ function getDb(): Promise<Database> {
   return dbPromise;
 }
 
-// ── Batched insert buffer ────────────────────────────────────────────────
-// 32K-URL crawls = 32K individual INSERTs in their own transactions today.
-// Buffer rows and flush as a single transaction every BATCH_SIZE rows or
-// FLUSH_MS, whichever comes first. Callers MUST await flushPendingInserts()
-// before any session-level operation that depends on rows being persisted
-// (completeSession, updateSessionConfig, loadSessionResults of an active
-// session, …) — otherwise rows still in the buffer aren't visible.
-
-interface PendingInsert {
-  sessionId: number;
-  result: CrawlResult;
-}
-
-const insertBuffer: PendingInsert[] = [];
-let flushTimer: ReturnType<typeof setTimeout> | null = null;
-let flushInFlight: Promise<void> | null = null;
-const FLUSH_MS = 1000;
-const BATCH_SIZE = 200;
-
-function scheduleFlush() {
-  if (flushTimer) return;
-  flushTimer = setTimeout(() => {
-    flushTimer = null;
-    void flushPendingInserts();
-  }, FLUSH_MS);
-}
-
-async function doFlush(): Promise<void> {
-  if (insertBuffer.length === 0) return;
-  const batch = insertBuffer.splice(0);
-  await serializeWrite(() => doFlushInner(batch));
-}
-
-// 30 columns per row in the values clause.
-const COLS_PER_ROW = 30;
-
-function seoJsonFor(result: CrawlResult): string {
-  return JSON.stringify({
-    metaGooglebot: result.metaGooglebot || "",
-    xRobotsTag: result.xRobotsTag || "",
-    ogType: result.ogType || "",
-    ogUrl: result.ogUrl || "",
-    datePublishedTime: result.datePublishedTime || "",
-    dateModifiedTime: result.dateModifiedTime || "",
-    outlinks: result.outlinks || [],
-    metaTags: result.metaTags || [],
-    responseHeaders: result.responseHeaders || {},
-    ogImageWidthReal: result.ogImageWidthReal || 0,
-    ogImageHeightReal: result.ogImageHeightReal || 0,
-    ogImageFileSize: result.ogImageFileSize || 0,
-    scraper: result.scraper || {},
-  });
-}
-
-function rowParams(sessionId: number, r: CrawlResult): unknown[] {
-  return [
-    sessionId,
-    r.url,
-    r.status,
-    r.title,
-    r.h1,
-    r.h2,
-    r.metaDescription,
-    r.canonical,
-    r.internalLinks,
-    r.externalLinks,
-    r.responseTime,
-    r.contentType,
-    r.resourceType,
-    r.size,
-    r.error ?? null,
-    r.wordCount,
-    r.metaRobots,
-    r.isIndexable ? 1 : 0,
-    r.isNoindex ? 1 : 0,
-    r.isNofollow ? 1 : 0,
-    r.ogTitle,
-    r.ogDescription,
-    r.ogImage,
-    r.ogImageWidth,
-    r.ogImageHeight,
-    r.datePublished,
-    r.dateModified,
-    r.redirectUrl ?? "",
-    r.serverHeader ?? "",
-    seoJsonFor(r),
-  ];
-}
-
-// Tauri's sqlx-sqlite plugin uses a multi-connection pool, so explicit
-// BEGIN/COMMIT from JS are connection-roulette and can leak (BEGIN on conn
-// A, INSERT on conn B → COMMIT lands on a third conn → conn A returned to
-// the pool with txn open → next caller errors with "cannot start a
-// transaction within a transaction"). Solution: build ONE multi-row INSERT
-// statement per batch — atomic at the statement level, single connection,
-// no explicit transaction needed. DELETE for re-crawled URLs runs as a
-// separate single statement; the tiny window between DELETE and INSERT is
-// acceptable (only readers concurrent with the flush could see fewer rows
-// momentarily, and grid display is debounced anyway).
-async function doFlushInner(batch: PendingInsert[]): Promise<void> {
-  if (batch.length === 0) return;
-  const d = await getDb();
-
-  // Group by sessionId so each DELETE picks up all replaced URLs in one shot.
-  const bySession = new Map<number, CrawlResult[]>();
-  for (const { sessionId, result } of batch) {
-    const arr = bySession.get(sessionId);
-    if (arr) arr.push(result);
-    else bySession.set(sessionId, [result]);
-  }
-
-  // DELETE first so re-crawls / parked-stub replacements take effect.
-  for (const [sessionId, results] of bySession) {
-    if (results.length === 0) continue;
-    const placeholders = results.map((_, i) => `$${i + 2}`).join(",");
-    await d.execute(
-      `DELETE FROM crawl_results WHERE session_id = $1 AND url IN (${placeholders})`,
-      [sessionId, ...results.map((r) => r.url)],
-    );
-  }
-
-  // Single multi-row INSERT for the entire batch.
-  const valuesClauses: string[] = [];
-  const params: unknown[] = [];
-  let p = 1;
-  for (const { sessionId, result } of batch) {
-    const placeholders = Array.from({ length: COLS_PER_ROW }, () => `$${p++}`).join(",");
-    valuesClauses.push(`(${placeholders})`);
-    params.push(...rowParams(sessionId, result));
-  }
-  await d.execute(
-    `INSERT INTO crawl_results
-      (session_id, url, status, title, h1, h2, meta_description, canonical,
-       internal_links, external_links, response_time, content_type,
-       resource_type, size, error, word_count, meta_robots,
-       is_indexable, is_noindex, is_nofollow,
-       og_title, og_description, og_image, og_image_width, og_image_height,
-       date_published, date_modified, redirect_url, server_header, seo_json)
-     VALUES ${valuesClauses.join(",")}`,
-    params,
-  );
-}
+// ── Crawl-result writes ──────────────────────────────────────────────────
+// Phase 1 of the extreme-performance refactor moved crawl_results writes
+// into Rust: the sidecar's stdout NDJSON is parsed and written via sqlx
+// directly. The frontend never inserts into crawl_results anymore — it just
+// asks Rust to drain its buffer before any session-level read that needs
+// to see in-flight rows. The Rust side handles batching (BATCH=200,
+// FLUSH=1000ms) and DELETE-then-INSERT semantics for re-emits; the JS
+// signature is preserved so existing callers (listSessions, loadSession,
+// completeSession, …) need no changes.
 
 export async function flushPendingInserts(): Promise<void> {
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
+  try {
+    await invoke("flush_crawl_writes");
+  } catch (e) {
+    // The flush command can only fail if the writer state is missing
+    // (impossible after setup) or the underlying batch write errored.
+    // Surface but don't throw — readers should still get whatever's
+    // already on disk.
+    console.error("flush_crawl_writes failed:", e);
   }
-  // Serialize concurrent flushers — only one transaction at a time.
-  while (flushInFlight) await flushInFlight;
-  if (insertBuffer.length === 0) return;
-  flushInFlight = doFlush().finally(() => { flushInFlight = null; });
-  await flushInFlight;
 }
 
 export interface CrawlSession {
@@ -218,17 +86,6 @@ export function useDatabase() {
         [sessionId]
       );
     });
-  }
-
-  // Pushes onto the batched-insert buffer; the actual DB write happens in
-  // a transaction at flush time. Errors surface from flushPendingInserts.
-  function insertResult(sessionId: number, result: CrawlResult): void {
-    insertBuffer.push({ sessionId, result });
-    if (insertBuffer.length >= BATCH_SIZE) {
-      void flushPendingInserts();
-    } else {
-      scheduleFlush();
-    }
   }
 
   async function listSessions(): Promise<CrawlSession[]> {
@@ -447,7 +304,6 @@ export function useDatabase() {
   return {
     createSession,
     completeSession,
-    insertResult,
     loadSessionResults,
     loadSessionSeoBatch,
     listSessions,

@@ -41,7 +41,6 @@ export function useCrawl() {
   const {
     createSession,
     completeSession,
-    insertResult,
     loadSessionResults,
     loadSessionSeoBatch,
     loadSessionConfig,
@@ -155,13 +154,13 @@ export function useCrawl() {
       // Skip URLs already crawled (happens during resume) — except when the
       // existing row is a parked stub from the block detector. Those rows
       // need to be replaced when the host is later resumed and the URL
-      // actually gets crawled.
+      // actually gets crawled. DB writes for both branches are handled by
+      // the Rust DbWriter (Phase 1) — JS only updates the in-memory view.
       if (visitedUrls.has(event.payload.url)) {
         const existingIdx = results.value.findIndex(r => r.url === event.payload.url);
         if (existingIdx >= 0 && results.value[existingIdx].error?.startsWith("host_blocked_by_detector")) {
           results.value[existingIdx] = event.payload;
           scheduleRefresh();
-          insertResult(sessionId, event.payload);
         }
         return;
       }
@@ -191,8 +190,6 @@ export function useCrawl() {
           replaceUrlsSize: replaceUrls.size,
         });
       }
-
-      insertResult(sessionId, event.payload);
     });
 
     unlistenComplete = await listen<void>("crawl-complete", async () => {
@@ -260,6 +257,7 @@ export function useCrawl() {
           urls: opts.urls,
           maxRequests: opts.maxRequests,
           excludeUrls: visitedUrls,
+          sessionId,
         }),
       );
     } catch (e) {
