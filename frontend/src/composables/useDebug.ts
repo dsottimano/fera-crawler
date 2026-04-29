@@ -98,12 +98,17 @@ async function start(): Promise<void> {
   );
 
   // A new crawl is its own log scope — wipe the prior run's noise so the
-  // panel only shows what's relevant to the current crawl.
+  // panel only shows what's relevant to the current crawl. Metrics array
+  // must be cleared too: leaving the previous spawn's samples in the
+  // sparkline buffer alongside the new spawn's fresh-zero samples produces
+  // the sawtooth pattern that hid the gen-leak bug for so long.
   unlisteners.push(
     await listen("crawl-started", () => {
       logs.value = [];
       phases.value = [];
       currentPhase.value = "starting";
+      metrics.value = [];
+      latestMetric.value = null;
     })
   );
 }

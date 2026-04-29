@@ -24,7 +24,11 @@ describe("deep capture: redirect chain, hreflang, structured data, security head
     expect(r.redirectChain[0]).toBe(`${BASE_URL}/chain-a`);
     expect(r.redirectChain).toContain(`${BASE_URL}/chain-b`);
     expect(r.redirectChain).toContain(`${BASE_URL}/chain-c`);
-    expect(r.status).toBe(200);
+    // SEO convention: a redirected URL is labeled by its first hop's status,
+    // not the final destination's. /chain-a returns 301 → ... → 200, so this
+    // row's status is 301 and the destination is in redirectUrl.
+    expect(r.status).toBe(301);
+    expect(r.redirectUrl).toBe(`${BASE_URL}/`);
   });
 
   it("captures hreflang, structured data @types, and JS/console errors + failed requests", async () => {

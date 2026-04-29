@@ -14,6 +14,7 @@ import {
   setInFlight,
   recordCompletion,
   recordError,
+  stopMetricEmitter,
 } from "./observability.js";
 import {
   buildStealthInitScript,
@@ -563,22 +564,34 @@ function auditSecurityHeaders(headers: Record<string, string>): CrawlResult["sec
 
 // ── Redirect-chain capture ──
 
-function captureRedirectChain(finalResponse: any): string[] {
+// Walks Playwright's HTTP redirect chain back to the originating request and
+// returns both the URL chain and the *first* hop's status code. SEO crawlers
+// label a redirected URL by its first response (e.g. `301`), not the final
+// destination's 200 — so we override `status` with `firstStatus` when the
+// chain is non-empty.
+async function captureRedirectInfo(
+  finalResponse: any,
+): Promise<{ chain: string[]; firstStatus: number }> {
   const chain: string[] = [];
+  let firstStatus = 0;
+  let firstReq: any = null;
   try {
-    let req = finalResponse?.request?.();
-    // Walk backwards through redirectedFrom() links.
     const seen = new Set<string>();
-    let prev = req?.redirectedFrom?.();
+    let prev = finalResponse?.request?.()?.redirectedFrom?.();
     while (prev) {
       const url = prev.url();
       if (seen.has(url)) break;
       seen.add(url);
       chain.unshift(url);
+      firstReq = prev;
       prev = prev.redirectedFrom?.();
     }
+    if (firstReq) {
+      const firstResp = await firstReq.response();
+      firstStatus = firstResp?.status() ?? 0;
+    }
   } catch {}
-  return chain;
+  return { chain, firstStatus };
 }
 
 // ── Main page crawl ──
@@ -636,7 +649,13 @@ export async function crawlPage(
   try {
     const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     const responseTime = Date.now() - startTime;
-    status = response?.status() ?? 0;
+
+    // Walk the redirect chain up-front so we can label this row with the
+    // *first* hop's status (SEO-crawler convention) and capture the chain
+    // for the row's redirect_chain column. Done before the rest of the
+    // extraction so all downstream code sees the corrected status.
+    const { chain: redirectChain, firstStatus } = await captureRedirectInfo(response);
+    status = firstStatus > 0 ? firstStatus : (response?.status() ?? 0);
 
     if (response) {
       try {
@@ -725,7 +744,6 @@ export async function crawlPage(
     // De-duplicate outlinks
     const uniqueOutlinks = [...new Set(data.allOutlinks)] as string[];
 
-    const redirectChain = captureRedirectChain(response);
     const securityHeaders = auditSecurityHeaders(responseHeaders);
 
     // Perf: nav timing is available after DCL. LCP/CLS require a load-event wait.
@@ -1163,8 +1181,13 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     return n;
   }
 
-  // Stdin command listener: {"cmd":"resume-host","host":"..."} / {"cmd":"stop-host","host":"..."}
+  // Stdin command listener: {"cmd":"resume-host","host":"..."} /
+  // {"cmd":"stop-host","host":"..."} / {"cmd":"shutdown"} — the last is sent
+  // by Rust before kill() so the metric emitter stops cleanly and no last-
+  // gasp `metric` events leak into the next crawl's gen-window before kill
+  // takes effect.
   let stdinBuf = "";
+  let shutdownRequested = false;
   const onStdinData = (chunk: Buffer): void => {
     stdinBuf += chunk.toString("utf8");
     let idx: number;
@@ -1183,6 +1206,10 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
           detector.clearGate(msg.host);
           const dropped = dropHost(msg.host);
           log("info", "host stopped", { host: msg.host, dropped });
+        } else if (msg.cmd === "shutdown") {
+          shutdownRequested = true;
+          stopMetricEmitter();
+          log("info", "shutdown requested");
         }
       } catch (err) {
         log("warn", "invalid stdin command", { line, error: String((err as Error)?.message ?? err) });
@@ -1336,7 +1363,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
       }
     }
 
-    while (queue.length > 0 && withinLimit(processed, config.maxRequests)) {
+    while (queue.length > 0 && withinLimit(processed, config.maxRequests) && !shutdownRequested) {
       const batchSize = config.maxRequests === 0
         ? effectiveConcurrency
         : Math.min(effectiveConcurrency, config.maxRequests - processed);

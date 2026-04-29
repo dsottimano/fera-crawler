@@ -583,8 +583,22 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                 Some("probe-matrix-complete") => "probe-matrix-complete",
                 _ => "crawl-result",
             };
-            // Gate stale crawl data from replaced sidecars.
-            if matches!(ev_name, "crawl-result" | "block-detected" | "block-cooldown-cleared") {
+            // Gate stale events from replaced sidecars. The dying child can
+            // keep streaming for a few seconds after kill() — without this,
+            // its 1Hz `metric` emitter and any in-flight `log`/`phase` events
+            // arrive interleaved with the new sidecar's, producing the
+            // sawtooth-flipping the user saw in the metrics panel. ctx=None
+            // (probe-matrix) skips the check; probe doesn't emit these
+            // event types anyway.
+            if matches!(
+                ev_name,
+                "crawl-result"
+                    | "block-detected"
+                    | "block-cooldown-cleared"
+                    | "sidecar-metric"
+                    | "sidecar-log"
+                    | "sidecar-phase"
+            ) {
                 if let Some(c) = ctx {
                     if let Some(state) = app.try_state::<CrawlChild>() {
                         if state.generation.load(Ordering::SeqCst) != c.gen {
@@ -652,7 +666,19 @@ pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
     // Bump generation so any stdout still in-flight from the dying child
     // is rejected by route_sidecar_stdout's generation check.
     state.generation.fetch_add(1, Ordering::SeqCst);
-    if let Some(child) = lock_or_recover(&state.child).take() {
+    // Try a graceful shutdown first: send {"cmd":"shutdown"} so the sidecar
+    // can stop its metric emitter and break out of the crawl loop instead of
+    // being SIGKILL'd mid-batch. Brief grace period, then hard kill if still
+    // alive. The gen-gate above already neutralizes any stale events; this
+    // is purely about giving Chromium/Playwright a chance to clean up.
+    let mut child_taken = lock_or_recover(&state.child).take();
+    if let Some(child) = child_taken.as_mut() {
+        let _ = child.write(b"{\"cmd\":\"shutdown\"}\n");
+    }
+    if let Some(child) = child_taken {
+        // Don't block start_crawl-flavored stops — 200ms is enough for the
+        // sidecar to receive the line, in practice it exits within ~50ms.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         child.kill().map_err(|e| format!("Failed to kill sidecar: {e}"))?;
     }
     state.pid.store(0, Ordering::SeqCst);
