@@ -1,6 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
 import { invoke } from "@tauri-apps/api/core";
-import type { CrawlResult } from "../types/crawl";
 import type { SettingsValues } from "../settings/types";
 import { mergeWithDefaults } from "../settings/defaults";
 import { serializeWrite } from "../utils/dbWrite";
@@ -93,82 +92,6 @@ export function useDatabase() {
     // an in-progress crawl shows a stale row count in the modal.
     await flushPendingInserts();
     return rawListSessions();
-  }
-
-  async function loadSessionResults(sessionId: number): Promise<CrawlResult[]> {
-    await flushPendingInserts();
-    const d = await getDb();
-    // seo_json is the heaviest column (often 95%+ of payload by bytes) and is
-    // loaded separately via loadSessionSeoBatch so the grid paints fast.
-    const rows = await d.select<any[]>(
-      `SELECT url, status, title, h1, h2, meta_description, canonical,
-              internal_links, external_links, response_time, content_type,
-              resource_type, size, error, word_count, meta_robots,
-              is_indexable, is_noindex, is_nofollow,
-              og_title, og_description, og_image, og_image_width, og_image_height,
-              date_published, date_modified, redirect_url, server_header
-       FROM crawl_results WHERE session_id = $1 ORDER BY id`,
-      [sessionId]
-    );
-    return rows.map((r) => ({
-      url: r.url,
-      status: r.status ?? 0,
-      title: r.title ?? "",
-      h1: r.h1 ?? "",
-      h2: r.h2 ?? "",
-      metaDescription: r.meta_description ?? "",
-      canonical: r.canonical ?? "",
-      wordCount: r.word_count ?? 0,
-      metaRobots: r.meta_robots ?? "",
-      metaGooglebot: "",
-      xRobotsTag: "",
-      isIndexable: !!r.is_indexable,
-      isNoindex: !!r.is_noindex,
-      isNofollow: !!r.is_nofollow,
-      ogTitle: r.og_title ?? "",
-      ogDescription: r.og_description ?? "",
-      ogType: "",
-      ogUrl: "",
-      ogImage: r.og_image ?? "",
-      ogImageWidth: r.og_image_width ?? 0,
-      ogImageHeight: r.og_image_height ?? 0,
-      ogImageWidthReal: 0,
-      ogImageHeightReal: 0,
-      ogImageRatio: (r.og_image_width && r.og_image_height)
-        ? +(r.og_image_width / r.og_image_height).toFixed(2)
-        : 0,
-      ogImageFileSize: 0,
-      datePublished: r.date_published ?? "",
-      dateModified: r.date_modified ?? "",
-      datePublishedTime: "",
-      dateModifiedTime: "",
-      internalLinks: r.internal_links ?? 0,
-      externalLinks: r.external_links ?? 0,
-      outlinks: [],
-      responseTime: r.response_time ?? 0,
-      contentType: r.content_type ?? "",
-      resourceType: r.resource_type ?? "Other",
-      size: r.size ?? 0,
-      error: r.error ?? undefined,
-      responseHeaders: undefined,
-      redirectUrl: r.redirect_url || undefined,
-      serverHeader: r.server_header || undefined,
-      metaTags: [],
-      scraper: {},
-    }));
-  }
-
-  // Returns seo_json strings for rows in the same id order as loadSessionResults,
-  // so callers can merge by index. Pages via LIMIT/OFFSET to keep IPC payloads
-  // bounded; an 8.5k-row × 20 KB-avg seo_json column is ~160 MB if loaded as
-  // one IPC blob and would re-block the UI for ~12s.
-  async function loadSessionSeoBatch(sessionId: number, offset: number, limit: number): Promise<string[]> {
-    const d = await getDb();
-    const rows = await d.select<{ seo_json: string | null }[]>(
-      `SELECT seo_json FROM crawl_results WHERE session_id = $1 ORDER BY id LIMIT $2 OFFSET $3`,
-      [sessionId, limit, offset]
-    );
-    return rows.map((r) => r.seo_json || "{}");
   }
 
   async function rawListSessions(): Promise<CrawlSession[]> {
@@ -304,8 +227,6 @@ export function useDatabase() {
   return {
     createSession,
     completeSession,
-    loadSessionResults,
-    loadSessionSeoBatch,
     listSessions,
     deleteSession,
     clearAllSessions,

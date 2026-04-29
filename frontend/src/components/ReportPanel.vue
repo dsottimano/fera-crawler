@@ -1,11 +1,27 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import type { CrawlResult } from "../types/crawl";
 
-const props = defineProps<{ report: string; results: CrawlResult[] }>();
+// Phase-6: reports fetch the full row set on open via query_all_results.
+// Reports are an explicit user action ("show me the redirects"), so the
+// one-shot full-table read is appropriate — the grid still pages.
+const props = defineProps<{ report: string; sessionId: number | null }>();
 const emit = defineEmits<{ close: [] }>();
 const ready = ref(false);
-onMounted(() => { setTimeout(() => { ready.value = true; }, 100); });
+const rows = ref<CrawlResult[]>([]);
+const loading = ref(true);
+onMounted(async () => {
+  if (props.sessionId == null) { loading.value = false; setTimeout(() => { ready.value = true; }, 100); return; }
+  try {
+    rows.value = await invoke<CrawlResult[]>("query_all_results", { sessionId: props.sessionId });
+  } catch (e) {
+    console.error("query_all_results failed:", e);
+  } finally {
+    loading.value = false;
+    setTimeout(() => { ready.value = true; }, 100);
+  }
+});
 
 const title = computed(() => {
   const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages" };
@@ -13,7 +29,7 @@ const title = computed(() => {
 });
 
 const overviewStats = computed(() => {
-  const r = props.results;
+  const r = rows.value;
   const total = r.length;
   const byStatus: Record<string, number> = {};
   const byType: Record<string, number> = {};
@@ -30,13 +46,13 @@ const overviewStats = computed(() => {
   return { total, byStatus, byType, avgTime: total ? Math.round(totalTime / total) : 0, totalSize, errors };
 });
 
-const redirectResults = computed(() => props.results.filter((r) => r.status >= 300 && r.status < 400));
+const redirectResults = computed(() => rows.value.filter((r) => r.status >= 300 && r.status < 400));
 const duplicateTitles = computed(() => {
   const m: Record<string, CrawlResult[]> = {};
-  for (const r of props.results) { if (!r.title) continue; if (!m[r.title]) m[r.title] = []; m[r.title].push(r); }
+  for (const r of rows.value) { if (!r.title) continue; if (!m[r.title]) m[r.title] = []; m[r.title].push(r); }
   return Object.entries(m).filter(([, u]) => u.length > 1);
 });
-const orphanPages = computed(() => props.results.filter((r) => r.internalLinks === 0 && r.resourceType === "HTML"));
+const orphanPages = computed(() => rows.value.filter((r) => r.internalLinks === 0 && r.resourceType === "HTML"));
 </script>
 
 <template>
@@ -47,7 +63,8 @@ const orphanPages = computed(() => props.results.filter((r) => r.internalLinks =
         <button class="close-btn" @click="emit('close')">&times;</button>
       </div>
       <div class="modal-body">
-        <div v-if="!results.length" class="empty">No crawl data. Run a crawl first.</div>
+        <div v-if="loading" class="empty">Loading…</div>
+        <div v-else-if="!rows.length" class="empty">No crawl data. Run a crawl first.</div>
         <template v-else-if="report === 'overview'">
           <div class="stat-grid">
             <div class="stat"><span class="stat-value">{{ overviewStats.total }}</span><span class="stat-label">TOTAL URLS</span></div>

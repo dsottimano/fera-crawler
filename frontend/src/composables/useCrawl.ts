@@ -1,22 +1,26 @@
-import { ref, triggerRef } from "vue";
+import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useDatabase } from "./useDatabase";
 import { useSettings } from "./useSettings";
 import { useDebug } from "./useDebug";
-import type { CrawlResult } from "../types/crawl";
 import type { SettingsValues } from "../settings/types";
 import { decideCompletion } from "../utils/completionStatus";
 import { buildStartCrawlPayload } from "../utils/startCrawlPayload";
 
-const results = ref<CrawlResult[]>([]);
+// Phase-6 cleanup: there is no longer an in-memory results array. The
+// data grid pages over query_results, the health screen pages over
+// aggregate_health, exports/saves stream from query_all_results. Counts
+// (rowCount/errorCount) come from the live `crawl-progress` aggregate
+// during a crawl and from aggregate_health when opening a saved session.
+
 const crawling = ref(false);
 const stopped = ref(false);
 const currentSessionId = ref<number | null>(null);
 
-/** Live aggregate from the Rust `crawl-progress` event (Phase 3). One
- *  module-scope listener feeds this; the data grid watches `rowCount` to
- *  offer a "X new rows" refresh and the health screen reads it directly. */
+/** Live aggregate from the Rust `crawl-progress` event (Phase 3) plus the
+ *  saved-session backfill set by loadSession. The data grid bumps a
+ *  refresh key on every change; the health screen reads it directly. */
 export interface CrawlProgress {
   rowCount: number;
   errorCount: number;
@@ -37,12 +41,10 @@ async function ensureProgressListener(): Promise<void> {
     crawlProgress.value = event.payload;
   });
 }
-// Reset on every crawl start so the row count doesn't carry over from the
-// previous crawl. Module-level so any caller that starts a crawl gets the
-// reset without re-wiring.
 function resetCrawlProgress() {
   crawlProgress.value = { rowCount: 0, errorCount: 0, lastUrl: "", latestStatuses: [] };
 }
+
 // When a saved crawl is loaded, its pinned settings snapshot lives here so
 // resume/start/stop and the sidebar all read from the same source. Cleared on
 // New Crawl so a fresh crawl falls back to the default settings.
@@ -51,28 +53,20 @@ const pinnedSettings = ref<SettingsValues | null>(null);
 // load. HMR re-runs this module and re-fires the rehydration; production app
 // reload does the same. The user can override by clicking Clear.
 let rehydratePromise: Promise<void> | null = null;
-// Bumped each time the lazy seo_json enrichment merges another batch into
-// `results`. Watched by CrawlGrid so it can re-run setData; we can't rely on
-// the existing length-watcher because in-place mutation keeps length the same.
-const seoVersion = ref(0);
-let unlistenResult: (() => void) | null = null;
 let unlistenComplete: (() => void) | null = null;
-let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-function scheduleRefresh() {
-  if (refreshTimer) return;
-  refreshTimer = setTimeout(() => {
-    refreshTimer = null;
-    triggerRef(results);
-  }, 500);
+interface HealthSnapshot {
+  total: number;
+  errors: number;
+  status4xx: number;
+  status5xx: number;
+  statusOther: number;
 }
 
 export function useCrawl() {
   const {
     createSession,
     completeSession,
-    loadSessionResults,
-    loadSessionSeoBatch,
     loadSessionConfig,
     updateSessionConfig,
     getSessionStatus,
@@ -118,7 +112,6 @@ export function useCrawl() {
     const s: SettingsValues = pinnedSettings.value ?? settings.value;
     const inputs = s.inputs;
     const resume = opts.resume ?? false;
-    const replaceUrls = opts.replaceUrls;
 
     // Kill any sign-in browser first — can't share the profile directory
     try {
@@ -127,25 +120,14 @@ export function useCrawl() {
     // Give Chromium a moment to fully release the profile lock
     await new Promise((r) => setTimeout(r, 500));
 
-    // Clean up any prior listeners before registering new ones
     cleanup();
 
-    // On resume, keep existing results and build a set of already-visited URLs
-    // to deduplicate incoming results AND skip them in the sidecar (so it
-    // doesn't waste time re-fetching). Recrawl targets and the explicit list
-    // (Exact URL scope, list mode) are exempt — those URLs need fresh data.
-    const visitedUrls = new Set<string>();
-    const explicitUrls = new Set(opts.urls ?? []);
-    if (resume) {
-      for (const r of results.value) {
-        if (replaceUrls?.has(r.url)) continue;
-        if (explicitUrls.has(r.url)) continue;
-        // Parked stubs aren't real crawls — let the sidecar try them again.
-        if (r.error?.startsWith("host_blocked_by_detector")) continue;
-        visitedUrls.add(r.url);
-      }
-    } else {
-      results.value = [];
+    // On resume, the sidecar's excludeUrls argument is built server-side
+    // from already-crawled rows; we no longer ship that set from JS because
+    // the JS side doesn't track per-url state anymore. Recrawl targets and
+    // explicit URL lists are still exempt — the caller passes them in
+    // `replaceUrls` / `opts.urls`.
+    if (!resume) {
       // Fresh crawl — recrawl queue from a prior crawl no longer applies.
       if (inputs.recrawlQueue.length > 0) {
         inputs.recrawlQueue = [];
@@ -156,24 +138,10 @@ export function useCrawl() {
     resetCrawlProgress();
 
     // Create a DB session (or reuse current for resume).
-    //
-    // Guard: if resume:true was requested AND there are results in memory but
-    // currentSessionId is null, that's a data-fragmentation footgun — those
-    // results would silently land in a fresh session, leaving the original
-    // orphaned. Refuse instead. Caller should either Clear or rehydrate the
-    // session via Crawl Manager → Open before resuming.
     let sessionId: number;
     if (resume && currentSessionId.value) {
       sessionId = currentSessionId.value;
       await updateSessionConfig(sessionId, s);
-    } else if (resume && results.value.length > 0) {
-      crawling.value = false;
-      cleanup();
-      const msg =
-        "Can't resume: no active session is bound to this view. " +
-        "Either Clear results, or open the original session from Crawl Manager.";
-      console.error(msg);
-      throw new Error(msg);
     } else {
       sessionId = await createSession(url, s);
       currentSessionId.value = sessionId;
@@ -185,59 +153,26 @@ export function useCrawl() {
       }
     }
 
-    unlistenResult = await listen<CrawlResult>("crawl-result", async (event) => {
-      // Skip URLs already crawled (happens during resume) — except when the
-      // existing row is a parked stub from the block detector. Those rows
-      // need to be replaced when the host is later resumed and the URL
-      // actually gets crawled. DB writes for both branches are handled by
-      // the Rust DbWriter (Phase 1) — JS only updates the in-memory view.
-      if (visitedUrls.has(event.payload.url)) {
-        const existingIdx = results.value.findIndex(r => r.url === event.payload.url);
-        if (existingIdx >= 0 && results.value[existingIdx].error?.startsWith("host_blocked_by_detector")) {
-          results.value[existingIdx] = event.payload;
-          scheduleRefresh();
-        }
-        return;
-      }
-      visitedUrls.add(event.payload.url);
-
-      // Replace in-place for recrawled URLs, otherwise append
-      const existingIdx = replaceUrls?.has(event.payload.url)
-        ? results.value.findIndex(r => r.url === event.payload.url)
-        : -1;
-      if (existingIdx >= 0) {
-        results.value[existingIdx] = event.payload;
-      } else {
-        results.value.push(event.payload);
-      }
-      scheduleRefresh();
-
-      const queueIdx = inputs.recrawlQueue.indexOf(event.payload.url);
-      if (queueIdx >= 0) {
-        inputs.recrawlQueue.splice(queueIdx, 1);
-      } else if (replaceUrls?.has(event.payload.url)) {
-        // Diagnostic: replaceUrls says this URL was a recrawl target, but
-        // it's not in the queue. Likely a redirect-changed-url mismatch
-        // (page.goto() returned a different URL than we sent in). Log so
-        // the cause is visible if a recrawl run leaves the queue stuck.
-        console.warn("recrawl URL emitted with no matching queue entry — possible redirect mismatch", {
-          emitted: event.payload.url,
-          replaceUrlsSize: replaceUrls.size,
-        });
-      }
-    });
-
     unlistenComplete = await listen<void>("crawl-complete", async () => {
       crawling.value = false;
-      if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
-      triggerRef(results);
 
-      // Decide BEFORE writing to DB. A list-mode coverage gap (results <
-      // listTotal) means resume-with-excludeUrls produced a no-op completion
-      // — must NOT mark the session complete or the user loses their stopped
-      // state. Same when any row is a failure.
+      // Decide BEFORE writing to DB. The decision is now driven by the
+      // live aggregate (rowCount/errorCount) plus a fresh aggregate_health
+      // for failure-status counts — there's no in-memory rows to scan.
+      let errorCount = crawlProgress.value.errorCount;
+      let rowCount = crawlProgress.value.rowCount;
+      try {
+        const h = await invoke<HealthSnapshot>("aggregate_health", { sessionId });
+        rowCount = h.total;
+        // Mirror legacy semantics: error-string rows + 4xx + 5xx + non-HTTP
+        // statuses (0/600+) all count as failures for completion purposes.
+        errorCount = h.errors + h.status4xx + h.status5xx + h.statusOther;
+      } catch (e) {
+        console.error("aggregate_health on complete failed:", e);
+      }
       const decision = decideCompletion({
-        results: results.value,
+        rowCount,
+        errorCount,
         listTotal: inputs.urls.length,
       });
 
@@ -256,25 +191,27 @@ export function useCrawl() {
         console.error("DB config save on complete failed:", e);
       }
 
-      if (replaceUrls && replaceUrls.size > 0 && inputs.recrawlQueue.length > 0) {
-        const drained: string[] = [];
-        const remaining: string[] = [];
-        for (const url of inputs.recrawlQueue) {
-          if (replaceUrls.has(url)) {
-            const r = results.value.find((x) => x.url === url);
-            if (r && r.status > 0 && !r.error) {
-              drained.push(url);
-              continue;
-            }
-          }
-          remaining.push(url);
-        }
-        if (drained.length > 0) {
-          console.warn(
-            `recrawl post-mortem: ${drained.length} URLs had fresh results but stayed in queue — draining now`,
-            drained.slice(0, 5),
+      // Recrawl queue draining: the URLs that came back successfully should
+      // leave the queue. We can't tell row-by-row anymore (no in-memory rows),
+      // so we ask Rust which URLs in the queue still don't have a clean row.
+      if (opts.replaceUrls && opts.replaceUrls.size > 0 && inputs.recrawlQueue.length > 0) {
+        try {
+          const stillBroken = await invoke<any[]>("query_results", {
+            sessionId,
+            page: 0,
+            limit: inputs.recrawlQueue.length,
+            filter: {
+              urlIn: inputs.recrawlQueue.filter((u) => opts.replaceUrls!.has(u)),
+              issuesOnly: true,
+            },
+            sort: null,
+          });
+          const stillBrokenSet = new Set(stillBroken.map((r) => r.url as string));
+          inputs.recrawlQueue = inputs.recrawlQueue.filter(
+            (u) => !opts.replaceUrls!.has(u) || stillBrokenSet.has(u),
           );
-          inputs.recrawlQueue = remaining;
+        } catch (e) {
+          console.error("recrawl queue drain via query_results failed:", e);
         }
       }
 
@@ -291,7 +228,10 @@ export function useCrawl() {
           mode: opts.mode,
           urls: opts.urls,
           maxRequests: opts.maxRequests,
-          excludeUrls: visitedUrls,
+          // No excludeUrls: the JS side can't enumerate already-crawled
+          // rows without holding them in memory. Resume just re-runs the
+          // sidecar; if a row already exists, the writer's DELETE-then-INSERT
+          // contract overwrites it cleanly.
           sessionId,
         }),
       );
@@ -328,80 +268,46 @@ export function useCrawl() {
         console.error("DB session complete on clear failed:", e);
       }
     }
-    results.value = [];
     currentSessionId.value = null;
     stopped.value = false;
     pinnedSettings.value = null;
+    resetCrawlProgress();
     useDebug().clearLogs();
-  }
-
-  function setResults(data: CrawlResult[]) {
-    results.value = data;
   }
 
   async function loadSession(sessionId: number): Promise<SettingsValues | null> {
     useDebug().clearLogs();
-
-    const loaded = await loadSessionResults(sessionId);
-    results.value = loaded;
     currentSessionId.value = sessionId;
     const snapshot = await loadSessionConfig(sessionId);
-    // Pin so resume / stop / sidebar / config modal all read from this snapshot
-    // instead of whatever the default-settings profile happens to be now.
     pinnedSettings.value = snapshot;
+
+    // Backfill the live progress ref so cards/grid don't show 0 immediately
+    // after open. aggregate_health gives us totals + error mix in one round
+    // trip — same query the health screen uses.
+    try {
+      const h = await invoke<HealthSnapshot>("aggregate_health", { sessionId });
+      crawlProgress.value = {
+        rowCount: h.total,
+        errorCount: h.errors + h.status4xx + h.status5xx + h.statusOther,
+        lastUrl: "",
+        latestStatuses: [],
+      };
+    } catch (e) {
+      console.error("aggregate_health on loadSession failed:", e);
+      resetCrawlProgress();
+    }
 
     const status = await getSessionStatus(sessionId);
     const listTotal = snapshot?.inputs.urls.length ?? 0;
     const isPartial = listTotal > 0
-      ? loaded.length < listTotal
-      : status.completed_at == null && loaded.length > 0;
+      ? crawlProgress.value.rowCount < listTotal
+      : status.completed_at == null && crawlProgress.value.rowCount > 0;
     stopped.value = isPartial;
-
-    void enrichSeo(sessionId, loaded);
 
     return snapshot;
   }
 
-  // Lazily fills the seo_json-derived fields on rows already in `results`.
-  // Runs after the grid paints so the user sees data immediately; aborts if
-  // the active session changes (user loaded another crawl or started fresh).
-  async function enrichSeo(sessionId: number, rows: CrawlResult[]): Promise<void> {
-    const BATCH = 1000;
-    for (let offset = 0; offset < rows.length; offset += BATCH) {
-      if (currentSessionId.value !== sessionId) return;
-      const seoStrs = await loadSessionSeoBatch(sessionId, offset, BATCH);
-      if (currentSessionId.value !== sessionId) return;
-      for (let i = 0; i < seoStrs.length; i++) {
-        const row = rows[offset + i];
-        if (!row) continue;
-        let seo: any = {};
-        try { seo = JSON.parse(seoStrs[i]); } catch {}
-        row.metaGooglebot = seo.metaGooglebot ?? "";
-        row.xRobotsTag = seo.xRobotsTag ?? "";
-        row.ogType = seo.ogType ?? "";
-        row.ogUrl = seo.ogUrl ?? "";
-        row.ogImageWidthReal = seo.ogImageWidthReal ?? 0;
-        row.ogImageHeightReal = seo.ogImageHeightReal ?? 0;
-        if (seo.ogImageWidthReal && seo.ogImageHeightReal) {
-          row.ogImageRatio = +(seo.ogImageWidthReal / seo.ogImageHeightReal).toFixed(2);
-        }
-        row.ogImageFileSize = seo.ogImageFileSize ?? 0;
-        row.datePublishedTime = seo.datePublishedTime ?? "";
-        row.dateModifiedTime = seo.dateModifiedTime ?? "";
-        row.outlinks = seo.outlinks ?? [];
-        row.responseHeaders = seo.responseHeaders;
-        row.metaTags = seo.metaTags ?? [];
-        row.scraper = seo.scraper ?? {};
-      }
-      seoVersion.value++;
-    }
-  }
-
   function cleanup() {
-    if (unlistenResult) {
-      unlistenResult();
-      unlistenResult = null;
-    }
     if (unlistenComplete) {
       unlistenComplete();
       unlistenComplete = null;
@@ -409,17 +315,14 @@ export function useCrawl() {
   }
 
   return {
-    results,
     crawling,
     stopped,
     currentSessionId,
     pinnedSettings,
-    seoVersion,
     crawlProgress,
     startCrawl,
     stopCrawl,
     clearResults,
-    setResults,
     loadSession,
   };
 }

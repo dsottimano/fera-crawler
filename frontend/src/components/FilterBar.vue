@@ -1,32 +1,54 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
-import type { CrawlResult } from "../types/crawl";
+import { ref, computed, watch, onMounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 
 const props = defineProps<{
   totalResults: number;
   filteredCount: number;
   activeTab?: string;
-  results?: CrawlResult[];
+  sessionId?: number | null;
 }>();
 const emit = defineEmits<{ search: [query: string]; export: []; filterType: [type: string]; selectAll: [] }>();
 
 const searchQuery = ref("");
 const filterType = ref("All");
+const distinctStatuses = ref<number[]>([]);
 
 const defaultOptions = ["All", "HTML", "JavaScript", "CSS", "Images", "PDF", "Other"];
 
+// Phase-6: distinct status codes come from a Rust aggregate, not from
+// scanning an in-memory array. Refreshes on session change AND on tab
+// change (in case the user switches to Response Codes mid-crawl).
+async function refreshDistinctStatuses() {
+  if (props.sessionId == null) {
+    distinctStatuses.value = [];
+    return;
+  }
+  try {
+    distinctStatuses.value = await invoke<number[]>("distinct_status_codes", { sessionId: props.sessionId });
+  } catch (e) {
+    console.error("distinct_status_codes failed:", e);
+    distinctStatuses.value = [];
+  }
+}
+
 const filterOptions = computed(() => {
-  if (props.activeTab === "Response Codes" && props.results?.length) {
-    const codes = [...new Set(props.results.map(r => r.status))].sort((a, b) => a - b);
-    return ["All", ...codes.map(String)];
+  if (props.activeTab === "Response Codes" && distinctStatuses.value.length) {
+    return ["All", ...distinctStatuses.value.map(String)];
   }
   return defaultOptions;
 });
 
-// Reset filter when tab changes
-watch(() => props.activeTab, () => {
+watch(() => props.activeTab, (tab) => {
   filterType.value = "All";
   emit("filterType", "All");
+  if (tab === "Response Codes") void refreshDistinctStatuses();
+});
+watch(() => props.sessionId, () => {
+  if (props.activeTab === "Response Codes") void refreshDistinctStatuses();
+});
+onMounted(() => {
+  if (props.activeTab === "Response Codes") void refreshDistinctStatuses();
 });
 
 function onSearch() { emit("search", searchQuery.value); }

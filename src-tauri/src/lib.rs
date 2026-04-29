@@ -193,6 +193,9 @@ pub fn run() {
             db_query::count_results,
             db_query::get_result_full,
             db_query::aggregate_health,
+            db_query::query_all_results,
+            db_query::distinct_status_codes,
+            db_query::aggregate_resource_types,
             voice_commands::claude_turn_streaming,
             voice_commands::speak,
         ])

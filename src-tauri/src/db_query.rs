@@ -563,6 +563,69 @@ pub async fn aggregate_health_inner(
     })
 }
 
+/// Returns every row for a session including the seo_json overflow merged
+/// in. Phase 6 clean-up: replaces the JS-side `loadSessionResults` +
+/// `enrichSeo` two-step that used to pull rows piecemeal so the grid
+/// could paint fast. Use for one-shot exports / saves / report panels —
+/// the Tabulator grid still pages via query_results.
+pub async fn query_all_results_inner(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<Vec<Value>, sqlx::Error> {
+    let sql = format!(
+        "SELECT {cols}, seo_json FROM crawl_results WHERE session_id = ? ORDER BY id ASC",
+        cols = RESULT_COLUMNS,
+    );
+    let rows = sqlx::query(&sql).bind(session_id).fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let mut v = row_to_json(r);
+            let seo_str: String = r.try_get("seo_json").unwrap_or_default();
+            merge_seo_overflow(&mut v, &seo_str);
+            v
+        })
+        .collect())
+}
+
+/// Distinct non-zero status codes seen in a session, ascending. Used by
+/// the FilterBar's "Response Codes" dropdown.
+pub async fn distinct_status_codes_inner(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<Vec<i64>, sqlx::Error> {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT DISTINCT status FROM crawl_results
+         WHERE session_id = ? AND status > 0
+         ORDER BY status ASC",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(c,)| c).collect())
+}
+
+/// Per-resource-type row counts. Powers the RightSidebar donut. Sorted
+/// descending by count so the chart's segment order is stable.
+pub async fn aggregate_resource_types_inner(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    let rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT resource_type, COUNT(*) FROM crawl_results
+         WHERE session_id = ?
+         GROUP BY resource_type
+         ORDER BY COUNT(*) DESC",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(rt, n)| (rt.unwrap_or_default(), n))
+        .collect())
+}
+
 // ── Tauri command wrappers ──────────────────────────────────────────────
 
 #[tauri::command]
@@ -646,6 +709,60 @@ pub async fn aggregate_health(
     aggregate_health_inner(pool, session_id)
         .await
         .map_err(|e| format!("aggregate_health: {e}"))
+}
+
+#[tauri::command]
+pub async fn query_all_results(
+    app: tauri::AppHandle,
+    session_id: i64,
+) -> Result<Vec<Value>, String> {
+    use tauri::Manager;
+    let pool_state = app
+        .try_state::<DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
+        writer.flush().await?;
+    }
+    query_all_results_inner(pool, session_id)
+        .await
+        .map_err(|e| format!("query_all_results: {e}"))
+}
+
+#[tauri::command]
+pub async fn distinct_status_codes(
+    app: tauri::AppHandle,
+    session_id: i64,
+) -> Result<Vec<i64>, String> {
+    use tauri::Manager;
+    let pool_state = app
+        .try_state::<DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
+        writer.flush().await?;
+    }
+    distinct_status_codes_inner(pool, session_id)
+        .await
+        .map_err(|e| format!("distinct_status_codes: {e}"))
+}
+
+#[tauri::command]
+pub async fn aggregate_resource_types(
+    app: tauri::AppHandle,
+    session_id: i64,
+) -> Result<Vec<(String, i64)>, String> {
+    use tauri::Manager;
+    let pool_state = app
+        .try_state::<DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
+        writer.flush().await?;
+    }
+    aggregate_resource_types_inner(pool, session_id)
+        .await
+        .map_err(|e| format!("aggregate_resource_types: {e}"))
 }
 
 #[cfg(test)]
@@ -990,6 +1107,47 @@ mod tests {
         assert_eq!(row6["scraper"]["price"]["value"], "$10");
         let row5 = rows.iter().find(|r| r["url"] == "https://a.com/5").unwrap();
         assert_eq!(row5["scraper"]["price"]["value"], "");
+    }
+
+    #[tokio::test]
+    async fn query_all_results_returns_every_row_with_seo_overflow() {
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        let rows = query_all_results_inner(&pool, 1).await.unwrap();
+        assert_eq!(rows.len(), 9, "session 1 only");
+        // Seo overflow merged.
+        let row6 = rows.iter().find(|r| r["url"] == "https://a.com/6").unwrap();
+        assert_eq!(row6["scraper"]["price"]["value"], "$10");
+    }
+
+    #[tokio::test]
+    async fn distinct_status_codes_excludes_zero_and_other_sessions() {
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        // Add one row with status 0 (request never got a response) — must NOT
+        // appear in the dropdown (a 0 isn't a useful code to filter by).
+        sqlx::query(
+            "INSERT INTO crawl_results (session_id, url, status) VALUES (1, 'https://x', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let codes = distinct_status_codes_inner(&pool, 1).await.unwrap();
+        assert_eq!(codes, vec![200, 204, 301, 404, 500]);
+    }
+
+    #[tokio::test]
+    async fn aggregate_resource_types_counts_by_type() {
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        let agg = aggregate_resource_types_inner(&pool, 1).await.unwrap();
+        // 8 HTML rows (rows 1-8) + 1 JavaScript (row 9).
+        let html = agg.iter().find(|(t, _)| t == "HTML").unwrap();
+        let js = agg.iter().find(|(t, _)| t == "JavaScript").unwrap();
+        assert_eq!(html.1, 8);
+        assert_eq!(js.1, 1);
+        // Sorted descending by count: HTML first.
+        assert_eq!(agg[0].0, "HTML");
     }
 
     #[tokio::test]

@@ -548,11 +548,13 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                     }
                 }
             }
-            // Hand crawl-results to the background SQLite writer AND
+            // crawl-result rows go to the background SQLite writer AND
             // update the aggregate progress counters that the 500ms
-            // emitter reads. Per-row emit is preserved here for the legacy
-            // grid path; the cleanup phase removes it once the new health
-            // dashboard + remote-mode grid have replaced its consumers.
+            // emitter reads. Phase-6 cleanup: the per-row event itself is
+            // no longer emitted to the webview — the data grid pages over
+            // query_results and the health screen reads aggregate_health,
+            // so a per-row IPC tax was just memory pressure with no
+            // consumer.
             if ev_name == "crawl-result" {
                 if let Some(c) = ctx {
                     if c.session_id != 0 {
@@ -567,6 +569,7 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                         }
                     }
                 }
+                return;
             }
             let _ = app.emit(ev_name, val);
         }

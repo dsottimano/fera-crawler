@@ -33,7 +33,7 @@ import type { CrawlResult } from "./types/crawl";
 const url = ref("");
 const crawlScope = ref("Subdomain");
 const { config } = useConfig();
-const { results, crawling, stopped, seoVersion, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, setResults, loadSession } = useCrawl();
+const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
 const voiceFlow = useVoiceFlow();
 const voiceModalOpen = ref(false);
 
@@ -228,12 +228,12 @@ function handleClearRecrawlQueue() {
 // could pick up from. Matches handleStart's isResume check so the button
 // label never lies about what clicking does. Survives HMR-induced loss of
 // the `stopped` flag because results.length is the actual signal.
-const isResumable = computed(() => stopped.value || results.value.length > 0);
+const isResumable = computed(() => stopped.value || crawlProgress.value.rowCount > 0);
 
 const statusText = computed(() => {
   if (crawling.value) return "CRAWLING";
   if (stopped.value) return "STOPPED";
-  if (results.value.length) return "COMPLETE";
+  if (crawlProgress.value.rowCount > 0) return "COMPLETE";
   return "IDLE";
 });
 
@@ -265,7 +265,7 @@ async function onApplyProbeAndResume() {
 async function handleStart() {
   // Treat any START click with existing results as a resume — never silently
   // wipe a partial crawl. To start fresh, the user must explicitly Clear.
-  const isResume = stopped.value || results.value.length > 0;
+  const isResume = stopped.value || crawlProgress.value.rowCount > 0;
   // Read mode from effectiveSettings — pinned snapshot when a saved crawl is
   // loaded, default profile otherwise. Reading settings.value here would
   // silently use the default profile's mode for a loaded list crawl, routing
@@ -328,7 +328,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
 
 
 async function handleClear() {
-  if (results.value.length > 0) {
+  if (crawlProgress.value.rowCount > 0) {
     showClearConfirm.value = true;
     return;
   }
@@ -336,7 +336,7 @@ async function handleClear() {
 }
 
 async function handleSaveAndClear() {
-  const saved = await saveCrawl(results.value, config);
+  const saved = await saveCrawl(currentSessionId.value, config);
   if (!saved) return; // user cancelled the save dialog
   showClearConfirm.value = false;
   doClear();
@@ -386,22 +386,25 @@ async function handleMenuAction(menu: string, item: string) {
     if (item === "New Crawl") { handleClear(); }
     else if (item === "Saved Crawls...") { showCrawlManager.value = true; }
     else if (item === "Open...") {
+      // Phase-6 note: .fera files store snapshot rows from the legacy
+      // in-memory array. Re-loading those rows into the new architecture
+      // means writing them back to a fresh DB session, which the existing
+      // Tauri commands don't expose yet. For now the Open flow only
+      // restores the config slice (URLs / headers / scraper rules) so the
+      // user can re-run the same crawl; the saved-session path
+      // (Crawl Manager) is unaffected and remains the primary recovery
+      // route.
       const data = await openCrawl();
-      if (data) {
-        setResults(data.results);
-        if (data.config) {
-          // .fera files store the legacy inputs slice — write it back into
-          // the active inputs blob (effectiveSettings via useConfig).
-          if (Array.isArray(data.config.urls)) config.urls = [...data.config.urls];
-          if (data.config.customHeaders) config.customHeaders = { ...data.config.customHeaders };
-          if (Array.isArray(data.config.scraperRules)) config.scraperRules = [...data.config.scraperRules];
-          if (Array.isArray(data.config.recrawlQueue)) config.recrawlQueue = [...data.config.recrawlQueue];
-        }
+      if (data?.config) {
+        if (Array.isArray(data.config.urls)) config.urls = [...data.config.urls];
+        if (data.config.customHeaders) config.customHeaders = { ...data.config.customHeaders };
+        if (Array.isArray(data.config.scraperRules)) config.scraperRules = [...data.config.scraperRules];
+        if (Array.isArray(data.config.recrawlQueue)) config.recrawlQueue = [...data.config.recrawlQueue];
       }
     }
-    else if (item === "Save As...") { await saveCrawl(results.value, config); }
-    else if (item === "Export CSV") { await exportCsv(results.value); }
-    else if (item === "Export Excel") { await exportFilteredCsv(results.value, () => true, "crawl-export"); }
+    else if (item === "Save As...") { await saveCrawl(currentSessionId.value, config); }
+    else if (item === "Export CSV") { await exportCsv(currentSessionId.value); }
+    else if (item === "Export Excel") { await exportFilteredCsv(currentSessionId.value, () => true, "crawl-export"); }
     else if (item === "Exit") { await getCurrentWindow().close(); }
   }
   if (menu === "Configuration") {
@@ -417,7 +420,7 @@ async function handleMenuAction(menu: string, item: string) {
       "All Links": () => true, "Response Codes": (r) => r.status >= 400,
       "Page Titles": (r) => !!r.title, Redirects: (r) => r.status >= 300 && r.status < 400,
     };
-    await exportFilteredCsv(results.value, f[item] ?? (() => true), item.toLowerCase().replace(/\s+/g, "-"));
+    await exportFilteredCsv(currentSessionId.value, f[item] ?? (() => true), item.toLowerCase().replace(/\s+/g, "-"));
   }
   if (menu === "Reports") {
     const m: Record<string, string> = { "Crawl Overview": "overview", "Redirect Chains": "redirects", "Duplicate Content": "duplicates", "Orphan Pages": "orphans" };
@@ -449,7 +452,7 @@ async function handleMenuAction(menu: string, item: string) {
         <!-- Status -->
         <div class="telem-stat">
           <span class="telem-label">STATUS</span>
-          <span class="telem-value" :class="{ 'val-active': crawling, 'val-stopped': stopped, 'val-done': !crawling && !stopped && results.length }">
+          <span class="telem-value" :class="{ 'val-active': crawling, 'val-stopped': stopped, 'val-done': !crawling && !stopped && crawlProgress.rowCount > 0 }">
             <span class="status-dot"></span>
             {{ statusText }}
           </span>
@@ -486,7 +489,7 @@ async function handleMenuAction(menu: string, item: string) {
         <!-- URLs Found -->
         <div class="telem-stat">
           <span class="telem-label">URLS FOUND</span>
-          <span class="telem-value telem-number">{{ results.length }}</span>
+          <span class="telem-value telem-number">{{ crawlProgress.rowCount }}</span>
         </div>
 
         <div class="telem-divider"></div>
@@ -586,13 +589,13 @@ async function handleMenuAction(menu: string, item: string) {
     <template v-if="screen === 'DATA'">
       <CategoryTabs :active="activeCategory" :recrawl-count="config.recrawlQueue.length" @select="activeCategory = $event" />
       <FilterBar
-        :total-results="results.length"
+        :total-results="crawlProgress.rowCount"
         :filtered-count="filteredCount"
         :active-tab="activeCategory"
-        :results="results"
+        :session-id="currentSessionId"
         @search="searchQuery = $event"
         @filter-type="filterType = $event"
-        @export="exportCsv(results)"
+        @export="exportCsv(currentSessionId)"
         @select-all="selectAllTrigger++"
       />
 
@@ -612,13 +615,13 @@ async function handleMenuAction(menu: string, item: string) {
         </div>
         <div class="resize-handle resize-handle--v" @mousedown="startResize('sidebar', $event)"></div>
         <div :style="{ width: sidebarWidth + 'px', flexShrink: 0, overflow: 'hidden' }">
-          <RightSidebar :results="results" @edit-settings="showSettingsPanel = true" />
+          <RightSidebar :session-id="currentSessionId" :refresh-key="gridRefreshKey" @edit-settings="showSettingsPanel = true" />
         </div>
       </div>
     </template>
     <ConfigModal v-if="configSection" @close="configSection = null" />
     <ScraperModal v-if="scraperOpen" @close="scraperOpen = false" />
-    <ReportPanel v-if="activeReport" :report="activeReport" :results="results" @close="activeReport = null" />
+    <ReportPanel v-if="activeReport" :report="activeReport" :session-id="currentSessionId" @close="activeReport = null" />
     <AboutModal v-if="showAbout" @close="showAbout = false" />
     <CrawlManager
       v-if="showCrawlManager"

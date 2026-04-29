@@ -1,10 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import type { CrawlResult } from "../types/crawl";
+import { computed, ref, watch, onMounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { useSettings } from "../composables/useSettings";
 import { useConfig } from "../composables/useConfig";
 
-const props = defineProps<{ results: CrawlResult[] }>();
+// Phase-6: stats come from Rust aggregates, not from scanning an in-memory
+// rows array. The parent bumps refreshKey on every crawl-progress tick so
+// the donut updates live; an empty session shows zeros.
+const props = defineProps<{
+  sessionId: number | null;
+  refreshKey?: number;
+}>();
 const emit = defineEmits<{ "edit-settings": [] }>();
 
 const internalTypes = ["HTML", "JavaScript", "CSS", "Images", "Media", "Fonts", "XML", "PDF", "Other", "Unknown"] as const;
@@ -26,16 +32,36 @@ function selectTab(tab: TabKey) {
 }
 
 // ── Stats tab ─────────────────────────────────────────────────────────────
-const internalCounts = computed(() => {
-  const counts: Record<string, number> = {};
-  let total = 0;
-  for (const r of props.results) {
-    const rt = r.resourceType === "Image" ? "Images" : r.resourceType === "Font" ? "Fonts" : r.resourceType;
-    counts[rt] = (counts[rt] || 0) + 1;
-    total++;
+const resourceCounts = ref<{ counts: Record<string, number>; total: number }>({ counts: {}, total: 0 });
+
+async function refreshResourceCounts() {
+  if (props.sessionId == null) {
+    resourceCounts.value = { counts: {}, total: 0 };
+    return;
   }
-  return { counts, total };
-});
+  try {
+    const pairs = await invoke<[string, number][]>("aggregate_resource_types", { sessionId: props.sessionId });
+    const counts: Record<string, number> = {};
+    let total = 0;
+    for (const [rawType, n] of pairs) {
+      // Mirror the legacy display alias so the "Images"/"Fonts" donut
+      // segment names line up with the user-facing type list above.
+      const rt = rawType === "Image" ? "Images" : rawType === "Font" ? "Fonts" : rawType || "Unknown";
+      counts[rt] = (counts[rt] || 0) + n;
+      total += n;
+    }
+    resourceCounts.value = { counts, total };
+  } catch (e) {
+    console.error("aggregate_resource_types failed:", e);
+    resourceCounts.value = { counts: {}, total: 0 };
+  }
+}
+
+onMounted(refreshResourceCounts);
+watch(() => props.sessionId, refreshResourceCounts);
+watch(() => props.refreshKey, refreshResourceCounts);
+
+const internalCounts = computed(() => resourceCounts.value);
 
 const externalCounts = computed(() => ({ counts: {} as Record<string, number>, total: 0 }));
 
