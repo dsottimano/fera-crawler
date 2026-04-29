@@ -132,30 +132,6 @@ export function useDatabase() {
     });
   }
 
-  async function closeOrphanedSessions(): Promise<void> {
-    await serializeWrite(async () => {
-      const d = await getDb();
-      await d.execute(
-        "UPDATE crawl_sessions SET completed_at = CURRENT_TIMESTAMP WHERE completed_at IS NULL"
-      );
-    });
-  }
-
-  async function getLatestSession(): Promise<CrawlSession | null> {
-    await flushPendingInserts();
-    const d = await getDb();
-    const rows = await d.select<CrawlSession[]>(
-      `SELECT s.id, s.start_url, s.started_at, s.completed_at,
-              COUNT(r.id) as result_count
-       FROM crawl_sessions s
-       LEFT JOIN crawl_results r ON r.session_id = s.id
-       GROUP BY s.id
-       ORDER BY s.started_at DESC
-       LIMIT 1`
-    );
-    return rows.length > 0 ? rows[0] : null;
-  }
-
   // Latest crawl that has rows AND wasn't marked complete. Used at boot /
   // HMR to rehydrate state — the stopped flag, pinned snapshot, and
   // currentSessionId would otherwise be lost when the useCrawl module
@@ -246,8 +222,6 @@ export function useDatabase() {
     listSessions,
     deleteSession,
     clearAllSessions,
-    closeOrphanedSessions,
-    getLatestSession,
     getLatestIncompleteSession,
     loadSessionConfig,
     updateSessionConfig,

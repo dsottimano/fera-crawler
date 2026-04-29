@@ -32,12 +32,6 @@ import { extractPastedUrls } from "./utils/pastedUrls";
 import type { CrawlResult } from "./types/crawl";
 
 const url = ref("");
-// Scope dropdown and Mode menu were both nuked. Default behavior is
-// Subdomain spider. List mode is now triggered by pasting 2+ URLs into
-// the URL input — see onUrlPaste below. Single-URL "Exact URL" scope
-// is reachable by pasting one URL into a fresh input + clicking start
-// (same single-page semantics).
-const crawlScope = ref("Subdomain");
 const { config } = useConfig();
 const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
 const voiceFlow = useVoiceFlow();
@@ -301,12 +295,7 @@ async function handleStart() {
     } else {
       if (!url.value.trim()) return;
       url.value = normalizeUrl(url.value);
-      if (crawlScope.value === "Exact URL") {
-        // Per-call override — don't mutate the profile's mode for a one-off scope.
-        await startCrawl(url.value, { resume: isResume, mode: "list", urls: [url.value] });
-      } else {
-        await startCrawl(url.value, { resume: isResume });
-      }
+      await startCrawl(url.value, { resume: isResume });
     }
   } catch (e) {
     // Surface the resume-without-session guard (and any other startCrawl
