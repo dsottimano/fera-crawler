@@ -153,7 +153,7 @@ fera/
 │   └── download-chromium.mjs       # Downloads Chromium from Playwright cache → src-tauri/chromium/
 │
 └── .github/workflows/
-    └── build.yml                   # CI: build + release (Windows, triggers on v* tags)
+    └── build.yml                   # CI: Windows-only build, triggers on v* tag push, publishes installer to GH Releases
 ```
 
 ---
@@ -437,11 +437,20 @@ npm run test:integration --workspace=sidecar
 
 ### CI/CD
 
-The GitHub Actions workflow (`.github/workflows/build.yml`) triggers on:
-- Push of a `v*` tag (e.g., `git tag v0.2.0 && git push origin v0.2.0`)
-- Manual workflow dispatch
+The GitHub Actions workflow (`.github/workflows/build.yml`) triggers only on a `v*` tag push. It builds the Windows NSIS installer and uploads it to a *published* (non-draft) GitHub release named after the tag — visible at the top of the repo's Releases page.
 
-It builds a Windows NSIS installer and uploads it to a GitHub release.
+To cut a release, use the helper script:
+
+```bash
+npm run release            # patch bump (default)
+npm run release minor      # minor bump
+npm run release major      # major bump
+npm run release v1.2.3     # literal tag, no auto-bump
+```
+
+The script bumps `package.json` / `Cargo.toml` / `tauri.conf.json` versions, commits, tags `v<X.Y.Z>`, and pushes the tag — which fires the workflow. Requires `gh` CLI and a clean working tree (tracked changes only; untracked files are ignored).
+
+Linux builds aren't run in CI. Run `npx tauri build` locally if you need a `.deb` / `.AppImage`.
 
 ---
 

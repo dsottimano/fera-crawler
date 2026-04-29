@@ -61,7 +61,7 @@ fera/
 │   ├── binaries/             # Sidecar wrapper script (dev) or binary (prod)
 │   └── tauri.conf.json       # Tauri config
 └── .github/workflows/
-    └── build.yml             # CI: builds Windows/Linux/macOS installers
+    └── build.yml             # CI: Windows installer only, triggers on v* tag push
 ```
 
 ## Current Status
@@ -74,7 +74,7 @@ fera/
 - [x] SQLite schema (crawl_sessions + crawl_results tables) via migrations
 - [x] `npm run dev` launches the full stack — crawling works end-to-end
 - [x] GitHub repo pushed: https://github.com/dsottimano/fera-crawler
-- [x] GitHub Actions CI workflow for cross-platform builds (Windows .msi, Linux .deb/.AppImage, macOS .dmg)
+- [x] GitHub Actions CI workflow for Windows builds, publishing installers to GH Releases on every `v*` tag (`npm run release` to cut)
 
 ### In Progress
 - [ ] CI builds — fixing minor issues (TS types, icons, sidecar wrappers)

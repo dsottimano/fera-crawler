@@ -43,6 +43,23 @@ npm run build
 
 Produces platform-specific installers in `src-tauri/target/release/bundle/`.
 
+## Releases
+
+Pre-built Windows installers live at the [Releases page](https://github.com/dsottimano/fera-crawler/releases). Grab the `.exe` from the latest entry.
+
+### Cutting a release (maintainer)
+
+```bash
+npm run release         # bumps patch (0.4.0 → 0.4.1), tags, pushes
+npm run release minor   # 0.4.0 → 0.5.0
+npm run release major   # 0.4.0 → 1.0.0
+npm run release v1.2.3  # literal tag, no auto-bump
+```
+
+The pushed `v*` tag triggers `.github/workflows/build.yml`, which builds the Windows installer (~12 min) and publishes it to a release named after the tag. Linux builds aren't run in CI — `npm run build` locally produces `.deb` / `.AppImage` if you need them.
+
+Requires `gh` CLI and a clean working tree (only tracked changes — untracked scratch files are ignored).
+
 ## Architecture
 
 ```
