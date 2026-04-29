@@ -199,9 +199,25 @@ export function useDatabase() {
     // New shape has top-level schema buckets. Old shape has CrawlConfig fields.
     const isNewShape = "crawling" in obj || "performance" in obj || "stealth" in obj;
     if (isNewShape) {
-      return mergeWithDefaults(obj);
+      const merged = mergeWithDefaults(obj);
+      // Old crawls written under the new shape sometimes saved
+      // crawling.mode='spider' even when the run was list-driven (the
+      // mode field wasn't always pinned at start_crawl time). If the
+      // snapshot has queued URLs, treat it as list — start_crawl's
+      // list-mode branch is the only thing that consumes inputs.urls.
+      if (merged.inputs.urls.length > 0 && merged.crawling.mode !== "list") {
+        merged.crawling.mode = "list";
+      }
+      return merged;
     }
-    return mergeWithDefaults({ inputs: obj });
+    // Old (pre-settings-unification) shape: bare CrawlConfig fields,
+    // no `crawling` block at all. mergeWithDefaults fills in mode=spider
+    // from the schema defaults — but if the saved crawl had a URL list,
+    // that's the only way it could have been a list run, so infer.
+    const inferredMode = Array.isArray(obj.urls) && (obj.urls as unknown[]).length > 0
+      ? "list"
+      : "spider";
+    return mergeWithDefaults({ inputs: obj, crawling: { mode: inferredMode } });
   }
 
   async function getSessionStatus(sessionId: number): Promise<{ completed_at: string | null }> {
