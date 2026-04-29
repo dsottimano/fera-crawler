@@ -2,12 +2,20 @@ use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+// Platform-specific name of the bundled Node.js binary. Linux .deb /
+// AppImage builds ship `node`; Windows builds ship `node.exe`. macOS
+// would also be `node` if we ever ship there.
+#[cfg(windows)]
+const NODE_BIN: &str = "node.exe";
+#[cfg(not(windows))]
+const NODE_BIN: &str = "node";
+
 fn main() {
     let exe = env::current_exe().expect("Failed to get exe path");
     let exe_dir = exe.parent().expect("Failed to get exe directory");
 
-    // Production: node.exe and script are siblings in Tauri install dir
-    let node_prod = exe_dir.join("node").join("node.exe");
+    // Production: node binary and script are siblings in Tauri install dir
+    let node_prod = exe_dir.join("node").join(NODE_BIN);
     let script_prod = exe_dir.join("sidecar-bundle").join("index.js");
 
     // Dev: sidecar launcher is in src-tauri/binaries/, script is in sidecar/dist/

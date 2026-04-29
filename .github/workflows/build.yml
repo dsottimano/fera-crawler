@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -118,3 +118,179 @@ jobs:
           $tag = if ($env:GITHUB_REF_NAME -match '^v') { $env:GITHUB_REF_NAME } else { "main" }
           gh release create $tag --draft --title "Fera $tag" --notes "SEO Crawler release" 2>$null
           gh release upload $tag $exe.FullName --clobber
+
+  build-linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Tauri's Linux bundling needs system libraries that aren't on the
+      # default GitHub-hosted runner — webkit2gtk for the webview, libsoup
+      # / librsvg for the bundler, libnss3 + libasound2 for Chromium's
+      # runtime deps inside the sidecar. Without these the .deb / AppImage
+      # build silently produces a binary that segfaults at startup.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libnss3 \
+            libasound2 \
+            libgbm1 \
+            patchelf \
+            file
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Patchright Chromium
+        run: npx patchright install chromium
+
+      - name: Build sidecar (esbuild)
+        run: npm run build --workspace=sidecar
+
+      # Same launcher source as Windows; cross-compiles fine because the
+      # only platform-specific path is the NODE_BIN constant (cfg-gated).
+      - name: Build sidecar launcher
+        run: |
+          mkdir -p src-tauri/binaries
+          rustc sidecar-launcher/main.rs -o src-tauri/binaries/fera-crawler-x86_64-unknown-linux-gnu
+
+      - name: Download portable Node.js
+        run: |
+          mkdir -p src-tauri/node
+          curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz \
+            -o /tmp/node.tar.xz
+          tar -xf /tmp/node.tar.xz -C /tmp
+          cp /tmp/node-v22.14.0-linux-x64/bin/node src-tauri/node/node
+          chmod +x src-tauri/node/node
+          ls -la src-tauri/node/node
+
+      - name: Stage sidecar bundle
+        run: |
+          mkdir -p src-tauri/sidecar-bundle
+          cp sidecar/dist/index.cjs src-tauri/sidecar-bundle/index.js
+          ls -la src-tauri/sidecar-bundle/
+
+      # Mirror of the Windows step: copy Patchright's chromium dir into
+      # src-tauri/chromium/ and rewrite tauri.conf.json's bundle.resources
+      # to include every staged file. Done in Node so the file globbing is
+      # consistent with the Windows job.
+      - name: Copy Chromium and patch tauri.conf.json
+        run: |
+          node <<'EOF'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execSync } = require('node:child_process');
+
+          const exePath = execSync('node -e "console.log(require(\'patchright\').chromium.executablePath())"').toString().trim();
+          const chromiumDir = path.dirname(exePath);
+
+          const dest = 'src-tauri/chromium';
+          fs.mkdirSync(dest, { recursive: true });
+
+          function copyRecursive(src, dst) {
+            for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+              const s = path.join(src, entry.name);
+              const d = path.join(dst, entry.name);
+              if (entry.isDirectory()) {
+                fs.mkdirSync(d, { recursive: true });
+                copyRecursive(s, d);
+              } else if (entry.isSymbolicLink()) {
+                fs.symlinkSync(fs.readlinkSync(s), d);
+              } else {
+                fs.copyFileSync(s, d);
+              }
+            }
+          }
+          copyRecursive(chromiumDir, dest);
+          console.log('Chromium copied');
+
+          // Walk every staged dir and emit the relative path Tauri's
+          // bundle.resources expects.
+          const files = [];
+          for (const dir of ['src-tauri/chromium', 'src-tauri/node', 'src-tauri/sidecar-bundle']) {
+            if (!fs.existsSync(dir)) continue;
+            const stack = [dir];
+            while (stack.length) {
+              const cur = stack.pop();
+              for (const entry of fs.readdirSync(cur, { withFileTypes: true })) {
+                const p = path.join(cur, entry.name);
+                if (entry.isDirectory()) stack.push(p);
+                else files.push(p.replace('src-tauri/', '').replace(/\\/g, '/'));
+              }
+            }
+          }
+          console.log(`Total resource entries: ${files.length}`);
+
+          const confPath = 'src-tauri/tauri.conf.json';
+          const conf = JSON.parse(fs.readFileSync(confPath, 'utf8'));
+          conf.bundle = conf.bundle || {};
+          conf.bundle.resources = files;
+          fs.writeFileSync(confPath, JSON.stringify(conf, null, 2));
+          EOF
+
+      - name: Smoke test sidecar
+        continue-on-error: true
+        run: |
+          sidecar="src-tauri/binaries/fera-crawler-x86_64-unknown-linux-gnu"
+          chmod +x "$sidecar"
+          echo "=== Sidecar: $sidecar ==="
+          ls -la "$sidecar"
+          echo
+          echo "=== Running smoke test ==="
+          timeout 60 "$sidecar" crawl https://example.com --max-requests 1 --concurrency 1 \
+            > smoke-stdout.txt 2> smoke-stderr.txt || echo "Exit: $?"
+          echo
+          echo "=== STDOUT ==="
+          cat smoke-stdout.txt || true
+          echo
+          echo "=== STDERR ==="
+          cat smoke-stderr.txt || true
+
+      - name: Build Tauri app
+        run: npx tauri build
+        env:
+          CI: true
+
+      # Tauri produces both a .deb and an .AppImage on Linux by default.
+      # Upload both — different distros prefer different formats.
+      - name: Upload installers to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$GH_REF_NAME" =~ ^v ]]; then
+            tag="$GH_REF_NAME"
+          else
+            tag="main"
+          fi
+          gh release create "$tag" --draft --title "Fera $tag" --notes "SEO Crawler release" 2>/dev/null || true
+
+          deb=$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -n1 || true)
+          if [ -n "$deb" ]; then
+            echo "Found .deb: $deb ($(du -h "$deb" | cut -f1))"
+            gh release upload "$tag" "$deb" --clobber
+          else
+            echo "No .deb found"
+          fi
+
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' | head -n1 || true)
+          if [ -n "$appimage" ]; then
+            echo "Found .AppImage: $appimage ($(du -h "$appimage" | cut -f1))"
+            gh release upload "$tag" "$appimage" --clobber
+          else
+            echo "No .AppImage found"
+          fi

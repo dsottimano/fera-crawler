@@ -15,7 +15,8 @@
     "dev:sidecar": "npm run dev --workspace=sidecar",
     "build:sidecar": "npm run build --workspace=sidecar",
     "test": "npm run test --workspace=sidecar",
-    "test:server": "npm run test:server --workspace=sidecar"
+    "test:server": "npm run test:server --workspace=sidecar",
+    "release": "node scripts/release.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.10.1"
