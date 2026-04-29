@@ -151,11 +151,16 @@ pub fn run() {
         .setup(|app| {
             // Phase 1: Rust owns crawl_results writes. Spawn the background
             // batched writer keyed off the same fera.db file the SQL plugin
-            // uses (resolved via app_data_dir to match plugin defaults).
+            // uses. tauri-plugin-sql resolves a bare `sqlite:fera.db`
+            // against `app_config_dir` (NOT app_data_dir — the two are
+            // distinct on Linux: ~/.config/<bundle> vs ~/.local/share/<bundle>).
+            // Pointing our writer/reader at app_data_dir created an empty
+            // SQLite file in the wrong place and queries silently saw no
+            // tables. Stay aligned with the plugin's resolution.
             use tauri::Manager;
             let db_path = app
                 .path()
-                .app_data_dir()
+                .app_config_dir()
                 .map(|p| p.join("fera.db"))
                 .unwrap_or_else(|_| std::path::PathBuf::from("fera.db"));
             let writer = tauri::async_runtime::block_on(async {
