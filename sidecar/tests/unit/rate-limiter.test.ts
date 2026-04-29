@@ -89,6 +89,33 @@ describe("PerHostRateLimiter", () => {
     rl.release("h");
     rl.release("h");
   });
+
+  it("bumpDelay doubles the per-host delay multiplier and caps at 8x", () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 1000, delayMaxMs: 2000, maxConcurrency: 1 });
+    const a = rl.bumpDelay("h");
+    expect(a.multiplier).toBe(2);
+    expect(a.newDelayMinMs).toBe(2000);
+    expect(a.newDelayMaxMs).toBe(4000);
+    const b = rl.bumpDelay("h");
+    expect(b.multiplier).toBe(4);
+    const c = rl.bumpDelay("h");
+    expect(c.multiplier).toBe(8);
+    // Cap: further bumps stay at 8.
+    const d = rl.bumpDelay("h");
+    expect(d.multiplier).toBe(8);
+  });
+
+  it("bumpDelay only affects the bumped host — siblings keep their original pace", () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 1000, delayMaxMs: 1000, maxConcurrency: 1 });
+    rl.bumpDelay("blocked.example.com");
+    rl.bumpDelay("blocked.example.com");
+    // Now at 4× on blocked.
+    const blocked = rl.bumpDelay("blocked.example.com");
+    expect(blocked.multiplier).toBe(8);
+    // Sibling host is fresh at 1× until its first bump.
+    const fresh = rl.bumpDelay("clean.example.com");
+    expect(fresh.multiplier).toBe(2);
+  });
 });
 
 describe("parseRetryAfter", () => {

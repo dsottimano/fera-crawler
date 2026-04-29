@@ -1297,7 +1297,22 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     const trip = detector.record({ url: result.url, status: result.status, title: result.title }, h);
     if (trip) {
       writeAnyEvent(trip);
-      log("warn", "block-detected: host paused", { host: trip.host, stats: trip.stats, reasons: trip.reasons });
+      // Adaptive slowdown: each block trip doubles this host's per-host
+      // delay multiplier (capped at 8x). When the auto-cooldown fires
+      // and parked URLs return to the queue, they crawl at the bumped
+      // pace — so a host that tripped at 2000ms tries again at 4000ms,
+      // then 8000ms, etc. This is the user-validated "slower beats
+      // blocks" intuition; pairing it with the existing parked-cooldown
+      // gives progressive politeness without manual settings tweaks.
+      const bumped = rateLimiter.bumpDelay(h);
+      log("warn", "block-detected: host paused", {
+        host: trip.host,
+        stats: trip.stats,
+        reasons: trip.reasons,
+        adaptiveMultiplier: bumped.multiplier,
+        newDelayMinMs: bumped.newDelayMinMs,
+        newDelayMaxMs: bumped.newDelayMaxMs,
+      });
     }
   }
 

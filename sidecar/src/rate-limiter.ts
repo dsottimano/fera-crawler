@@ -19,6 +19,15 @@ interface HostState {
   inFlight: number;
   /** FIFO list of resolvers waiting for a concurrency slot. */
   waiters: Array<() => void>;
+  /**
+   * Per-host delay multiplier. Starts at 1.0; bumped to 2.0/4.0/etc. by
+   * `bumpDelay(host)` whenever the block detector trips that host. The
+   * effective range becomes `[delayMin × mult, delayMax × mult]`.
+   * Slows misbehaving hosts without affecting siblings — a list-mode
+   * crawl across many hosts shouldn't tar the well-behaved ones with
+   * the bot-walled host's slowdown.
+   */
+  delayMultiplier: number;
 }
 
 export interface PerHostRateLimiterOpts {
@@ -63,19 +72,40 @@ export class PerHostRateLimiter {
   }
 
   /** Pick the next delay for a request — fresh draw per call. */
-  private nextDelayMs(): number {
-    if (this.delayMaxMs === this.delayMinMs) return this.delayMinMs;
-    const span = this.delayMaxMs - this.delayMinMs;
-    return this.delayMinMs + Math.floor(Math.random() * (span + 1));
+  private nextDelayMs(mult: number): number {
+    const min = Math.round(this.delayMinMs * mult);
+    const max = Math.round(this.delayMaxMs * mult);
+    if (max === min) return min;
+    const span = max - min;
+    return min + Math.floor(Math.random() * (span + 1));
   }
 
   private getState(host: string): HostState {
     let s = this.states.get(host);
     if (!s) {
-      s = { lastRequestStartMs: 0, inFlight: 0, waiters: [] };
+      s = { lastRequestStartMs: 0, inFlight: 0, waiters: [], delayMultiplier: 1 };
       this.states.set(host, s);
     }
     return s;
+  }
+
+  /**
+   * Double the delay multiplier for `host`. Called when the block
+   * detector trips that host — slowing the next round of attempts is
+   * the simplest and most effective recovery: walls that gate on RPS
+   * release the gate when RPS drops, and slowing per-host doesn't
+   * affect siblings on a list-mode crawl. Cap at 8x to bound the worst
+   * case (default 2000ms→16000ms; user can hard-stop the crawl if
+   * that's too slow).
+   */
+  bumpDelay(host: string): { multiplier: number; newDelayMinMs: number; newDelayMaxMs: number } {
+    const state = this.getState(host);
+    state.delayMultiplier = Math.min(state.delayMultiplier * 2, 8);
+    return {
+      multiplier: state.delayMultiplier,
+      newDelayMinMs: Math.round(this.delayMinMs * state.delayMultiplier),
+      newDelayMaxMs: Math.round(this.delayMaxMs * state.delayMultiplier),
+    };
   }
 
   /**
@@ -94,7 +124,9 @@ export class PerHostRateLimiter {
 
     // Gate 2: per-request randomized delay since last request start. Fresh
     // draw each acquire — never per-session, which would leak the seed.
-    const delay = this.nextDelayMs();
+    // Multiplier is per-host so a slow misbehaving host doesn't tar its
+    // well-behaved siblings.
+    const delay = this.nextDelayMs(state.delayMultiplier);
     if (delay > 0) {
       const elapsed = Date.now() - state.lastRequestStartMs;
       if (elapsed < delay) {
