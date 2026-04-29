@@ -1,11 +1,18 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
 
 use crate::db_writer::DbWriter;
+
+// Bounded so latestStatuses can drive a small rolling sparkline / status
+// pie without unbounded growth. 200 covers ~3 minutes of a 1 RPS crawl
+// or ~10 seconds of a 20 RPS crawl — long enough to feel "live", short
+// enough that the snapshot fits in one IPC payload trivially.
+const PROGRESS_HISTORY: usize = 200;
 
 pub struct CrawlChild {
     pub child: Mutex<Option<CommandChild>>,
@@ -17,6 +24,10 @@ pub struct CrawlChild {
     /// crawl. Used by the stdout router to attribute crawl-result rows to
     /// the right session when handing them to the DbWriter.
     pub session_id: AtomicI64,
+    /// Rolling counters for the live `crawl-progress` aggregate event
+    /// (phase 3). Replaced fresh each start_crawl; the per-row stdout
+    /// handler updates it, and a 500ms emitter task reads it.
+    pub progress: Mutex<Option<Arc<Mutex<ProgressState>>>>,
 }
 
 impl Default for CrawlChild {
@@ -26,7 +37,42 @@ impl Default for CrawlChild {
             generation: AtomicU64::new(0),
             pid: AtomicI32::new(0),
             session_id: AtomicI64::new(0),
+            progress: Mutex::new(None),
         }
+    }
+}
+
+/// Snapshot of crawl-result counters maintained for the live aggregate
+/// event. `dirty` is set on every update and cleared by the emitter so
+/// the 500ms tick is a no-op when nothing changed (saves an IPC call when
+/// the crawl is stalled in a delay window).
+#[derive(Default)]
+pub struct ProgressState {
+    pub row_count: u64,
+    pub error_count: u64,
+    pub last_url: String,
+    pub latest_statuses: VecDeque<i64>,
+    pub dirty: bool,
+}
+
+impl ProgressState {
+    fn record(&mut self, val: &serde_json::Value) {
+        self.row_count += 1;
+        if let Some(s) = val.get("error").and_then(|x| x.as_str()) {
+            if !s.is_empty() {
+                self.error_count += 1;
+            }
+        }
+        if let Some(url) = val.get("url").and_then(|x| x.as_str()) {
+            self.last_url = url.to_string();
+        }
+        if let Some(status) = val.get("status").and_then(|x| x.as_i64()) {
+            self.latest_statuses.push_back(status);
+            while self.latest_statuses.len() > PROGRESS_HISTORY {
+                self.latest_statuses.pop_front();
+            }
+        }
+        self.dirty = true;
     }
 }
 
@@ -326,6 +372,8 @@ pub async fn start_crawl(
     let sidecar_pid = child.pid() as i32;
     state.pid.store(sidecar_pid, Ordering::SeqCst);
     state.session_id.store(session_id, Ordering::SeqCst);
+    let progress = Arc::new(Mutex::new(ProgressState::default()));
+    *lock_or_recover(&state.progress) = Some(progress.clone());
     *lock_or_recover(&state.child) = Some(child);
 
     // Tell the UI a fresh crawl is starting so banners from prior runs clear.
@@ -344,6 +392,41 @@ pub async fn start_crawl(
 
     let app_handle = app.clone();
     let ctx = CrawlCtx { gen, session_id };
+
+    // Aggregate progress emitter — debounced 500ms snapshots. Lives on its
+    // own task so emission cadence is independent of stdout pace; exits as
+    // soon as the active generation changes (start_crawl bumped, stop, or
+    // crawl-complete cleared the state).
+    let app_for_emitter = app.clone();
+    let progress_for_emitter = progress.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Some(s) = app_for_emitter.try_state::<CrawlChild>() {
+                if s.generation.load(Ordering::SeqCst) != gen {
+                    return;
+                }
+            } else {
+                return;
+            }
+            let snapshot = {
+                let mut g = lock_or_recover(&progress_for_emitter);
+                if !g.dirty {
+                    continue;
+                }
+                g.dirty = false;
+                serde_json::json!({
+                    "rowCount": g.row_count,
+                    "errorCount": g.error_count,
+                    "lastUrl": g.last_url,
+                    "latestStatuses": g.latest_statuses.iter().copied().collect::<Vec<_>>(),
+                })
+            };
+            let _ = app_for_emitter.emit("crawl-progress", snapshot);
+        }
+    });
 
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;
@@ -386,10 +469,27 @@ pub async fn start_crawl(
         // Only emit crawl-complete if this crawl wasn't replaced by a newer one
         if let Some(state) = app_handle.try_state::<CrawlChild>() {
             if state.generation.load(Ordering::SeqCst) == gen {
+                // Final aggregate emit so any subscriber sees the
+                // last-known counts even if the emitter timer had skipped
+                // a tick on shutdown.
+                let arc_opt = lock_or_recover(&state.progress).clone();
+                if let Some(progress) = arc_opt {
+                    let snapshot = {
+                        let g = lock_or_recover(&progress);
+                        serde_json::json!({
+                            "rowCount": g.row_count,
+                            "errorCount": g.error_count,
+                            "lastUrl": g.last_url,
+                            "latestStatuses": g.latest_statuses.iter().copied().collect::<Vec<_>>(),
+                        })
+                    };
+                    let _ = app_handle.emit("crawl-progress", snapshot);
+                }
                 let _ = app_handle.emit("crawl-complete", ());
                 *lock_or_recover(&state.child) = None;
                 state.pid.store(0, Ordering::SeqCst);
                 state.session_id.store(0, Ordering::SeqCst);
+                *lock_or_recover(&state.progress) = None;
             }
         }
 
@@ -448,14 +548,22 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                     }
                 }
             }
-            // Hand crawl-results to the background SQLite writer. We clone
-            // the value so the emit below still owns its copy — Phase 3 will
-            // remove the per-row emit and the clone with it.
+            // Hand crawl-results to the background SQLite writer AND
+            // update the aggregate progress counters that the 500ms
+            // emitter reads. Per-row emit is preserved here for the legacy
+            // grid path; the cleanup phase removes it once the new health
+            // dashboard + remote-mode grid have replaced its consumers.
             if ev_name == "crawl-result" {
                 if let Some(c) = ctx {
                     if c.session_id != 0 {
                         if let Some(writer) = app.try_state::<DbWriter>() {
                             writer.enqueue(c.session_id, val.clone());
+                        }
+                    }
+                    if let Some(state) = app.try_state::<CrawlChild>() {
+                        let arc_opt = lock_or_recover(&state.progress).clone();
+                        if let Some(progress) = arc_opt {
+                            lock_or_recover(&progress).record(&val);
                         }
                     }
                 }
@@ -501,6 +609,7 @@ pub async fn stop_crawl(app: AppHandle) -> Result<(), String> {
     }
     state.pid.store(0, Ordering::SeqCst);
     state.session_id.store(0, Ordering::SeqCst);
+    *lock_or_recover(&state.progress) = None;
     // Also kill any Chrome processes using our profile dir
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
@@ -696,6 +805,7 @@ pub async fn kill_sidecar(app: AppHandle) -> Result<(), String> {
     }
     state.pid.store(0, Ordering::SeqCst);
     state.session_id.store(0, Ordering::SeqCst);
+    *lock_or_recover(&state.progress) = None;
     let profile = browser_profile_dir(&app);
     kill_chrome_for_profile(&profile);
     let _ = app.emit("crawl-stopped", ());
@@ -1075,4 +1185,59 @@ pub async fn flush_crawl_writes(app: AppHandle) -> Result<(), String> {
         .try_state::<DbWriter>()
         .ok_or_else(|| "DbWriter state missing".to_string())?;
     writer.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn progress_state_records_row_url_and_status() {
+        let mut p = ProgressState::default();
+        p.record(&json!({"url": "https://a", "status": 200, "title": ""}));
+        p.record(&json!({"url": "https://b", "status": 301, "title": ""}));
+        assert_eq!(p.row_count, 2);
+        assert_eq!(p.error_count, 0);
+        assert_eq!(p.last_url, "https://b");
+        assert_eq!(p.latest_statuses, vec![200, 301]);
+        assert!(p.dirty);
+    }
+
+    #[test]
+    fn progress_state_counts_errors_only_for_non_empty_strings() {
+        // The crawler emits `error: ""` for clean rows in some paths and
+        // `error: null` (omitted) for others. Both must NOT count.
+        let mut p = ProgressState::default();
+        p.record(&json!({"url": "a", "status": 200}));
+        p.record(&json!({"url": "b", "status": 200, "error": ""}));
+        p.record(&json!({"url": "c", "status": 0, "error": "host_blocked_by_detector:akamai"}));
+        assert_eq!(p.row_count, 3);
+        assert_eq!(p.error_count, 1);
+    }
+
+    #[test]
+    fn progress_state_history_is_bounded() {
+        // Should never grow past PROGRESS_HISTORY — a million-row crawl
+        // can't bloat the IPC payload via this path.
+        let mut p = ProgressState::default();
+        for i in 0..(PROGRESS_HISTORY as i64 + 50) {
+            p.record(&json!({"url": "x", "status": 200 + i}));
+        }
+        assert_eq!(p.latest_statuses.len(), PROGRESS_HISTORY);
+        // Front of the deque is the oldest retained value (the first 50
+        // entries got popped when we exceeded the bound).
+        assert_eq!(*p.latest_statuses.front().unwrap(), 200 + 50);
+    }
+
+    #[test]
+    fn progress_state_dirty_is_set_on_each_record() {
+        let mut p = ProgressState::default();
+        assert!(!p.dirty);
+        p.record(&json!({"url": "x", "status": 200}));
+        assert!(p.dirty);
+        p.dirty = false;
+        p.record(&json!({"url": "y", "status": 200}));
+        assert!(p.dirty);
+    }
 }
