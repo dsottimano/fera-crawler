@@ -135,7 +135,11 @@ export function useCrawl() {
     }
     crawling.value = true;
     stopped.value = false;
-    resetCrawlProgress();
+    // Resume keeps the loaded count visible. Resetting on resume flashed
+    // PAGES CRAWLED to 0 and then to the new-rows-only count (e.g. 10
+    // instead of 14,691 already-on-disk). Fresh starts wipe to 0 so the
+    // hero card doesn't carry over the prior crawl's numbers.
+    if (!resume) resetCrawlProgress();
 
     // Create a DB session (or reuse current for resume).
     let sessionId: number;
@@ -221,6 +225,28 @@ export function useCrawl() {
       cleanup();
     });
 
+    // On resume, fetch the set of already-crawled URLs from Rust so the
+    // sidecar's --exclude-urls argument skips them. Block-stubs are
+    // intentionally NOT excluded by the Rust query — the host may have
+    // come back online and we want a real fetch. Recrawl targets and
+    // explicit URL lists override the skip set.
+    let excludeUrls: Set<string> | undefined;
+    if (resume) {
+      try {
+        const skippable = await invoke<string[]>("get_skippable_urls", { sessionId });
+        const skipSet = new Set(skippable);
+        if (opts.replaceUrls) {
+          for (const u of opts.replaceUrls) skipSet.delete(u);
+        }
+        if (opts.urls) {
+          for (const u of opts.urls) skipSet.delete(u);
+        }
+        excludeUrls = skipSet;
+      } catch (e) {
+        console.error("get_skippable_urls failed (resume will refetch already-crawled rows):", e);
+      }
+    }
+
     try {
       await invoke(
         "start_crawl",
@@ -228,10 +254,7 @@ export function useCrawl() {
           mode: opts.mode,
           urls: opts.urls,
           maxRequests: opts.maxRequests,
-          // No excludeUrls: the JS side can't enumerate already-crawled
-          // rows without holding them in memory. Resume just re-runs the
-          // sidecar; if a row already exists, the writer's DELETE-then-INSERT
-          // contract overwrites it cleanly.
+          excludeUrls,
           sessionId,
         }),
       );

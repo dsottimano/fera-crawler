@@ -373,6 +373,26 @@ pub async fn start_crawl(
     state.pid.store(sidecar_pid, Ordering::SeqCst);
     state.session_id.store(session_id, Ordering::SeqCst);
     let progress = Arc::new(Mutex::new(ProgressState::default()));
+    // Seed the live counters from existing rows for resume — without
+    // this, the first crawl-progress tick overwrites the loaded count
+    // (e.g. 14,691) with rows-from-this-spawn-only (10), making PAGES
+    // CRAWLED look like the resume threw away prior work. dirty=true so
+    // the seeded value emits on the first 500ms tick instead of waiting
+    // for the first new row.
+    if session_id != 0 {
+        if let Some(read_pool) = app.try_state::<crate::db_query::DbReadPool>() {
+            if let Ok(pool) = read_pool.pool().await {
+                if let Ok(snap) = crate::db_query::aggregate_health_inner(pool, session_id).await {
+                    let mut g = lock_or_recover(&progress);
+                    g.row_count = snap.total.max(0) as u64;
+                    let failures =
+                        snap.errors + snap.status_4xx + snap.status_5xx + snap.status_other;
+                    g.error_count = failures.max(0) as u64;
+                    g.dirty = true;
+                }
+            }
+        }
+    }
     *lock_or_recover(&state.progress) = Some(progress.clone());
     *lock_or_recover(&state.child) = Some(child);
 

@@ -605,6 +605,27 @@ pub async fn distinct_status_codes_inner(
     Ok(rows.into_iter().map(|(c,)| c).collect())
 }
 
+/// URLs in a session that the resume path should skip — i.e. already
+/// crawled cleanly. Block-stubs (`error LIKE 'host_blocked_by_detector%'`)
+/// are NOT skipped because the host may have come back online and we
+/// want a real fetch on resume. Used to seed the sidecar's --exclude-urls
+/// flag so a 14k-row resume doesn't re-fetch every existing row.
+pub async fn get_skippable_urls_inner(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT url FROM crawl_results
+         WHERE session_id = ?
+           AND (error IS NULL
+                OR error = ''
+                OR error NOT LIKE 'host_blocked_by_detector%')",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// Per-resource-type row counts. Powers the RightSidebar donut. Sorted
 /// descending by count so the chart's segment order is stable.
 pub async fn aggregate_resource_types_inner(
@@ -763,6 +784,24 @@ pub async fn aggregate_resource_types(
     aggregate_resource_types_inner(pool, session_id)
         .await
         .map_err(|e| format!("aggregate_resource_types: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_skippable_urls(
+    app: tauri::AppHandle,
+    session_id: i64,
+) -> Result<Vec<String>, String> {
+    use tauri::Manager;
+    let pool_state = app
+        .try_state::<DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
+        writer.flush().await?;
+    }
+    get_skippable_urls_inner(pool, session_id)
+        .await
+        .map_err(|e| format!("get_skippable_urls: {e}"))
 }
 
 #[cfg(test)]
@@ -1134,6 +1173,22 @@ mod tests {
         .unwrap();
         let codes = distinct_status_codes_inner(&pool, 1).await.unwrap();
         assert_eq!(codes, vec![200, 204, 301, 404, 500]);
+    }
+
+    #[tokio::test]
+    async fn get_skippable_urls_excludes_block_stubs() {
+        // Resume's --exclude-urls must skip cleanly-crawled rows but
+        // RE-FETCH block-detector parked stubs (the host may have come
+        // back online). Fixture row 4 has the host_blocked_by_detector
+        // error; the rest are clean. Skippable = 8.
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        let urls = get_skippable_urls_inner(&pool, 1).await.unwrap();
+        assert_eq!(urls.len(), 8, "block-stub row 4 must NOT be skippable");
+        assert!(!urls.iter().any(|u| u == "https://a.com/4"));
+        // Non-block-stub URLs all present.
+        assert!(urls.iter().any(|u| u == "https://a.com/1"));
+        assert!(urls.iter().any(|u| u == "https://a.com/9"));
     }
 
     #[tokio::test]
