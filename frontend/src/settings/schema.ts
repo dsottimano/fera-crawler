@@ -135,7 +135,7 @@ export const SCHEMA: SettingsSchema = {
         type: "boolean",
         default: true,
         label: "Auto-probe + apply on first block",
-        help: "When a host trips the block detector for the first time, silently run the 6-row probe matrix in the background. If a winning config is found, apply it and resume the crawl automatically. Skipped if a manual probe is running. Each host is auto-probed at most once per crawl.",
+        help: "When a host trips the block detector for the first time, silently run the probe matrix in the background. If a winning config is found, apply it and resume the crawl automatically. Skipped if a manual probe is running. Each host is auto-probed at most once per crawl.",
       },
     },
   },

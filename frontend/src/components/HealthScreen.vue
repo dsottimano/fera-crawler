@@ -69,15 +69,26 @@ const { crawlProgress } = useCrawl();
 // Refresh debouncer — multiple rapid crawl-progress ticks coalesce into
 // one aggregate_health round-trip so we don't hammer SQLite during a fast
 // crawl. 300ms keeps the cards feeling live without blowing the budget.
+//
+// `pendingRefresh` covers the race where a tick lands while a fetch is
+// in flight: instead of dropping that scheduled refresh on the floor (the
+// previous behavior), we mark it pending and re-run after the current
+// fetch finishes. Without this, the FINAL tick of a crawl was routinely
+// lost and the hero card stuck at a mid-crawl value (e.g. 15,240) while
+// the toolbar showed the true final count (16,063).
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let refreshInFlight = false;
+let pendingRefresh = false;
 
 async function refreshNow() {
   if (props.sessionId == null) {
     health.value = EMPTY;
     return;
   }
-  if (refreshInFlight) return;
+  if (refreshInFlight) {
+    pendingRefresh = true;
+    return;
+  }
   refreshInFlight = true;
   loading.value = true;
   try {
@@ -90,6 +101,10 @@ async function refreshNow() {
   } finally {
     loading.value = false;
     refreshInFlight = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      void refreshNow();
+    }
   }
 }
 
@@ -104,6 +119,12 @@ function scheduleRefresh() {
 onMounted(() => { void refreshNow(); });
 watch(() => props.sessionId, () => { void refreshNow(); });
 watch(() => crawlProgress.value.rowCount, scheduleRefresh);
+// Force a refresh whenever the crawl flips state — catches the moment
+// after a stop / completion where rowCount lands at its final value but
+// the in-flight refresh from a prior tick was already running with stale
+// data. Without this watcher the hero stayed off-by-N until the user
+// switched tabs.
+watch(() => props.crawling, () => { void refreshNow(); });
 
 // Hero status — uses the live progress ref (lower latency than aggregate)
 // when a crawl is active, otherwise reflects the saved snapshot.
