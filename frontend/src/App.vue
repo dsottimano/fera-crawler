@@ -31,6 +31,9 @@ import { useDatabase } from "./composables/useDatabase";
 import type { CrawlResult } from "./types/crawl";
 
 const url = ref("");
+// Scope dropdown was nuked from the toolbar; default behavior is now
+// always Subdomain. Exact-URL scope is still reachable via list-mode
+// (Mode menu → List) which is the same single-page semantics.
 const crawlScope = ref("Subdomain");
 const { config } = useConfig();
 const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
@@ -458,11 +461,13 @@ async function handleMenuAction(menu: string, item: string) {
           </span>
         </div>
 
-        <!-- URL input (compact) -->
+        <!-- URL input (compact) — reads `effectiveSettings` so a loaded
+             list-mode session shows the LIST MODE badge instead of the
+             default-profile's URL input. -->
         <div class="telem-url-group">
           <div class="telem-url-wrap">
-            <div v-if="settings.crawling.mode === 'list'" class="telem-list-badge" @click="configSection = 'settings'">
-              LIST MODE — {{ config.urls.length }} URL{{ config.urls.length !== 1 ? 's' : '' }}
+            <div v-if="effectiveSettings.crawling.mode === 'list'" class="telem-list-badge" @click="showSettingsPanel = true">
+              LIST MODE — {{ effectiveSettings.inputs.urls.length.toLocaleString() }} URL{{ effectiveSettings.inputs.urls.length !== 1 ? 's' : '' }}
             </div>
             <input
               v-else
@@ -476,20 +481,14 @@ async function handleMenuAction(menu: string, item: string) {
           </div>
         </div>
 
-        <!-- Scope -->
+        <!-- Pages crawled. List-mode shows X / Y so the user sees how
+             many of the queued list have come back. Spider mode shows
+             just the running count. -->
         <div class="telem-stat">
-          <span class="telem-label">SCOPE</span>
-          <select v-model="crawlScope" class="scope-select" :disabled="crawling">
-            <option>Subdomain</option>
-            <option>Subfolder</option>
-            <option>Exact URL</option>
-          </select>
-        </div>
-
-        <!-- URLs Found -->
-        <div class="telem-stat">
-          <span class="telem-label">URLS FOUND</span>
-          <span class="telem-value telem-number">{{ crawlProgress.rowCount }}</span>
+          <span class="telem-label">{{ effectiveSettings.crawling.mode === 'list' ? 'PAGES CRAWLED' : 'URLS FOUND' }}</span>
+          <span class="telem-value telem-number">
+            {{ crawlProgress.rowCount.toLocaleString() }}<template v-if="effectiveSettings.crawling.mode === 'list' && effectiveSettings.inputs.urls.length > 0"><span class="telem-number-sep"> / </span>{{ effectiveSettings.inputs.urls.length.toLocaleString() }}</template>
+          </span>
         </div>
 
         <div class="telem-divider"></div>
@@ -735,7 +734,12 @@ async function handleMenuAction(menu: string, item: string) {
 .telemetry-bar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  /* Allow the bar to wrap to a second row at narrow widths instead of
+     overflowing — the URL input was getting clipped on smaller windows.
+     row-gap covers wrapped lines; column-gap is the original spacing. */
+  flex-wrap: wrap;
+  column-gap: 16px;
+  row-gap: 8px;
   padding: 10px 20px;
   background: #0c111d;
   border-bottom: 1px solid rgba(255,255,255,0.08);
@@ -817,6 +821,14 @@ async function handleMenuAction(menu: string, item: string) {
   font-weight: 700;
 }
 
+/* Subdued separator inside the X / Y readout. Same fontsize so the
+   numbers stay aligned, just lower contrast so the eye reads it as a
+   denominator and not a third value. */
+.telem-number-sep {
+  color: rgba(255, 255, 255, 0.25);
+  font-weight: 500;
+}
+
 .val-active { color: #4ec9b0; }
 .val-stopped { color: #dcdcaa; }
 .val-done { color: #569cd6; }
@@ -849,10 +861,13 @@ async function handleMenuAction(menu: string, item: string) {
   50% { opacity: 0.3; }
 }
 
-/* URL input — primary input, takes the lion's share of free horizontal space. */
+/* URL input — primary input, takes the lion's share of free horizontal
+   space. min-width:0 lets it shrink past the input's intrinsic
+   placeholder width when the bar is narrow; max-width caps growth on
+   wide windows so the buttons don't drift to the far right edge. */
 .telem-url-group {
-  flex: 1 1 360px;
-  min-width: 240px;
+  flex: 1 1 280px;
+  min-width: 0;
   max-width: 640px;
 }
 
@@ -896,36 +911,6 @@ async function handleMenuAction(menu: string, item: string) {
 }
 .telem-list-badge:hover {
   color: #7cb8e8;
-}
-
-/* Scope select — custom styled, appearance:none */
-.scope-select {
-  padding: 6px 28px 6px 12px;
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 14px;
-  background: rgba(255,255,255,0.04) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='rgba(255,255,255,0.4)'/%3E%3C/svg%3E") no-repeat right 10px center;
-  color: #ffffff;
-  font-family: 'Ubuntu', sans-serif;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  cursor: pointer;
-  outline: none;
-  appearance: none;
-  -webkit-appearance: none;
-  transition: border-color 0.15s;
-}
-
-.scope-select:focus {
-  border-color: rgba(86,156,214,0.5);
-  box-shadow: 0 0 0 2px rgba(86,156,214,0.1);
-}
-
-.scope-select option {
-  background: #141a2e;
-  color: #ffffff;
-  font-size: 11px;
-  padding: 8px;
 }
 
 /* Action buttons — primary cluster (start/stop/clear/recrawl) gets tight
