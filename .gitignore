@@ -26,3 +26,7 @@ src-tauri/storage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Untracked scratch files — local notes, error captures from colleagues
+/cli-plan.md
+/errorwindows.txt
