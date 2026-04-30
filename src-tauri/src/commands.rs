@@ -588,6 +588,7 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                 Some("log") => "sidecar-log",
                 Some("metric") => "sidecar-metric",
                 Some("phase") => "sidecar-phase",
+                Some("timing") => "sidecar-timing",
                 Some("block-detected") => "block-detected",
                 Some("block-cooldown-cleared") => "block-cooldown-cleared",
                 Some("probe-result") => "probe-result",
@@ -610,6 +611,7 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                     | "sidecar-metric"
                     | "sidecar-log"
                     | "sidecar-phase"
+                    | "sidecar-timing"
             ) {
                 if let Some(c) = ctx {
                     if let Some(state) = app.try_state::<CrawlChild>() {

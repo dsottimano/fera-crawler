@@ -8,6 +8,7 @@ import FilterBar from "./components/FilterBar.vue";
 import CrawlGrid from "./components/CrawlGrid.vue";
 import HealthScreen from "./components/HealthScreen.vue";
 import ConfigScreen from "./components/ConfigScreen.vue";
+import NetworkMap from "./components/NetworkMap.vue";
 import BottomPanel from "./components/BottomPanel.vue";
 import ConfigModal from "./components/ConfigModal.vue";
 import ScraperModal from "./components/ScraperModal.vue";
@@ -170,7 +171,10 @@ watch(() => crawlProgress.value.rowCount, () => { gridRefreshKey.value++; });
 // into CONFIG and HEALTH respectively. The debug modal becomes a
 // peer screen so diagnostic info doesn't fight the rest of the UI for
 // space.
-type Screen = "HEALTH" | "DATA" | "CONFIG" | "DEBUG";
+// NETWORK is an experimental tab for the Live Timing Map. If it doesn't
+// earn its keep, remove this entry, the import, the v-for entry below,
+// and frontend/src/components/NetworkMap.vue.
+type Screen = "HEALTH" | "DATA" | "CONFIG" | "DEBUG" | "NETWORK";
 const screen = ref<Screen>("HEALTH");
 
 function handleHealthDrill(args: { tab: string; filterType?: string }) {
@@ -566,7 +570,7 @@ async function handleMenuAction(menu: string, item: string) {
          running in the background when not visible. -->
     <nav class="screen-nav" role="tablist">
       <button
-        v-for="s in (['HEALTH', 'DATA', 'CONFIG', 'DEBUG'] as const)"
+        v-for="s in (['HEALTH', 'DATA', 'CONFIG', 'DEBUG', 'NETWORK'] as const)"
         :key="s"
         class="screen-nav-tab"
         :class="{ 'screen-nav-tab--active': screen === s }"
@@ -620,6 +624,7 @@ async function handleMenuAction(menu: string, item: string) {
     />
 
     <DebugPanel v-if="screen === 'DEBUG'" />
+    <NetworkMap v-if="screen === 'NETWORK'" />
     <ConfigModal v-if="configSection" @close="configSection = null" />
     <ScraperModal v-if="scraperOpen" @close="scraperOpen = false" />
     <ReportPanel v-if="activeReport" :report="activeReport" :session-id="currentSessionId" @close="activeReport = null" />

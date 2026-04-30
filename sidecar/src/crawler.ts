@@ -568,6 +568,43 @@ function auditSecurityHeaders(headers: Record<string, string>): CrawlResult["sec
 
 // ── Redirect-chain capture ──
 
+// Extracts a Resource-Timing-style phase breakdown from a Playwright Response.
+// Returns null if timing data is unavailable (failed/aborted requests).
+// Phase math follows the W3C Resource Timing spec — `connectStart→connectEnd`
+// includes TLS, so we split it via `secureConnectionStart`. A reused HTTP/2
+// or keep-alive connection has connectStart === -1; we report all three of
+// dns/tcp/tls as 0 in that case and flag `reused: true` so the Live Map can
+// visualize the funnel correctly.
+interface PhaseTimings {
+  dns: number; tcp: number; tls: number; ttfb: number; download: number;
+  total: number; reused: boolean;
+}
+function extractPhaseTimings(response: any): PhaseTimings | null {
+  const t = response?.request?.()?.timing?.();
+  if (!t) return null;
+  const safe = (x: number) => Math.max(0, Math.round(x));
+
+  const hasDns = t.domainLookupEnd > 0 && t.domainLookupStart >= 0
+    && t.domainLookupEnd >= t.domainLookupStart;
+  const hasConn = t.connectEnd > 0 && t.connectStart >= 0
+    && t.connectEnd >= t.connectStart;
+  const hasTls = hasConn && t.secureConnectionStart > 0
+    && t.connectEnd >= t.secureConnectionStart;
+
+  const dns = hasDns ? safe(t.domainLookupEnd - t.domainLookupStart) : 0;
+  const tcp = hasConn
+    ? (hasTls ? safe(t.secureConnectionStart - t.connectStart)
+              : safe(t.connectEnd - t.connectStart))
+    : 0;
+  const tls = hasTls ? safe(t.connectEnd - t.secureConnectionStart) : 0;
+  const ttfbAnchor = hasConn ? t.connectEnd : (t.requestStart > 0 ? t.requestStart : 0);
+  const ttfb = safe(t.responseStart - ttfbAnchor);
+  const download = safe(t.responseEnd - t.responseStart);
+  const reused = !hasConn;
+
+  return { dns, tcp, tls, ttfb, download, total: dns + tcp + tls + ttfb + download, reused };
+}
+
 // Walks Playwright's HTTP redirect chain back to the originating request and
 // returns both the URL chain and the *first* hop's status code. SEO crawlers
 // label a redirected URL by its first response (e.g. `301`), not the final
@@ -660,6 +697,30 @@ export async function crawlPage(
     // extraction so all downstream code sees the corrected status.
     const { chain: redirectChain, firstStatus } = await captureRedirectInfo(response);
     status = firstStatus > 0 ? firstStatus : (response?.status() ?? 0);
+
+    // Per-request phase timings, ephemeral. The Network Live Map listens
+    // for these via the `sidecar-timing` Tauri event. Skipped when timing
+    // is unavailable (e.g. aborted requests).
+    const phaseTimings = extractPhaseTimings(response);
+    if (phaseTimings) {
+      try {
+        const u = new URL(url);
+        writeAnyEvent({
+          type: "timing",
+          ts: Date.now(),
+          url, host: u.hostname,
+          status,
+          dns: phaseTimings.dns,
+          tcp: phaseTimings.tcp,
+          tls: phaseTimings.tls,
+          ttfb: phaseTimings.ttfb,
+          download: phaseTimings.download,
+          total: phaseTimings.total,
+          reused: phaseTimings.reused,
+          bytes: 0, // filled in below once we know it
+        });
+      } catch {}
+    }
 
     if (response) {
       try {

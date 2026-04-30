@@ -27,7 +27,26 @@ export interface PhaseEvent {
   meta?: Record<string, unknown>;
 }
 
-export type SidecarEvent = LogEvent | MetricEvent | PhaseEvent;
+// Per-request timing breakdown for the live Network Map view. Ephemeral —
+// Rust forwards these as Tauri events but never persists them. Numbers in
+// ms; phase==0 means the connection was reused (DNS/TCP/TLS skipped).
+export interface TimingEvent {
+  type: "timing";
+  ts: number;
+  url: string;
+  host: string;
+  status: number;
+  dns: number;
+  tcp: number;
+  tls: number;
+  ttfb: number;
+  download: number;
+  total: number;
+  reused: boolean;
+  bytes: number;
+}
+
+export type SidecarEvent = LogEvent | MetricEvent | PhaseEvent | TimingEvent;
 
 export function writeLine(result: CrawlResult): void {
   // Existing contract: raw CrawlResult (no `type` field) — Rust routes to crawl-result.
