@@ -153,26 +153,6 @@ export function useDatabase() {
     }
   }
 
-  // Latest crawl that has rows AND wasn't marked complete. Used at boot /
-  // HMR to rehydrate state — the stopped flag, pinned snapshot, and
-  // currentSessionId would otherwise be lost when the useCrawl module
-  // re-executes. Returns null if there's nothing to resume.
-  async function getLatestIncompleteSession(): Promise<CrawlSession | null> {
-    await flushPendingInserts();
-    const d = await getDb();
-    const rows = await d.select<CrawlSession[]>(
-      `SELECT s.id, s.start_url, s.started_at, s.completed_at,
-              COUNT(r.id) as result_count
-       FROM crawl_sessions s
-       LEFT JOIN crawl_results r ON r.session_id = s.id
-       WHERE s.completed_at IS NULL
-       GROUP BY s.id
-       HAVING result_count > 0
-       ORDER BY s.started_at DESC
-       LIMIT 1`
-    );
-    return rows.length > 0 ? rows[0] : null;
-  }
 
   // Reads the pinned settings snapshot for a session. Old rows persisted only
   // the CrawlConfig slice (urls, customHeaders, scraperRules, recrawlQueue);
@@ -243,7 +223,6 @@ export function useDatabase() {
     listSessions,
     deleteSession,
     clearAllSessions,
-    getLatestIncompleteSession,
     loadSessionConfig,
     updateSessionConfig,
     getSessionStatus,

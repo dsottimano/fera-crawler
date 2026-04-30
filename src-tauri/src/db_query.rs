@@ -107,6 +107,35 @@ pub struct ResultsFilter {
     /// Images tab. (resourceType=HTML covers the first half; this flag
     /// adds the og_image filter.)
     pub has_og_image: Option<bool>,
+    /// False → only HTML rows with empty og:image. Inverse of has_og_image
+    /// for the "Missing og:image" filter on the Images tab.
+    pub missing_og_image: Option<bool>,
+    /// Field whose value is empty/null. One of: title, h1, h2,
+    /// meta_description, canonical. Other values silently ignored.
+    pub missing_field: Option<String>,
+    /// Length filters on common content fields. min is inclusive, max is
+    /// exclusive. Length is computed via LENGTH() (byte length) — fine
+    /// for the rough "short/long" categorization SEOs use.
+    pub title_length_min: Option<i64>,
+    pub title_length_max: Option<i64>,
+    pub meta_desc_length_min: Option<i64>,
+    pub meta_desc_length_max: Option<i64>,
+    pub h1_length_min: Option<i64>,
+    pub h1_length_max: Option<i64>,
+    /// Word count range for the Content tab.
+    pub word_count_min: Option<i64>,
+    pub word_count_max: Option<i64>,
+    /// Response time range (milliseconds) for the Response Times tab.
+    pub response_time_min: Option<i64>,
+    pub response_time_max: Option<i64>,
+    /// Field whose value appears in more than one row in this session.
+    /// One of: title, meta_description.
+    pub duplicate_field: Option<String>,
+    /// Canonical relationship: "missing" (empty), "self" (canonical = url),
+    /// "cross" (canonical present and != url).
+    pub canonical_state: Option<String>,
+    /// URL shape pattern: "long" (>100 chars), "params" (contains ?).
+    pub url_pattern: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -229,6 +258,97 @@ fn build_where(
     }
     if let Some(true) = filter.has_og_image {
         out_clauses.push("og_image IS NOT NULL AND og_image != ''".to_string());
+    }
+    if let Some(true) = filter.missing_og_image {
+        out_clauses.push("(og_image IS NULL OR og_image = '')".to_string());
+    }
+    if let Some(field) = &filter.missing_field {
+        let col = match field.as_str() {
+            "title" => Some("title"),
+            "h1" => Some("h1"),
+            "h2" => Some("h2"),
+            "meta_description" => Some("meta_description"),
+            "canonical" => Some("canonical"),
+            _ => None,
+        };
+        if let Some(c) = col {
+            out_clauses.push(format!("({} IS NULL OR {} = '')", c, c));
+        }
+    }
+    if let Some(min) = filter.title_length_min {
+        out_clauses.push("LENGTH(COALESCE(title, '')) >= ?".to_string());
+        out_binds.push(Value::Number(min.into()));
+    }
+    if let Some(max) = filter.title_length_max {
+        out_clauses.push("LENGTH(COALESCE(title, '')) < ?".to_string());
+        out_binds.push(Value::Number(max.into()));
+    }
+    if let Some(min) = filter.meta_desc_length_min {
+        out_clauses.push("LENGTH(COALESCE(meta_description, '')) >= ?".to_string());
+        out_binds.push(Value::Number(min.into()));
+    }
+    if let Some(max) = filter.meta_desc_length_max {
+        out_clauses.push("LENGTH(COALESCE(meta_description, '')) < ?".to_string());
+        out_binds.push(Value::Number(max.into()));
+    }
+    if let Some(min) = filter.h1_length_min {
+        out_clauses.push("LENGTH(COALESCE(h1, '')) >= ?".to_string());
+        out_binds.push(Value::Number(min.into()));
+    }
+    if let Some(max) = filter.h1_length_max {
+        out_clauses.push("LENGTH(COALESCE(h1, '')) < ?".to_string());
+        out_binds.push(Value::Number(max.into()));
+    }
+    if let Some(min) = filter.word_count_min {
+        out_clauses.push("word_count >= ?".to_string());
+        out_binds.push(Value::Number(min.into()));
+    }
+    if let Some(max) = filter.word_count_max {
+        out_clauses.push("word_count < ?".to_string());
+        out_binds.push(Value::Number(max.into()));
+    }
+    if let Some(min) = filter.response_time_min {
+        out_clauses.push("response_time >= ?".to_string());
+        out_binds.push(Value::Number(min.into()));
+    }
+    if let Some(max) = filter.response_time_max {
+        out_clauses.push("response_time < ?".to_string());
+        out_binds.push(Value::Number(max.into()));
+    }
+    if let Some(field) = &filter.duplicate_field {
+        // Sub-select over the same session to find values that appear
+        // more than once. Caller MUST also constrain by session_id (the
+        // outer query does); the subquery here scopes to the same set.
+        let col = match field.as_str() {
+            "title" => Some("title"),
+            "meta_description" => Some("meta_description"),
+            "h1" => Some("h1"),
+            _ => None,
+        };
+        if let Some(c) = col {
+            out_clauses.push(format!(
+                "{c} != '' AND {c} IS NOT NULL AND {c} IN \
+                 (SELECT {c} FROM crawl_results r2 WHERE r2.session_id = crawl_results.session_id \
+                    AND {c} != '' AND {c} IS NOT NULL GROUP BY {c} HAVING COUNT(*) > 1)",
+            ));
+        }
+    }
+    if let Some(state) = &filter.canonical_state {
+        match state.as_str() {
+            "missing" => out_clauses.push("(canonical IS NULL OR canonical = '')".to_string()),
+            "self" => out_clauses.push("canonical = url".to_string()),
+            "cross" => out_clauses.push(
+                "canonical IS NOT NULL AND canonical != '' AND canonical != url".to_string(),
+            ),
+            _ => {}
+        }
+    }
+    if let Some(pat) = &filter.url_pattern {
+        match pat.as_str() {
+            "long" => out_clauses.push("LENGTH(url) > 100".to_string()),
+            "params" => out_clauses.push("url LIKE '%?%'".to_string()),
+            _ => {}
+        }
     }
 }
 

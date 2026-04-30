@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { TAB_FILTERS, type FilterOption } from "../utils/gridFilter";
 
 const props = defineProps<{
   totalResults: number;
@@ -11,14 +12,16 @@ const props = defineProps<{
 const emit = defineEmits<{ search: [query: string]; export: []; filterType: [type: string]; selectAll: [] }>();
 
 const searchQuery = ref("");
-const filterType = ref("All");
+// Holds the FilterOption.value (a tagged token like "missing:title"), not
+// the human-readable label. The dropdown maps label↔value; everything else
+// (gridFilter parsing, emit) sees only the token.
+const filterValue = ref("all");
 const distinctStatuses = ref<number[]>([]);
 
-const defaultOptions = ["All", "HTML", "JavaScript", "CSS", "Images", "PDF", "Other"];
+const FALLBACK_OPTIONS: FilterOption[] = [{ label: "All", value: "all" }];
 
-// Phase-6: distinct status codes come from a Rust aggregate, not from
-// scanning an in-memory array. Refreshes on session change AND on tab
-// change (in case the user switches to Response Codes mid-crawl).
+// Distinct status codes for the Response Codes tab come from a Rust
+// aggregate. Refreshes on session change AND on tab change.
 async function refreshDistinctStatuses() {
   if (props.sessionId == null) {
     distinctStatuses.value = [];
@@ -32,15 +35,23 @@ async function refreshDistinctStatuses() {
   }
 }
 
-const filterOptions = computed(() => {
-  if (props.activeTab === "Response Codes" && distinctStatuses.value.length) {
-    return ["All", ...distinctStatuses.value.map(String)];
+// Compose the dropdown options for the active tab. Response Codes is
+// special-cased: each distinct status code becomes its own option. Every
+// other tab uses the static TAB_FILTERS table.
+const filterOptions = computed<FilterOption[]>(() => {
+  if (props.activeTab === "Response Codes") {
+    return [
+      { label: "All", value: "all" },
+      ...distinctStatuses.value.map((s) => ({ label: String(s), value: String(s) })),
+    ];
   }
-  return defaultOptions;
+  return TAB_FILTERS[props.activeTab ?? ""] ?? FALLBACK_OPTIONS;
 });
 
 watch(() => props.activeTab, (tab) => {
-  filterType.value = "All";
+  // Reset selection on tab change. The "All" sentinel maps to value "all"
+  // which gridFilter treats as no-op.
+  filterValue.value = "all";
   emit("filterType", "All");
   if (tab === "Response Codes") void refreshDistinctStatuses();
 });
@@ -52,14 +63,19 @@ onMounted(() => {
 });
 
 function onSearch() { emit("search", searchQuery.value); }
-function onFilterChange() { emit("filterType", filterType.value); }
+function onFilterChange() {
+  // The "All" sentinel keeps the legacy "All" string for downstream callers
+  // that haven't migrated to tagged tokens. Anything else emits the tagged
+  // value (gridFilter parses it).
+  emit("filterType", filterValue.value === "all" ? "All" : filterValue.value);
+}
 </script>
 
 <template>
   <div class="filter-bar">
     <div class="filter-left">
-      <select v-model="filterType" class="filter-select" @change="onFilterChange">
-        <option v-for="opt in filterOptions" :key="opt" :value="opt">{{ opt }}</option>
+      <select v-model="filterValue" class="filter-select" @change="onFilterChange">
+        <option v-for="opt in filterOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
       </select>
       <button class="toolbar-btn" @click="emit('export')">EXPORT</button>
       <button class="toolbar-btn" @click="emit('selectAll')">SELECT ALL VISIBLE</button>

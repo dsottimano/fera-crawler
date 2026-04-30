@@ -436,7 +436,7 @@ async function handleMenuAction(menu: string, item: string) {
     await exportFilteredCsv(currentSessionId.value, f[item] ?? (() => true), item.toLowerCase().replace(/\s+/g, "-"));
   }
   if (menu === "Reports") {
-    const m: Record<string, string> = { "Crawl Overview": "overview", "Redirect Chains": "redirects", "Duplicate Content": "duplicates", "Orphan Pages": "orphans" };
+    const m: Record<string, string> = { "Crawl Overview": "overview", "Redirect Chains": "redirects", "Duplicate Content": "duplicates", "Orphan Pages": "orphans", "Internal PageRank": "pagerank" };
     activeReport.value = m[item] ?? null;
   }
   if (menu === "Help") {

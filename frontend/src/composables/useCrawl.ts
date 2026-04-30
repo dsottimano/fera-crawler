@@ -49,10 +49,6 @@ function resetCrawlProgress() {
 // resume/start/stop and the sidebar all read from the same source. Cleared on
 // New Crawl so a fresh crawl falls back to the default settings.
 const pinnedSettings = ref<SettingsValues | null>(null);
-// Module-level latch: rehydrate the latest incomplete session ONCE per module
-// load. HMR re-runs this module and re-fires the rehydration; production app
-// reload does the same. The user can override by clicking Clear.
-let rehydratePromise: Promise<void> | null = null;
 let unlistenComplete: (() => void) | null = null;
 
 interface HealthSnapshot {
@@ -70,33 +66,17 @@ export function useCrawl() {
     loadSessionConfig,
     updateSessionConfig,
     getSessionStatus,
-    getLatestIncompleteSession,
   } = useDatabase();
 
   // Wire the global crawl-progress listener once. Idempotent — subsequent
   // useCrawl() callers no-op.
   void ensureProgressListener();
 
-  // Lazy first-call rehydration. Survives HMR + production reload because
-  // the source of truth is the DB row, not in-memory refs.
-  if (!rehydratePromise) {
-    rehydratePromise = (async () => {
-      try {
-        const session = await getLatestIncompleteSession();
-        if (!session) return;
-        // Don't clobber an in-flight crawl that started before rehydrate finished.
-        if (crawling.value || currentSessionId.value !== null) return;
-        await loadSession(session.id);
-      } catch (e) {
-        // Reset the latch on failure so a transient DB error at boot
-        // (busy timeout, schema migration race) doesn't permanently
-        // disable rehydration for the rest of the session — the next
-        // useCrawl() caller (or HMR cycle) will retry.
-        rehydratePromise = null;
-        console.error("Boot rehydration failed:", e);
-      }
-    })();
-  }
+  // No auto-rehydrate. Boot starts blank; the user picks a saved crawl
+  // explicitly via File → Saved Crawls if they want to resume one. Auto-
+  // loading the last incomplete session was confusing — pages and stats
+  // appeared without any URL in the input field, with no banner explaining
+  // where they came from.
 
   async function startCrawl(
     url: string,

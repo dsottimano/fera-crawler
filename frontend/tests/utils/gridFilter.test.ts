@@ -16,9 +16,12 @@ describe("buildResultsFilter", () => {
     }
   });
 
-  it("JavaScript/CSS tabs apply matching resourceType filters", () => {
-    expect(buildResultsFilter({ ...noQueue, tab: "JavaScript" }).resourceType).toBe("JavaScript");
-    expect(buildResultsFilter({ ...noQueue, tab: "CSS" }).resourceType).toBe("CSS");
+  it("FilterBar resource-type tokens slice the Internal tab", () => {
+    // CategoryTabs has no JavaScript/CSS tab — those are filter values on
+    // the Internal tab. The "type:HTML" token from TAB_FILTERS maps to
+    // resourceType in gridFilter.
+    expect(buildResultsFilter({ ...noQueue, tab: "Internal", filterType: "type:JavaScript" }).resourceType).toBe("JavaScript");
+    expect(buildResultsFilter({ ...noQueue, tab: "Internal", filterType: "type:CSS" }).resourceType).toBe("CSS");
   });
 
   it("Images tab requires HTML rows that declared an og:image", () => {
@@ -99,6 +102,77 @@ describe("buildResultsFilter", () => {
     const f = buildResultsFilter({ ...noQueue, tab: "Internal", filterType: "4xx" });
     expect(f.statusMin).toBe(400);
     expect(f.statusMax).toBe(500);
+  });
+
+  // Tab-specific filter tokens (added when filters became per-tab — H2 →
+  // "Missing H2" instead of the old "filter by MIME type" non-sense).
+  describe("tab-specific tokens", () => {
+    it("missing:<field> sets missingField for SEO-content tabs", () => {
+      const cases = [
+        ["Page Titles",      "missing:title",            "title"],
+        ["Meta Description", "missing:meta_description", "meta_description"],
+        ["H1",               "missing:h1",               "h1"],
+        ["H2",               "missing:h2",               "h2"],
+        ["Canonicals",       "canonical:missing",        undefined],
+      ] as const;
+      for (const [tab, token, expected] of cases) {
+        const f = buildResultsFilter({ ...noQueue, tab, filterType: token });
+        if (expected) expect(f.missingField).toBe(expected);
+      }
+    });
+
+    it("title_len:lt:30 → titleLengthMax=30; title_len:gt:60 → titleLengthMin=61", () => {
+      const f1 = buildResultsFilter({ ...noQueue, tab: "Page Titles", filterType: "title_len:lt:30" });
+      expect(f1.titleLengthMax).toBe(30);
+      expect(f1.titleLengthMin).toBeUndefined();
+      const f2 = buildResultsFilter({ ...noQueue, tab: "Page Titles", filterType: "title_len:gt:60" });
+      expect(f2.titleLengthMin).toBe(61);
+      expect(f2.titleLengthMax).toBeUndefined();
+    });
+
+    it("word_count:lt:200 → wordCountMax=200", () => {
+      const f = buildResultsFilter({ ...noQueue, tab: "Content", filterType: "word_count:lt:200" });
+      expect(f.wordCountMax).toBe(200);
+    });
+
+    it("rt:gt:3000 → responseTimeMin=3001", () => {
+      const f = buildResultsFilter({ ...noQueue, tab: "Response Times", filterType: "rt:gt:3000" });
+      expect(f.responseTimeMin).toBe(3001);
+    });
+
+    it("duplicate:title → duplicateField='title'", () => {
+      const f = buildResultsFilter({ ...noQueue, tab: "Page Titles", filterType: "duplicate:title" });
+      expect(f.duplicateField).toBe("title");
+    });
+
+    it("canonical:self → canonicalState='self'", () => {
+      const f = buildResultsFilter({ ...noQueue, tab: "Canonicals", filterType: "canonical:self" });
+      expect(f.canonicalState).toBe("self");
+    });
+
+    it("idx:noindex → indexability='noindex'", () => {
+      const f = buildResultsFilter({ ...noQueue, tab: "Directives", filterType: "idx:noindex" });
+      expect(f.indexability).toBe("noindex");
+    });
+
+    it("url:long → urlPattern='long'; url:params → urlPattern='params'", () => {
+      expect(buildResultsFilter({ ...noQueue, tab: "URL", filterType: "url:long" }).urlPattern).toBe("long");
+      expect(buildResultsFilter({ ...noQueue, tab: "URL", filterType: "url:params" }).urlPattern).toBe("params");
+    });
+
+    it("Images tab default has og:image; missing_og_image inverts to missingOgImage and clears hasOgImage", () => {
+      const def = buildResultsFilter({ ...noQueue, tab: "Images" });
+      expect(def.hasOgImage).toBe(true);
+
+      const inv = buildResultsFilter({ ...noQueue, tab: "Images", filterType: "missing_og_image" });
+      expect(inv.missingOgImage).toBe(true);
+      expect(inv.hasOgImage).toBeUndefined();
+    });
+
+    it("type:HTML on Internal sets resourceType (replaces old bare-string filter)", () => {
+      const f = buildResultsFilter({ ...noQueue, tab: "Internal", filterType: "type:HTML" });
+      expect(f.resourceType).toBe("HTML");
+    });
   });
 });
 

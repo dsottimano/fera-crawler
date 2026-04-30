@@ -24,7 +24,7 @@ onMounted(async () => {
 });
 
 const title = computed(() => {
-  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages" };
+  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank" };
   return titles[props.report] ?? "Report";
 });
 
@@ -53,6 +53,85 @@ const duplicateTitles = computed(() => {
   return Object.entries(m).filter(([, u]) => u.length > 1);
 });
 const orphanPages = computed(() => rows.value.filter((r) => r.internalLinks === 0 && r.resourceType === "HTML"));
+
+// Internal PageRank — runs over the existing outlinks data, no schema change.
+// Universe = the set of crawled URLs in this session. Edges = each row's
+// outlinks ∩ universe. Standard iterative PageRank, damping 0.85, until
+// the max per-node delta drops below 1e-6 or 100 iterations elapse.
+// Cost on 32k URLs × ~50 outlinks each: ~1-2s in pure JS, fine for a
+// one-shot report. Cached by the computed dep on `rows`.
+interface RankRow { url: string; score: number; indegree: number; outdegree: number; }
+const pageRankResults = computed<RankRow[]>(() => {
+  const rs = rows.value;
+  if (!rs.length) return [];
+
+  // Universe = crawled URLs, indexed for O(1) edge filter.
+  const indexOf = new Map<string, number>();
+  for (let i = 0; i < rs.length; i++) indexOf.set(rs[i].url, i);
+  const N = rs.length;
+
+  // Adjacency: for each node, its internal outlink indices (deduped).
+  // Drop self-loops (url → url) — they don't carry SEO equity.
+  const out: number[][] = new Array(N);
+  const inDeg = new Int32Array(N);
+  for (let i = 0; i < N; i++) {
+    const ol = rs[i].outlinks ?? [];
+    const seen = new Set<number>();
+    for (const link of ol) {
+      const j = indexOf.get(link);
+      if (j === undefined || j === i) continue;
+      if (seen.has(j)) continue;
+      seen.add(j);
+      inDeg[j]++;
+    }
+    out[i] = [...seen];
+  }
+
+  // Standard iterative PageRank.
+  const d = 0.85;
+  const base = (1 - d) / N;
+  let pr = new Float64Array(N).fill(1 / N);
+  let next = new Float64Array(N);
+
+  for (let iter = 0; iter < 100; iter++) {
+    next.fill(base);
+    // Sink-page redistribution: pages with no outlinks distribute their
+    // rank uniformly across the graph (otherwise rank "leaks" to dead-ends).
+    let sinkRank = 0;
+    for (let i = 0; i < N; i++) if (out[i].length === 0) sinkRank += pr[i];
+    const sinkContribution = (d * sinkRank) / N;
+
+    for (let i = 0; i < N; i++) {
+      next[i] += sinkContribution;
+      const links = out[i];
+      if (links.length === 0) continue;
+      const share = (d * pr[i]) / links.length;
+      for (const j of links) next[j] += share;
+    }
+
+    let maxDelta = 0;
+    for (let i = 0; i < N; i++) {
+      const delta = Math.abs(next[i] - pr[i]);
+      if (delta > maxDelta) maxDelta = delta;
+    }
+    [pr, next] = [next, pr];
+    if (maxDelta < 1e-6) break;
+  }
+
+  const result: RankRow[] = new Array(N);
+  for (let i = 0; i < N; i++) {
+    result[i] = {
+      url: rs[i].url,
+      score: pr[i],
+      indegree: inDeg[i],
+      outdegree: out[i].length,
+    };
+  }
+  result.sort((a, b) => b.score - a.score);
+  return result;
+});
+
+const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
 </script>
 
 <template>
@@ -100,6 +179,32 @@ const orphanPages = computed(() => rows.value.filter((r) => r.internalLinks === 
           <div v-if="!orphanPages.length" class="empty">No orphan pages detected.</div>
           <table v-else class="report-table"><thead><tr><th>URL</th><th>Title</th></tr></thead><tbody><tr v-for="r in orphanPages" :key="r.url"><td class="url-cell">{{ r.url }}</td><td>{{ r.title }}</td></tr></tbody></table>
         </template>
+        <template v-else-if="report === 'pagerank'">
+          <div v-if="!pageRankTop.length" class="empty">Not enough data — need crawled URLs with internal outlinks.</div>
+          <template v-else>
+            <div class="pr-note">Internal PageRank computed over {{ pageRankResults.length }} URLs and their outlinks within this crawl. Damping 0.85, converged via iteration. Top 100 shown.</div>
+            <table class="report-table">
+              <thead>
+                <tr>
+                  <th style="width: 38px;">#</th>
+                  <th>URL</th>
+                  <th style="width: 80px; text-align: right;">Score</th>
+                  <th style="width: 70px; text-align: right;">In</th>
+                  <th style="width: 70px; text-align: right;">Out</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(r, i) in pageRankTop" :key="r.url">
+                  <td class="rank-cell">{{ i + 1 }}</td>
+                  <td class="url-cell">{{ r.url }}</td>
+                  <td class="num-cell">{{ r.score.toFixed(5) }}</td>
+                  <td class="num-cell num-cell--in">{{ r.indegree }}</td>
+                  <td class="num-cell num-cell--out">{{ r.outdegree }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </template>
+        </template>
       </div>
     </div>
   </div>
@@ -137,4 +242,9 @@ h4 { margin: 14px 0 8px; font-size: 9px; color: rgba(255,255,255,0.25); letter-s
 .dup-title { color: #dcdcaa !important; margin: 0 0 4px !important; font-size: 11px !important; letter-spacing: 0 !important; text-transform: none !important; }
 .dup-url { font-size: 11px; color: rgba(255,255,255,0.25); padding: 1px 0; list-style: none; font-family: 'Ubuntu Mono', monospace; }
 .dup-group ul { margin: 0; padding: 0 0 0 12px; }
+.pr-note { font-size: 10px; color: rgba(255,255,255,0.45); margin-bottom: 12px; line-height: 1.5; }
+.rank-cell { color: rgba(255,255,255,0.45); font-variant-numeric: tabular-nums; text-align: right; padding-right: 8px; }
+.num-cell { font-variant-numeric: tabular-nums; text-align: right; font-family: 'Ubuntu Mono', monospace; }
+.num-cell--in { color: #4ec9b0; }
+.num-cell--out { color: rgba(255,255,255,0.4); }
 </style>

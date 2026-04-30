@@ -11,7 +11,7 @@ const menus: Record<string, string[]> = {
   File: ["New Crawl", "-", "Saved Crawls...", "-", "Open...", "Save As...", "-", "Export CSV", "Export Excel", "-", "Exit"],
   Configuration: ["Settings", "Scraper"],
   Export: ["Internal HTML", "All Links", "Response Codes", "Page Titles", "Redirects"],
-  Reports: ["Crawl Overview", "Redirect Chains", "Duplicate Content", "Orphan Pages"],
+  Reports: ["Crawl Overview", "Redirect Chains", "Duplicate Content", "Orphan Pages", "Internal PageRank"],
   Help: ["Documentation", "About Fera"],
 };
 
