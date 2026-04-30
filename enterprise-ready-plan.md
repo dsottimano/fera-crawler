@@ -214,8 +214,6 @@ If #3 ships, this is largely subsumed. If not: emit a directory of CSVs
 
 ## What to consider dropping / de-emphasizing
 
-- **`VoiceRecorderModal.vue`** — unclear what an SEO does with this. Audit
-  before next release; remove if dead.
 - **15 category tabs** is too many. Internal / External / Issues / Recrawl +
   search covers 90% of usage. Tabs are mostly status-code or extension
   filters that FilterBar already handles.

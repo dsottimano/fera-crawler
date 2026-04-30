@@ -19,12 +19,9 @@ import CrawlManager from "./components/CrawlManager.vue";
 import BlockAlert from "./components/BlockAlert.vue";
 import SettingsPanel from "./components/settings/SettingsPanel.vue";
 import DebugPanel from "./components/debug/DebugPanel.vue";
-import VoiceRecorderModal from "./components/VoiceRecorderModal.vue";
 import { useDebug } from "./composables/useDebug";
 import { useSettings } from "./composables/useSettings";
 import { useCrawl } from "./composables/useCrawl";
-import { preloadVoiceModel } from "./composables/useVoiceInput";
-import { useVoiceFlow } from "./composables/useVoiceFlow";
 import { useConfig } from "./composables/useConfig";
 import { useFileOps } from "./composables/useFileOps";
 import { useBrowser } from "./composables/useBrowser";
@@ -35,31 +32,6 @@ import type { CrawlResult } from "./types/crawl";
 const url = ref("");
 const { config } = useConfig();
 const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
-const voiceFlow = useVoiceFlow();
-const voiceModalOpen = ref(false);
-
-// Auto-close once the turn fully completes (idle after speaking).
-watch(() => voiceFlow.state.value, (s, prev) => {
-  if (voiceModalOpen.value && s === "idle" && prev && prev !== "idle") {
-    voiceModalOpen.value = false;
-  }
-});
-
-async function handleVoicePress() {
-  if (voiceFlow.state.value === "error") {
-    // Press during error state = dismiss + retry
-    voiceModalOpen.value = false;
-    await voiceFlow.press();
-    return;
-  }
-  if (!voiceModalOpen.value) voiceModalOpen.value = true;
-  await voiceFlow.press();
-}
-
-async function handleVoiceCancel() {
-  await voiceFlow.cancel();
-  voiceModalOpen.value = false;
-}
 const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
 const { profileData } = useBrowser();
 const { start: startDebugListeners } = useDebug();
@@ -90,10 +62,6 @@ onMounted(async () => {
     console.error("Settings init error:", e);
   }
   window.addEventListener("keydown", onGlobalKeydown);
-
-  // Spin up the STT worker + start downloading the model in the background
-  // so the first "/" press doesn't block on a cold load.
-  preloadVoiceModel();
 
   try {
     browserInstallUnlisteners.push(
@@ -323,21 +291,6 @@ function onGlobalKeydown(e: KeyboardEvent) {
   if (mod && e.shiftKey && (e.key === "D" || e.key === "d")) {
     e.preventDefault();
     screen.value = "DEBUG";
-    return;
-  }
-  // "/" toggles voice mode (skip when user is typing in any input/textarea).
-  if (e.key === "/" && !mod && !e.altKey) {
-    const target = e.target as HTMLElement | null;
-    const tag = target?.tagName;
-    if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
-    e.preventDefault();
-    handleVoicePress();
-    return;
-  }
-  // Esc cancels recording / dismisses error modal.
-  if (e.key === "Escape" && voiceModalOpen.value) {
-    e.preventDefault();
-    handleVoiceCancel();
     return;
   }
 }
@@ -636,14 +589,6 @@ async function handleMenuAction(menu: string, item: string) {
     />
     <ProfileViewer v-if="showProfile && profileData" :data="profileData" @close="showProfile = false" />
     <SettingsPanel v-if="showSettingsPanel" @close="showSettingsPanel = false" />
-    <VoiceRecorderModal
-      :show="voiceModalOpen"
-      :state="voiceFlow.state.value"
-      :error-text="voiceFlow.errorText.value"
-      :user-transcript="voiceFlow.userTranscript.value"
-      :claude-text="voiceFlow.claudeText.value"
-    />
-
     <!-- Clear confirm dialog -->
     <div v-if="showClearConfirm" class="overlay" @click.self="showClearConfirm = false">
       <div class="confirm-modal">

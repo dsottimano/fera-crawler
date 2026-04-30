@@ -12,7 +12,6 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.2.0",
     "@tauri-apps/api": "^2.2.0",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-fs": "^2.2.0",
