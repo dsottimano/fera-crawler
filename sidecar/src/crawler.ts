@@ -12,6 +12,9 @@ import { chromium, type BrowserContext, type Page } from "patchright";
 // (manual byte-header parse) — sharp was strictly the compress-and-write step.
 import { writeLine, writeAnyEvent } from "./pipeline.js";
 import { BlockDetector, hostOf } from "./blockDetector.js";
+import { PerHostStates } from "./perHostState.js";
+import { AdaptiveController, type ControllerEvent } from "./adaptiveController.js";
+import { classifyResponse } from "./responseClassifier.js";
 import {
   log,
   phase,
@@ -1217,6 +1220,14 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     },
   });
 
+  const perHostStates = new PerHostStates();
+  const adaptiveController = new AdaptiveController({
+    rateLimiter,
+    states: perHostStates,
+    delayMinMs: rateLimiter.delayMinMs,
+    onEvent: (e: ControllerEvent) => writeAnyEvent(e),
+  });
+
   function park(url: string): void {
     const h = hostOf(url);
     let bucket = parkedByHost.get(h);
@@ -1398,24 +1409,28 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     writeLine(result);
     const h = hostOf(result.url);
     if (!h) return;
+
+    const baseline = perHostStates.baseline(h);
+    const snap = {
+      url: result.url,
+      status: result.status,
+      title: result.title ?? "",
+      bodyBytes: result.size ?? 0,
+      internalLinks: result.internalLinks ?? 0,
+    };
+    const cls = classifyResponse(snap, h, detector, baseline);
+
+    if (cls === "ok") perHostStates.recordOk(h, snap.bodyBytes, snap.internalLinks);
+    perHostStates.recordClassification(h, cls);
+    adaptiveController.tick(h, cls, snap);
+
     const trip = detector.record({ url: result.url, status: result.status, title: result.title }, h);
     if (trip) {
       writeAnyEvent(trip);
-      // Adaptive slowdown: each block trip doubles this host's per-host
-      // delay multiplier (capped at 8x). When the auto-cooldown fires
-      // and parked URLs return to the queue, they crawl at the bumped
-      // pace — so a host that tripped at 2000ms tries again at 4000ms,
-      // then 8000ms, etc. This is the user-validated "slower beats
-      // blocks" intuition; pairing it with the existing parked-cooldown
-      // gives progressive politeness without manual settings tweaks.
-      const bumped = rateLimiter.bumpDelay(h);
       log("warn", "block-detected: host paused", {
         host: trip.host,
         stats: trip.stats,
         reasons: trip.reasons,
-        adaptiveMultiplier: bumped.multiplier,
-        newDelayMinMs: bumped.newDelayMinMs,
-        newDelayMaxMs: bumped.newDelayMaxMs,
       });
     }
   }
