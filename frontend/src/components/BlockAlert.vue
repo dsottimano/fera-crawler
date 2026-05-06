@@ -387,6 +387,8 @@ onMounted(async () => {
   // Clear only when a NEW crawl starts — keep the banner visible after a
   // crawl ends so the user can see why it stopped and decide what to do.
   unlisteners.push(await listen("crawl-started", clearBlocks));
+  // CLEAR button explicitly says "wipe everything" — banner included.
+  unlisteners.push(await listen("crawl-cleared", clearBlocks));
 });
 
 onUnmounted(() => {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import MenuBar from "./components/MenuBar.vue";
 import CategoryTabs from "./components/CategoryTabs.vue";
 import FilterBar from "./components/FilterBar.vue";
@@ -322,6 +322,7 @@ async function doClear() {
   selectedResult.value = null;
   await patchSetting("inputs", "urls", []);
   await patchSetting("crawling", "mode", "spider");
+  await emit("crawl-cleared");
 }
 
 function onRowSelect(result: CrawlResult | null) {

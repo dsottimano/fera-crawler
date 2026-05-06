@@ -66,6 +66,18 @@ onMounted(async () => {
       if (reprobes.value.length > 50) reprobes.value.pop();
     }),
   );
+  unlisteners.push(
+    await listen("crawl-cleared", () => {
+      hostMap.value = new Map();
+      reprobes.value = [];
+    }),
+  );
+  unlisteners.push(
+    await listen("crawl-started", () => {
+      hostMap.value = new Map();
+      reprobes.value = [];
+    }),
+  );
 });
 
 onUnmounted(() => {
