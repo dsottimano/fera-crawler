@@ -45,6 +45,26 @@ describe("classifyResponse", () => {
     expect(r).toBe("blocked-status:503");
   });
 
+  it("returns blocked-status:5xx for HTTP 500", () => {
+    const r = classifyResponse(
+      { url: "https://h.com/p", status: 500, title: "", bodyBytes: 0, internalLinks: 0 },
+      "h.com",
+      detector,
+      null,
+    );
+    expect(r).toBe("blocked-status:5xx");
+  });
+
+  it("returns blocked-status:5xx for HTTP 502", () => {
+    const r = classifyResponse(
+      { url: "https://h.com/p", status: 502, title: "", bodyBytes: 0, internalLinks: 0 },
+      "h.com",
+      detector,
+      null,
+    );
+    expect(r).toBe("blocked-status:5xx");
+  });
+
   it("returns blocked-content for 200 with challenge title", () => {
     const r = classifyResponse(
       { url: "https://h.com/p", status: 200, title: "Just a moment...", bodyBytes: 1000, internalLinks: 0 },

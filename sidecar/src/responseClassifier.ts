@@ -5,6 +5,7 @@ export type Classification =
   | "blocked-status:403"
   | "blocked-status:429"
   | "blocked-status:503"
+  | "blocked-status:5xx"
   | "blocked-content"
   | "cloaked"
   | "other";
@@ -36,7 +37,7 @@ export function classifyResponse(
 
   const verdict = detector.classify({ url: resp.url, status: resp.status, title: resp.title }, host);
   if (verdict.blocked) {
-    if (verdict.reason === "status_5xx") return "blocked-status:503";
+    if (verdict.reason === "status_5xx") return "blocked-status:5xx";
     return "blocked-content";
   }
 
