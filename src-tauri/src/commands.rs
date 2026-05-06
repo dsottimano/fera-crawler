@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::CommandChild;
@@ -13,6 +13,18 @@ use crate::db_writer::DbWriter;
 // or ~10 seconds of a 20 RPS crawl — long enough to feel "live", short
 // enough that the snapshot fits in one IPC payload trivially.
 const PROGRESS_HISTORY: usize = 200;
+
+// Monotonic cooldown for auto-triggered re-probes. Wall clock not used
+// because daylight savings / NTP adjustments would corrupt the gate.
+// Belt-and-suspenders alongside the sidecar's own cooldown.
+static AUTO_REPROBE_LAST_MONO_MS: AtomicI64 = AtomicI64::new(i64::MIN);
+const AUTO_REPROBE_COOLDOWN_MS: i64 = 5 * 60 * 1000;
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+fn mono_now_ms() -> i64 {
+    let start = PROCESS_START.get_or_init(Instant::now);
+    start.elapsed().as_millis() as i64
+}
 
 pub struct CrawlChild {
     pub child: Mutex<Option<CommandChild>>,
@@ -647,6 +659,40 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                     }
                 }
                 return;
+            }
+            // Auto-trigger probe matrix on re-probe-requested. The sidecar
+            // has its own cooldown; this is a belt-and-suspenders gate at
+            // the Rust level. Always falls through to emit the event so
+            // the HEALTH card sees it regardless of cooldown / probe state.
+            if ev_name == "re-probe-requested" {
+                let now = mono_now_ms();
+                let last = AUTO_REPROBE_LAST_MONO_MS.load(Ordering::SeqCst);
+                let cooldown_ok = last == i64::MIN || now - last >= AUTO_REPROBE_COOLDOWN_MS;
+
+                let probe_idle = app
+                    .try_state::<ProbeState>()
+                    .map(|s| !s.running.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+
+                if cooldown_ok && probe_idle {
+                    if let Some(sample_url) = val.get("sampleUrl").and_then(|v| v.as_str()) {
+                        AUTO_REPROBE_LAST_MONO_MS.store(now, Ordering::SeqCst);
+                        let app_clone = app.clone();
+                        let url = sample_url.to_string();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) = run_probe_matrix(app_clone.clone(), url).await {
+                                let _ = app_clone.emit(
+                                    "sidecar-log",
+                                    serde_json::json!({
+                                        "ts": now_ms(),
+                                        "level": "error",
+                                        "msg": format!("auto re-probe failed: {e}"),
+                                    }),
+                                );
+                            }
+                        });
+                    }
+                }
             }
             let _ = app.emit(ev_name, val);
         }
