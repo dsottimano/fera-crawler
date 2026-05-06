@@ -67,7 +67,7 @@ In-memory map keyed by host. LRU-evicted at 1000 hosts (evicted host re-baseline
 
 Per host:
 - **Cloak baseline:** running median of `bodyBytes` and `internalLinks` over the first 20 `ok` responses. Until 20 samples exist on this host, cloak detection is disabled.
-- **Cloak rule:** flag a 200 as `cloaked` if `bodyBytes < 0.2 × median_bodyBytes` AND `internalLinks < 0.2 × median_internalLinks`. Both conditions required — guards against legitimately thin pages.
+- **Cloak rule:** flag a 200 as `cloaked` if `bodyBytes < 0.05 × median_bodyBytes` AND `internalLinks < 0.05 × median_internalLinks`. Both conditions required — guards against legitimately thin pages.
 - **Rolling window:** last 100 classified responses (deque). Used only for the block-rate percentage shown on HEALTH and the `>20%` ceiling-saturated re-probe trigger. Not used for AIMD step-down.
 - **Clean-streak counter:** integer count of consecutive non-block responses. Increments on `ok`, resets to 0 on any block class.
 - **Clean-streak start** (monotonic clock, set when counter resets to 0 after a block, captures the first `ok` after a block).
