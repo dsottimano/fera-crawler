@@ -115,4 +115,26 @@ describe("AdaptiveController", () => {
     feed(states, ctrl, "h.com", "ok", { url: "https://h.com/", bodyBytes: 50000, internalLinks: 80 });
     expect(events.filter((e) => e.type === "controller-state").length).toBe(2);
   });
+
+  it("does not trigger 403-burst re-probe when non-403 resets the consec counter mid-burst", () => {
+    const { states, ctrl, events } = setup();
+    for (let i = 0; i < 5; i++) {
+      feed(states, ctrl, "h.com", "blocked-status:403", { url: "https://h.com/p" + i, bodyBytes: 0, internalLinks: 0 });
+    }
+    feed(states, ctrl, "h.com", "ok", { url: "https://h.com/ok", bodyBytes: 50000, internalLinks: 80 });
+    for (let i = 0; i < 5; i++) {
+      feed(states, ctrl, "h.com", "blocked-status:403", { url: "https://h.com/q" + i, bodyBytes: 0, internalLinks: 0 });
+    }
+    expect(events.filter((e) => e.type === "re-probe-requested").length).toBe(0);
+  });
+
+  it("does not trigger 403-burst when first 403 was >60s ago", () => {
+    const { states, ctrl, events } = setup();
+    feed(states, ctrl, "h.com", "blocked-status:403", { url: "https://h.com/first", bodyBytes: 0, internalLinks: 0 });
+    vi.advanceTimersByTime(61_000);
+    for (let i = 0; i < 9; i++) {
+      feed(states, ctrl, "h.com", "blocked-status:403", { url: "https://h.com/p" + i, bodyBytes: 0, internalLinks: 0 });
+    }
+    expect(events.filter((e) => e.type === "re-probe-requested").length).toBe(0);
+  });
 });
