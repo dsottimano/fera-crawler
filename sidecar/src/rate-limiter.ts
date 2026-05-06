@@ -115,6 +115,15 @@ export class PerHostRateLimiter {
     };
   }
 
+  setMultiplier(host: string, mult: number): void {
+    const state = this.getState(host);
+    state.delayMultiplier = Math.max(0.05, Math.min(50, mult));
+  }
+
+  getMultiplier(host: string): number {
+    return this.states.get(host)?.delayMultiplier ?? 1;
+  }
+
   /**
    * Wait until it's OK to start a request against `host`. Callers MUST
    * call `release(host)` after their request completes, regardless of

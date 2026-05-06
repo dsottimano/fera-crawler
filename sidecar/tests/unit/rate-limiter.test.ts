@@ -116,6 +116,33 @@ describe("PerHostRateLimiter", () => {
     const fresh = rl.bumpDelay("clean.example.com");
     expect(fresh.multiplier).toBe(2);
   });
+
+  it("setMultiplier sets exact value, getMultiplier returns it", () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 1000, maxConcurrency: 1 });
+    expect(rl.getMultiplier("h.com")).toBe(1);
+    rl.setMultiplier("h.com", 1.6);
+    expect(rl.getMultiplier("h.com")).toBeCloseTo(1.6, 5);
+  });
+
+  it("setMultiplier clamps to [0.05, 50] to avoid pathological values", () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 1000, maxConcurrency: 1 });
+    rl.setMultiplier("h.com", 0);
+    expect(rl.getMultiplier("h.com")).toBe(0.05);
+    rl.setMultiplier("h.com", 999);
+    expect(rl.getMultiplier("h.com")).toBe(50);
+  });
+
+  it("acquire respects setMultiplier value", async () => {
+    const rl = new PerHostRateLimiter({ delayMinMs: 200, maxConcurrency: 1 });
+    rl.setMultiplier("h.com", 2);
+    const t0 = Date.now();
+    await rl.acquire("h.com");
+    rl.release("h.com");
+    await rl.acquire("h.com");
+    rl.release("h.com");
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeGreaterThanOrEqual(380); // 200 * 2 = 400ms gap
+  });
 });
 
 describe("parseRetryAfter", () => {
