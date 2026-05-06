@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useCrawl } from "../composables/useCrawl";
 import { useDebug } from "../composables/useDebug";
+import AdaptivePacingCard from "./AdaptivePacingCard.vue";
 
 // Phase 5: top-level Health view. Cards summarize the crawl in
 // SQL-aggregate terms (per the plan: "every card is one SQL aggregate
@@ -548,6 +549,9 @@ function maxResponseTime(): string {
           </div>
         </div>
       </div>
+
+      <!-- Adaptive pacing — live per-host rate-limit state + re-probe events. -->
+      <AdaptivePacingCard />
     </div>
 
     <div v-if="lastError" class="health-error">aggregate_health failed: {{ lastError }}</div>
