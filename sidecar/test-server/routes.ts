@@ -115,3 +115,36 @@ routes.set("/x-robots-noindex", (_req, res) => {
   });
   res.end("<html><head><title>X-Robots Noindex</title><meta name=\"description\" content=\"Blocked by header\"></head><body><h1>X-Robots Header</h1></body></html>");
 });
+
+// Scripted response patterns for adaptive-controller tests.
+// ?script=<normal|cloaked|captcha|403|429>
+routes.set("/scripted", (req, res) => {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const script = url.searchParams.get("script") ?? "normal";
+
+  if (script === "403") {
+    res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("<html><head><title>Forbidden</title></head><body>403</body></html>");
+    return;
+  }
+  if (script === "429") {
+    res.writeHead(429, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("<html><head><title>Too Many</title></head><body>429</body></html>");
+    return;
+  }
+  if (script === "captcha") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("<html><head><title>Just a moment...</title></head><body>challenge</body></html>");
+    return;
+  }
+  if (script === "cloaked") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("<html><head><title>Page</title></head><body>x</body></html>");
+    return;
+  }
+  // normal: ~50KB body with 80 internal links
+  const links = Array.from({ length: 80 }, (_, i) => `<a href="/page${i}">p${i}</a>`).join("\n");
+  const filler = "x".repeat(50_000);
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(`<html><head><title>Page</title></head><body>${links}<div>${filler}</div></body></html>`);
+});
