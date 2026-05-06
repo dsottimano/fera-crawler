@@ -429,14 +429,14 @@ async function handleMenuAction(menu: string, item: string) {
              default-profile's URL input. -->
         <div class="telem-url-group">
           <div class="telem-url-wrap">
-            <div v-if="effectiveSettings.crawling.mode === 'list'" class="telem-list-badge" @click="showSettingsPanel = true">
+            <div v-if="effectiveSettings.crawling.mode === 'list' && effectiveSettings.inputs.urls.length > 0" class="telem-list-badge" @click="showSettingsPanel = true">
               LIST MODE — {{ effectiveSettings.inputs.urls.length.toLocaleString() }} URL{{ effectiveSettings.inputs.urls.length !== 1 ? 's' : '' }}
             </div>
             <input
               v-else
               v-model="url"
               type="url"
-              placeholder="https://example.com/  (or paste a list)"
+              :placeholder="effectiveSettings.crawling.mode === 'list' ? 'Paste a list of URLs here' : 'https://example.com/  (or paste a list)'"
               class="telem-url"
               :disabled="crawling"
               @keyup.enter="handleStart"
