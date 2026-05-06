@@ -316,10 +316,12 @@ function handleClearWithoutSave() {
   doClear();
 }
 
-function doClear() {
+async function doClear() {
   clearResults();
   url.value = "";
   selectedResult.value = null;
+  await patchSetting("inputs", "urls", []);
+  await patchSetting("crawling", "mode", "spider");
 }
 
 function onRowSelect(result: CrawlResult | null) {
