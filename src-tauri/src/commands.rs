@@ -1353,6 +1353,118 @@ pub async fn flush_crawl_writes(app: AppHandle) -> Result<(), String> {
     writer.flush().await
 }
 
+// ── Export ───────────────────────────────────────────────────────────────
+//
+// Streaming exports (CSV + zip-bundle) live in `exporter`. These commands
+// are thin wrappers that resolve the read pool, open the destination file,
+// and forward an `export-progress` Tauri event from the exporter's
+// per-row/per-image callback. Bundle export pulls the og-images dir for
+// the session via the same helper used elsewhere.
+
+fn emit_export_progress(
+    app: &AppHandle,
+    p: &crate::exporter::ExportProgress,
+    phase: crate::exporter::ExportPhase,
+) {
+    let phase_str = match phase {
+        crate::exporter::ExportPhase::Csv => "csv",
+        crate::exporter::ExportPhase::Images => "images",
+        crate::exporter::ExportPhase::Done => "done",
+    };
+    let _ = app.emit(
+        "export-progress",
+        serde_json::json!({
+            "phase": phase_str,
+            "rowsWritten": p.rows_written,
+            "imagesWritten": p.images_written,
+            "bytesWritten": p.bytes_written,
+        }),
+    );
+}
+
+async fn run_csv_export(
+    app: AppHandle,
+    session_id: i64,
+    dest_path: String,
+    filter: Option<crate::db_query::ResultsFilter>,
+) -> Result<serde_json::Value, String> {
+    if let Some(writer) = app.try_state::<DbWriter>() {
+        writer.flush().await?;
+    }
+    let pool_state = app
+        .try_state::<crate::db_query::DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+
+    let raw_file = std::fs::File::create(&dest_path)
+        .map_err(|e| format!("create {dest_path}: {e}"))?;
+    // 1 MiB BufWriter — csv::Writer issues many small writes and the
+    // syscall-per-write cost dominates on big sessions otherwise.
+    let buf = std::io::BufWriter::with_capacity(1 << 20, raw_file);
+    let app_for_cb = app.clone();
+    let prog = crate::exporter::write_csv_streaming(
+        pool,
+        session_id,
+        filter.as_ref(),
+        buf,
+        move |p, phase| emit_export_progress(&app_for_cb, p, phase),
+    )
+    .await?;
+    emit_export_progress(&app, &prog, crate::exporter::ExportPhase::Done);
+    Ok(serde_json::json!({
+        "rowsWritten": prog.rows_written,
+        "bytesWritten": prog.bytes_written,
+    }))
+}
+
+#[tauri::command]
+pub async fn export_csv(
+    app: AppHandle,
+    session_id: i64,
+    dest_path: String,
+) -> Result<serde_json::Value, String> {
+    run_csv_export(app, session_id, dest_path, None).await
+}
+
+#[tauri::command]
+pub async fn export_filtered_csv(
+    app: AppHandle,
+    session_id: i64,
+    dest_path: String,
+    filter: crate::db_query::ResultsFilter,
+) -> Result<serde_json::Value, String> {
+    run_csv_export(app, session_id, dest_path, Some(filter)).await
+}
+
+#[tauri::command]
+pub async fn export_bundle(
+    app: AppHandle,
+    session_id: i64,
+    dest_path: String,
+) -> Result<serde_json::Value, String> {
+    if let Some(writer) = app.try_state::<DbWriter>() {
+        writer.flush().await?;
+    }
+    let pool_state = app
+        .try_state::<crate::db_query::DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+    let og_dir = og_images_dir_for_session(&app, session_id);
+
+    let file = std::fs::File::create(&dest_path)
+        .map_err(|e| format!("create {dest_path}: {e}"))?;
+    let app_for_cb = app.clone();
+    let prog = crate::exporter::write_bundle(pool, session_id, &og_dir, file, move |p, phase| {
+        emit_export_progress(&app_for_cb, p, phase);
+    })
+    .await?;
+    Ok(serde_json::json!({
+        "rowsWritten": prog.rows_written,
+        "imagesWritten": prog.images_written,
+        "bytesWritten": prog.bytes_written,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

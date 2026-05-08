@@ -1,6 +1,7 @@
 mod commands;
 mod db_query;
 mod db_writer;
+mod exporter;
 mod voice_commands;
 
 use tauri_plugin_sql::{Builder as SqlBuilder, Migration, MigrationKind};
@@ -196,6 +197,9 @@ pub fn run() {
             commands::stop_host,
             commands::run_probe_matrix,
             commands::flush_crawl_writes,
+            commands::export_csv,
+            commands::export_filtered_csv,
+            commands::export_bundle,
             db_query::query_results,
             db_query::count_results,
             db_query::get_result_full,

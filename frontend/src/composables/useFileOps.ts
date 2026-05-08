@@ -4,30 +4,38 @@ import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { homeDir } from "@tauri-apps/api/path";
 import type { CrawlResult, CrawlConfig } from "../types/crawl";
 
-// Phase-6 contract: file ops are session-scoped, not array-scoped. Rather
-// than the caller passing in a CrawlResult[] (which after the cleanup
-// nobody holds in memory), they pass the active session id and we stream
-// rows from Rust via query_all_results. Same shape goes into the .fera
-// bundle; same shape goes into the CSV.
+// Phase-7 contract: every CSV / bundle path streams from Rust. The JS
+// rowsToCsv + fetchSessionRows path is gone — any export that previously
+// filtered in JS now passes a typed `ResultsFilter` to the Rust exporter,
+// which applies the same WHERE machinery the data grid uses.
+//
+// `saveCrawl` (.fera bundle) is the only path still hydrating rows in JS.
+// It's a known-broken artifact: the openCrawl path only restores config;
+// the rows it serializes can't be re-loaded after the Phase-6 refactor.
+// Left in place rather than expanded — bundle export is the supported
+// "share my crawl" path now.
+
+/// Mirrors `ResultsFilter` in src-tauri/src/db_query.rs. All fields
+/// optional; provided fields AND together server-side. Empty object =
+/// every row in the session.
+export interface ExportFilter {
+  statusMin?: number;
+  statusMax?: number;
+  hasRedirect?: boolean;
+  indexability?: "indexable" | "noindex" | "nofollow";
+  errorPrefix?: string;
+  text?: string;
+  resourceType?: string;
+  issuesOnly?: boolean;
+  hasOgImage?: boolean;
+  missingOgImage?: boolean;
+  missingField?: "title" | "h1" | "h2" | "meta_description" | "canonical";
+  titleLengthMin?: number;
+  titleLengthMax?: number;
+}
 
 async function fetchSessionRows(sessionId: number): Promise<CrawlResult[]> {
   return invoke<CrawlResult[]>("query_all_results", { sessionId });
-}
-
-function rowsToCsv(rows: CrawlResult[]): string {
-  if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
-  const escape = (val: string) =>
-    val.includes(",") || val.includes('"') || val.includes("\n")
-      ? `"${val.replace(/"/g, '""')}"`
-      : val;
-  const lines = [
-    headers.join(","),
-    ...rows.map((row) =>
-      headers.map((h) => escape(String((row as any)[h] ?? ""))).join(","),
-    ),
-  ];
-  return lines.join("\n");
 }
 
 export function useFileOps() {
@@ -68,8 +76,6 @@ export function useFileOps() {
 
   async function exportCsv(sessionId: number | null): Promise<void> {
     if (sessionId == null) return;
-    const rows = await fetchSessionRows(sessionId);
-    if (!rows.length) return;
     const home = await homeDir();
     const path = await save({
       title: "Export CSV",
@@ -77,17 +83,27 @@ export function useFileOps() {
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;
-    await writeTextFile(path, rowsToCsv(rows));
+    await invoke("export_csv", { sessionId, destPath: path });
+  }
+
+  async function exportBundle(sessionId: number | null): Promise<void> {
+    if (sessionId == null) return;
+    const home = await homeDir();
+    const path = await save({
+      title: "Export Bundle",
+      defaultPath: home + "/crawl-bundle.zip",
+      filters: [{ name: "Zip Bundle", extensions: ["zip"] }],
+    });
+    if (!path) return;
+    await invoke("export_bundle", { sessionId, destPath: path });
   }
 
   async function exportFilteredCsv(
     sessionId: number | null,
-    filterFn: (r: CrawlResult) => boolean,
+    filter: ExportFilter,
     defaultName: string,
   ): Promise<void> {
     if (sessionId == null) return;
-    const rows = (await fetchSessionRows(sessionId)).filter(filterFn);
-    if (!rows.length) return;
     const home = await homeDir();
     const path = await save({
       title: `Export ${defaultName}`,
@@ -95,8 +111,8 @@ export function useFileOps() {
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
     if (!path) return;
-    await writeTextFile(path, rowsToCsv(rows));
+    await invoke("export_filtered_csv", { sessionId, destPath: path, filter });
   }
 
-  return { saveCrawl, openCrawl, exportCsv, exportFilteredCsv };
+  return { saveCrawl, openCrawl, exportCsv, exportBundle, exportFilteredCsv };
 }

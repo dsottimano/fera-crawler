@@ -165,7 +165,7 @@ const SORTABLE: &[&str] = &[
     "resource_type",
 ];
 
-fn build_where(
+pub(crate) fn build_where(
     filter: &ResultsFilter,
     out_clauses: &mut Vec<String>,
     out_binds: &mut Vec<Value>,
@@ -388,13 +388,13 @@ fn order_clause(sort: Option<&ResultsSort>) -> String {
 
 // ── Row shape ────────────────────────────────────────────────────────────
 
-const RESULT_COLUMNS: &str = "id, url, status, title, h1, h2, meta_description, canonical, \
+pub(crate) const RESULT_COLUMNS: &str = "id, url, status, title, h1, h2, meta_description, canonical, \
     internal_links, external_links, response_time, content_type, resource_type, size, error, \
     word_count, meta_robots, is_indexable, is_noindex, is_nofollow, og_title, og_description, \
     og_image, og_image_width, og_image_height, date_published, date_modified, redirect_url, \
     server_header";
 
-fn row_to_json(r: &SqliteRow) -> Value {
+pub(crate) fn row_to_json(r: &SqliteRow) -> Value {
     let mut m = serde_json::Map::new();
     m.insert("id".into(), Value::Number(r.try_get::<i64, _>("id").unwrap_or(0).into()));
     m.insert("url".into(), Value::String(r.try_get::<String, _>("url").unwrap_or_default()));
@@ -498,7 +498,7 @@ fn row_to_json(r: &SqliteRow) -> Value {
     Value::Object(m)
 }
 
-fn bind_value<'q>(
+pub(crate) fn bind_value<'q>(
     q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
     v: &'q Value,
 ) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
@@ -562,7 +562,7 @@ pub async fn query_results_inner(
 // fetch) and get_result_full (so the detail panel sees the full shape).
 // `entry().or_insert` — top-level columns always win over seo_json keys
 // of the same name.
-fn merge_seo_overflow(target: &mut Value, seo_str: &str) {
+pub(crate) fn merge_seo_overflow(target: &mut Value, seo_str: &str) {
     if let Ok(Value::Object(seo)) = serde_json::from_str::<Value>(seo_str) {
         if let Value::Object(ref mut obj) = target {
             for (k, val) in seo {

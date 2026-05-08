@@ -23,7 +23,7 @@ import { useDebug } from "./composables/useDebug";
 import { useSettings } from "./composables/useSettings";
 import { useCrawl } from "./composables/useCrawl";
 import { useConfig } from "./composables/useConfig";
-import { useFileOps } from "./composables/useFileOps";
+import { useFileOps, type ExportFilter } from "./composables/useFileOps";
 import { useBrowser } from "./composables/useBrowser";
 import { useDatabase } from "./composables/useDatabase";
 import { extractPastedUrls } from "./utils/pastedUrls";
@@ -32,7 +32,7 @@ import type { CrawlResult } from "./types/crawl";
 const url = ref("");
 const { config } = useConfig();
 const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
-const { saveCrawl, openCrawl, exportCsv, exportFilteredCsv } = useFileOps();
+const { saveCrawl, openCrawl, exportCsv, exportBundle, exportFilteredCsv } = useFileOps();
 const { profileData } = useBrowser();
 const { start: startDebugListeners } = useDebug();
 const { settings, effectiveSettings, init: initSettings, patch: patchSetting } = useSettings();
@@ -106,6 +106,35 @@ onMounted(async () => {
   } catch (e) {
     console.error("Browser installer listener setup failed:", e);
   }
+
+  try {
+    exportProgressUnlisteners.push(
+      await listen<{ phase: "csv" | "images" | "done"; rowsWritten: number; imagesWritten: number; bytesWritten: number }>(
+        "export-progress",
+        (event) => {
+          const p = event.payload;
+          exportNotice.value = {
+            phase: p.phase,
+            rows: p.rowsWritten,
+            images: p.imagesWritten,
+            bytes: p.bytesWritten,
+          };
+          if (exportClearTimer) {
+            clearTimeout(exportClearTimer);
+            exportClearTimer = null;
+          }
+          if (p.phase === "done") {
+            exportClearTimer = setTimeout(() => {
+              exportNotice.value = null;
+              exportClearTimer = null;
+            }, 4000);
+          }
+        },
+      ),
+    );
+  } catch (e) {
+    console.error("Export progress listener setup failed:", e);
+  }
 });
 
 const browserInstallUnlisteners: UnlistenFn[] = [];
@@ -152,6 +181,39 @@ function handleHealthDrill(args: { tab: string; filterType?: string }) {
 }
 const browserInstallNotice = ref<{ state: "running" | "done" | "failed"; text: string } | null>(null);
 let browserInstallTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Live progress for Rust-side streaming exports (CSV / bundle). Reset to
+// null after the `done` event clears the banner.
+const exportNotice = ref<{
+  phase: "csv" | "images" | "done";
+  rows: number;
+  images: number;
+  bytes: number;
+} | null>(null);
+let exportClearTimer: ReturnType<typeof setTimeout> | null = null;
+const exportProgressUnlisteners: UnlistenFn[] = [];
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+const exportText = computed(() => {
+  const e = exportNotice.value;
+  if (!e) return "";
+  if (e.phase === "done") {
+    const parts = [`${e.rows.toLocaleString()} rows`];
+    if (e.images > 0) parts.push(`${e.images.toLocaleString()} images`);
+    if (e.bytes > 0) parts.push(formatBytes(e.bytes));
+    return `Export complete — ${parts.join(", ")}`;
+  }
+  if (e.phase === "images") {
+    return `Bundling images… ${e.images.toLocaleString()} packed (${e.rows.toLocaleString()} rows already in zip)`;
+  }
+  return `Exporting CSV… ${e.rows.toLocaleString()} rows`;
+});
 
 const bottomPanelHeight = ref(parseInt(localStorage.getItem('fera-bottom-height') || '200', 10));
 let resizing = false;
@@ -351,6 +413,8 @@ onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
   for (const u of browserInstallUnlisteners) u();
   if (browserInstallTimer) clearTimeout(browserInstallTimer);
+  for (const u of exportProgressUnlisteners) u();
+  if (exportClearTimer) clearTimeout(exportClearTimer);
 });
 
 async function handleMenuAction(menu: string, item: string) {
@@ -376,7 +440,8 @@ async function handleMenuAction(menu: string, item: string) {
     }
     else if (item === "Save As...") { await saveCrawl(currentSessionId.value, config); }
     else if (item === "Export CSV") { await exportCsv(currentSessionId.value); }
-    else if (item === "Export Excel") { await exportFilteredCsv(currentSessionId.value, () => true, "crawl-export"); }
+    else if (item === "Export Excel") { await exportFilteredCsv(currentSessionId.value, {}, "crawl-export"); }
+    else if (item === "Export Bundle (CSV + Images)...") { await exportBundle(currentSessionId.value); }
     else if (item === "Exit") { await getCurrentWindow().close(); }
   }
   if (menu === "Configuration") {
@@ -384,12 +449,16 @@ async function handleMenuAction(menu: string, item: string) {
     else showSettingsPanel.value = true;
   }
   if (menu === "Export") {
-    const f: Record<string, (r: CrawlResult) => boolean> = {
-      "Internal HTML": (r) => (r.resourceType || "HTML") === "HTML",
-      "All Links": () => true, "Response Codes": (r) => r.status >= 400,
-      "Page Titles": (r) => !!r.title, Redirects: (r) => r.status >= 300 && r.status < 400,
+    // Filters mirror the Rust ResultsFilter struct so the export streams
+    // server-side instead of pulling every row to JS just to predicate-filter.
+    const f: Record<string, ExportFilter> = {
+      "Internal HTML": { resourceType: "HTML" },
+      "All Links": {},
+      "Response Codes": { statusMin: 400 },
+      "Page Titles": { titleLengthMin: 1 },
+      "Redirects": { statusMin: 300, statusMax: 400 },
     };
-    await exportFilteredCsv(currentSessionId.value, f[item] ?? (() => true), item.toLowerCase().replace(/\s+/g, "-"));
+    await exportFilteredCsv(currentSessionId.value, f[item] ?? {}, item.toLowerCase().replace(/\s+/g, "-"));
   }
   if (menu === "Reports") {
     const m: Record<string, string> = { "Crawl Overview": "overview", "Redirect Chains": "redirects", "Duplicate Content": "duplicates", "Orphan Pages": "orphans", "Internal PageRank": "pagerank" };
@@ -518,6 +587,15 @@ async function handleMenuAction(menu: string, item: string) {
     >
       <div class="browser-install-dot"></div>
       <div class="browser-install-text">{{ browserInstallNotice.text }}</div>
+    </div>
+
+    <div
+      v-if="exportNotice"
+      class="browser-install-banner"
+      :class="exportNotice.phase === 'done' ? 'browser-install-banner--done' : 'browser-install-banner--running'"
+    >
+      <div class="browser-install-dot"></div>
+      <div class="browser-install-text">{{ exportText }}</div>
     </div>
 
     <!-- Top-level nav: HEALTH | DATA | CONFIG | DEBUG. Each screen below
