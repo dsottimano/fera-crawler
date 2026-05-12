@@ -192,6 +192,41 @@ function maxImagePreviewFormatter(cell: any) {
   return match ? match[1] : "";
 }
 
+// Parses the combined robots directive surface (meta robots + meta googlebot
+// + X-Robots-Tag) into a token set, so each directive column can do a single
+// lookup. `none` is the standard shorthand for `noindex,nofollow` so we
+// expand it here.
+function directiveTokens(row: any): Set<string> {
+  const combined = [
+    row.metaRobots ?? "",
+    row.metaGooglebot ?? "",
+    row.xRobotsTag ?? "",
+  ].join(",").toLowerCase();
+  const tokens = new Set(
+    combined.split(/[,;]/).map((t) => t.trim()).filter(Boolean)
+      .map((t) => t.includes(":") ? t.split(":")[0].trim() : t)
+  );
+  if (tokens.has("none")) { tokens.add("noindex"); tokens.add("nofollow"); }
+  return tokens;
+}
+
+function directiveFormatter(directive: string) {
+  return (cell: any) => {
+    const has = directiveTokens(cell.getRow().getData()).has(directive);
+    return has ? '<span style="color:#f44747;font-weight:600">Yes</span>' : "";
+  };
+}
+
+function maxNumericDirectiveFormatter(directive: string) {
+  return (cell: any) => {
+    const row = cell.getRow().getData() as any;
+    const combined = [row.metaRobots ?? "", row.metaGooglebot ?? "", row.xRobotsTag ?? ""].join(",");
+    const re = new RegExp(`${directive}:\\s*(-?\\w+)`, "i");
+    const m = combined.match(re);
+    return m ? m[1] : "";
+  };
+}
+
 /* ── Column definitions pool ── */
 
 const COL = {
@@ -220,11 +255,23 @@ const COL = {
 
   // Robots directives
   metaRobots:     { title: "Meta Robots", field: "metaRobots", minWidth: 160, width: 200, tooltip: true },
+  metaGooglebot:  { title: "Meta Googlebot", field: "metaGooglebot", minWidth: 140, width: 180, tooltip: true },
   indexable:      { title: "Indexable", field: "isIndexable", width: 80, hozAlign: "center", formatter: indexableFormatter },
+  index:          { title: "Index", field: "_dirIndex", width: 70, hozAlign: "center", formatter: directiveFormatter("index") },
   noindex:        { title: "Noindex", field: "isNoindex", width: 80, hozAlign: "center", formatter: boolFormatter },
+  follow:         { title: "Follow", field: "_dirFollow", width: 70, hozAlign: "center", formatter: directiveFormatter("follow") },
   nofollow:       { title: "Nofollow", field: "isNofollow", width: 80, hozAlign: "center", formatter: boolFormatter },
+  noarchive:      { title: "Noarchive", field: "_dirNoarchive", width: 85, hozAlign: "center", formatter: directiveFormatter("noarchive") },
+  nosnippet:      { title: "Nosnippet", field: "_dirNosnippet", width: 85, hozAlign: "center", formatter: directiveFormatter("nosnippet") },
+  noimageindex:   { title: "Noimageindex", field: "_dirNoimageindex", width: 105, hozAlign: "center", formatter: directiveFormatter("noimageindex") },
+  notranslate:    { title: "Notranslate", field: "_dirNotranslate", width: 95, hozAlign: "center", formatter: directiveFormatter("notranslate") },
+  nocache:        { title: "Nocache", field: "_dirNocache", width: 80, hozAlign: "center", formatter: directiveFormatter("nocache") },
+  noai:           { title: "Noai", field: "_dirNoai", width: 65, hozAlign: "center", formatter: directiveFormatter("noai") },
+  noimageai:      { title: "Noimageai", field: "_dirNoimageai", width: 90, hozAlign: "center", formatter: directiveFormatter("noimageai") },
   xRobotsTag:     { title: "X-Robots-Tag", field: "xRobotsTag", minWidth: 140, width: 180, tooltip: true },
   maxImgPreview:  { title: "Max Image Preview", field: "_maxImgPreview", width: 130, hozAlign: "center", formatter: maxImagePreviewFormatter },
+  maxSnippet:     { title: "Max Snippet", field: "_maxSnippet", width: 100, hozAlign: "center", formatter: maxNumericDirectiveFormatter("max-snippet") },
+  maxVideoPreview:{ title: "Max Video Preview", field: "_maxVideoPreview", width: 130, hozAlign: "center", formatter: maxNumericDirectiveFormatter("max-video-preview") },
 
   // Open Graph
   ogTitle:        { title: "og:title", field: "ogTitle", minWidth: 180, widthGrow: 2, tooltip: true },
@@ -248,17 +295,19 @@ const COL = {
   // Queue status
   queueStatus: {
     title: "Queue Status", field: "_queueStatus", width: 130, hozAlign: "center",
+    // Derived from the row's actual state, not queue-membership. As live
+    // recrawl results come back from Rust, rows flip Pending → Done
+    // without us needing to mutate `recrawlQueue` mid-crawl.
     mutator: (_value: any, data: any) => {
-      if (config.recrawlQueue.includes(data.url)) return "Pending";
-      if (data.status === 0 && data.error) return "Error";
-      if (data.status >= 400) return "Error";
-      return "Done";
+      if (data.status === 0 && data.error) return "Pending";
+      if (data.status >= 400) return "Pending";
+      if (data.status >= 200 && data.status < 400) return "Done";
+      return "";
     },
     formatter: (cell: any) => {
       const val = cell.getValue();
       if (val === "Done") return '<span style="color:#4ec9b0;font-weight:600">Done</span>';
       if (val === "Pending") return '<span style="color:#dcdcaa;font-weight:600">Pending</span>';
-      if (val === "Error") return '<span style="color:#f44747;font-weight:600">Error</span>';
       return "";
     },
   },
@@ -267,7 +316,19 @@ const COL = {
 /* ── Tab → columns mapping ── */
 
 const TAB_COLUMNS: Record<string, any[]> = {
-  "Internal":         [COL.address, COL.contentType, COL.statusCode, COL.statusText, COL.title, COL.metaDesc, COL.h1, COL.h2, COL.canonical, COL.ogImage, COL.intLinks, COL.extLinks, COL.wordCount, COL.indexable, COL.responseTime, COL.size],
+  "Internal":         [
+    COL.address, COL.contentType, COL.statusCode, COL.statusText, COL.redirectUrl,
+    COL.title, COL.titleLen, COL.metaDesc, COL.metaDescLen,
+    COL.h1, COL.h1Len, COL.h2, COL.h2Len, COL.canonical,
+    COL.indexable, COL.index, COL.noindex, COL.follow, COL.nofollow,
+    COL.noarchive, COL.nosnippet, COL.noimageindex, COL.notranslate, COL.nocache, COL.noai, COL.noimageai,
+    COL.maxImgPreview, COL.maxSnippet, COL.maxVideoPreview, COL.xRobotsTag,
+    COL.ogTitle, COL.ogDesc, COL.ogImage, COL.ogType, COL.ogUrl,
+    COL.ogImgW, COL.ogImgH, COL.ogImgWReal, COL.ogImgHReal, COL.ogImgRatio, COL.ogImgSize,
+    COL.datePub, COL.datePubTime, COL.dateMod, COL.dateModTime,
+    COL.intLinks, COL.extLinks, COL.uniqueOutlinks,
+    COL.wordCount, COL.resource, COL.responseTime, COL.size, COL.server,
+  ],
   "External":         [COL.address, COL.contentType, COL.statusCode, COL.statusText, COL.server, COL.intLinks, COL.extLinks, COL.responseTime, COL.resource, COL.size],
   "Security":         [COL.address, COL.statusCode, COL.server, COL.contentType, COL.xRobotsTag, COL.size],
   "Response Codes":   [COL.address, COL.statusCode, COL.statusText, COL.redirectUrl, COL.server, COL.contentType, COL.responseTime],
@@ -279,7 +340,12 @@ const TAB_COLUMNS: Record<string, any[]> = {
   "Content":          [COL.address, COL.wordCount, COL.contentType, COL.size, COL.statusCode, COL.responseTime],
   "Images":           [COL.address, COL.ogImage, COL.ogImgW, COL.ogImgH, COL.ogImgWReal, COL.ogImgHReal, COL.ogImgRatio, COL.ogImgSize, COL.maxImgPreview, COL.statusCode, COL.size],
   "Canonicals":       [COL.address, COL.canonical, COL.statusCode, COL.indexable],
-  "Directives":       [COL.address, COL.metaRobots, COL.xRobotsTag, COL.indexable, COL.noindex, COL.nofollow, COL.maxImgPreview, COL.statusCode],
+  "Directives":       [
+    COL.address, COL.statusCode, COL.metaRobots, COL.metaGooglebot, COL.xRobotsTag,
+    COL.indexable, COL.index, COL.noindex, COL.follow, COL.nofollow,
+    COL.noarchive, COL.nosnippet, COL.noimageindex, COL.notranslate, COL.nocache, COL.noai, COL.noimageai,
+    COL.maxImgPreview, COL.maxSnippet, COL.maxVideoPreview,
+  ],
   "JavaScript":       [COL.address, COL.statusCode, COL.size, COL.responseTime],
   "Links":            [COL.address, COL.intLinks, COL.extLinks, COL.uniqueOutlinks, COL.statusCode],
   "Structured Data":  [COL.address, COL.ogTitle, COL.ogDesc, COL.ogType, COL.ogImage, COL.datePub, COL.dateMod, COL.statusCode],
@@ -346,7 +412,7 @@ onMounted(() => {
     ajaxRequestFunc: ajaxRequestFunc,
     pagination: true,
     paginationMode: "remote",
-    paginationSize: 100,
+    paginationSize: 500,
     progressiveLoad: "scroll",
     progressiveLoadDelay: 200,
     progressiveLoadScrollMargin: 300,
@@ -532,7 +598,36 @@ watch(() => props.selectAll, () => {
 .crawl-table :deep(.tabulator-footer) {
   background: #0c111d;
   border-top: 1px solid rgba(255,255,255,0.06);
-  color: rgba(255,255,255,0.25);
+  color: rgba(255,255,255,0.6);
+}
+.crawl-table :deep(.tabulator-footer .tabulator-page),
+.crawl-table :deep(.tabulator-footer .tabulator-paginator label),
+.crawl-table :deep(.tabulator-footer .tabulator-page-counter),
+.crawl-table :deep(.tabulator-footer .tabulator-page-size) {
+  color: rgba(255,255,255,0.7);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 4px;
+  font-family: 'Ubuntu', sans-serif;
+  font-size: 11px;
+}
+.crawl-table :deep(.tabulator-footer .tabulator-page-counter),
+.crawl-table :deep(.tabulator-footer .tabulator-paginator label) {
+  background: transparent;
+  border: none;
+}
+.crawl-table :deep(.tabulator-footer .tabulator-page:not(:disabled):hover) {
+  background: rgba(86,156,214,0.2);
+  color: #ffffff;
+  cursor: pointer;
+}
+.crawl-table :deep(.tabulator-footer .tabulator-page:disabled) {
+  opacity: 0.35;
+}
+.crawl-table :deep(.tabulator-footer .tabulator-page.active) {
+  background: rgba(86,156,214,0.3);
+  color: #ffffff;
+  border-color: rgba(86,156,214,0.5);
 }
 </style>
 

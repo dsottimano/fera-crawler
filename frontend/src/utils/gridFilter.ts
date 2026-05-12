@@ -274,7 +274,11 @@ export function buildResultsFilter(args: BuildFilterArgs): ResultsFilter {
       f.issuesOnly = true;
       break;
     case "Recrawl Queue":
+      // urlIn scopes to the originally-queued URLs; issuesOnly hides those
+      // already recovered, so Filter Total + tab badge represent the live
+      // "still-broken" count rather than the static queue size.
       f.urlIn = [...args.recrawlQueue];
+      f.issuesOnly = true;
       break;
     case "Images":
       // Default Images view = HTML rows that DECLARE an og:image. The

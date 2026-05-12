@@ -316,9 +316,11 @@ pub(crate) fn build_where(
         out_binds.push(Value::Number(max.into()));
     }
     if let Some(field) = &filter.duplicate_field {
-        // Sub-select over the same session to find values that appear
-        // more than once. Caller MUST also constrain by session_id (the
-        // outer query does); the subquery here scopes to the same set.
+        // EXISTS self-join: for each outer row, probe the (session_id, {c})
+        // index for another row in the same session with the same value.
+        // Bails on first match (LIMIT 1) — much faster than the prior
+        // GROUP BY HAVING COUNT(*)>1 subquery, which materialized the full
+        // dedup list every render.
         let col = match field.as_str() {
             "title" => Some("title"),
             "meta_description" => Some("meta_description"),
@@ -327,9 +329,12 @@ pub(crate) fn build_where(
         };
         if let Some(c) = col {
             out_clauses.push(format!(
-                "{c} != '' AND {c} IS NOT NULL AND {c} IN \
-                 (SELECT {c} FROM crawl_results r2 WHERE r2.session_id = crawl_results.session_id \
-                    AND {c} != '' AND {c} IS NOT NULL GROUP BY {c} HAVING COUNT(*) > 1)",
+                "{c} != '' AND {c} IS NOT NULL AND EXISTS \
+                 (SELECT 1 FROM crawl_results r2 \
+                    WHERE r2.session_id = crawl_results.session_id \
+                      AND r2.{c} = crawl_results.{c} \
+                      AND r2.rowid != crawl_results.rowid \
+                    LIMIT 1)",
             ));
         }
     }

@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import MenuBar from "./components/MenuBar.vue";
 import CategoryTabs from "./components/CategoryTabs.vue";
 import FilterBar from "./components/FilterBar.vue";
@@ -158,6 +159,39 @@ const filteredCount = ref(0);
 // without per-row events). 500ms cadence matches the Rust emitter.
 const gridRefreshKey = ref(0);
 watch(() => crawlProgress.value.rowCount, () => { gridRefreshKey.value++; });
+
+// Live "still-broken" count of the recrawl queue. Drives the Recrawl Queue
+// tab badge so the user sees progress during a recrawl pass: stays at the
+// initial queue size, drops as URLs recover, hits 0 when all clean. Polled
+// every grid refresh (debounced via the existing rowCount→refreshKey watch).
+const liveRecrawlCount = ref(0);
+let recrawlCountInflight = false;
+async function refreshRecrawlCount() {
+  if (recrawlCountInflight) return;
+  const sid = currentSessionId.value;
+  if (sid == null || config.recrawlQueue.length === 0) {
+    liveRecrawlCount.value = 0;
+    return;
+  }
+  recrawlCountInflight = true;
+  try {
+    const n = await invoke<number>("count_results", {
+      sessionId: sid,
+      filter: { urlIn: [...config.recrawlQueue], issuesOnly: true },
+    });
+    // Drop the result if the session changed under us — otherwise an
+    // in-flight count for the previous session can stamp a stale badge
+    // after the user cleared/switched crawls.
+    if (sid === currentSessionId.value) liveRecrawlCount.value = n;
+  } catch (e) {
+    console.error("recrawl live count failed", e);
+  } finally {
+    recrawlCountInflight = false;
+  }
+}
+watch(() => gridRefreshKey.value, refreshRecrawlCount);
+watch(() => config.recrawlQueue.length, refreshRecrawlCount);
+watch(() => currentSessionId.value, refreshRecrawlCount);
 
 // Top-level nav: HEALTH | DATA | CONFIG | DEBUG. Default HEALTH per
 // the plan — a fresh launch lands on the dashboard summary, the grid
@@ -623,7 +657,7 @@ async function handleMenuAction(menu: string, item: string) {
     />
 
     <template v-if="screen === 'DATA'">
-      <CategoryTabs :active="activeCategory" :recrawl-count="config.recrawlQueue.length" @select="activeCategory = $event" />
+      <CategoryTabs :active="activeCategory" :recrawl-count="liveRecrawlCount" @select="activeCategory = $event" />
       <FilterBar
         :total-results="crawlProgress.rowCount"
         :filtered-count="filteredCount"

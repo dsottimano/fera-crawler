@@ -134,6 +134,21 @@ pub fn run() {
                   ON crawl_results(session_id, url);",
             kind: MigrationKind::Up,
         },
+        // Duplicate-title / duplicate-h1 / duplicate-meta-description filters
+        // run an EXISTS self-join on these columns per page fetch. Without
+        // these indexes a full session scan happens twice per render (count +
+        // query) and the grid hangs on large crawls.
+        Migration {
+            version: 8,
+            description: "index crawl_results for duplicate-* filters",
+            sql: "CREATE INDEX IF NOT EXISTS idx_crawl_results_session_h1
+                      ON crawl_results(session_id, h1);
+                  CREATE INDEX IF NOT EXISTS idx_crawl_results_session_title
+                      ON crawl_results(session_id, title);
+                  CREATE INDEX IF NOT EXISTS idx_crawl_results_session_meta_desc
+                      ON crawl_results(session_id, meta_description);",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
