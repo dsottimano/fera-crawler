@@ -283,6 +283,10 @@ function stopResize() {
 }
 
 const hasRecrawlQueue = computed(() => config.recrawlQueue.length > 0);
+const isListWithUrls = computed(() =>
+  effectiveSettings.value.crawling.mode === "list"
+  && effectiveSettings.value.inputs.urls.length > 0
+);
 
 function handleResumeRecrawl() {
   if (!config.recrawlQueue.length || crawling.value) return;
@@ -314,19 +318,48 @@ function normalizeUrl(raw: string): string {
 }
 
 async function onUrlPaste(event: ClipboardEvent) {
-  const text = event.clipboardData?.getData("text") ?? "";
-  const urls = extractPastedUrls(text);
-  if (urls.length < 2) return; // single URL — let the native paste land in the input
+  // Spreadsheet copies (Google Sheets, Excel) often put ONLY text/html on
+  // the clipboard — text/plain is empty. Fall back to the HTML payload so
+  // extractPastedUrls can pull URLs out of <td>/<a href> regardless of
+  // the source app.
+  const cd = event.clipboardData;
+  const raw = cd?.getData("text/plain") || cd?.getData("text") || cd?.getData("text/html") || "";
+  const urls = extractPastedUrls(raw);
+  const inList = isListWithUrls.value;
+
+  // Spider mode + single URL paste: let it land natively so the user can
+  // edit/start a single-URL spider crawl. In list mode we always intercept
+  // (even one URL) so the input doubles as an append affordance.
+  if (!inList && urls.length < 2) return;
+  if (urls.length === 0) return;
   event.preventDefault();
-  // Switch the active settings into list mode AND seed the URL list in
-  // one place. Two patches because they target different sections; the
-  // computed effectiveSettings recomputes after each so the badge and
-  // the readout update together on the next render.
-  await patchSetting("crawling", "mode", "list");
-  await patchSetting("inputs", "urls", urls);
-  // The input is unmounted by the v-if as soon as mode flips, but if
-  // some browser still holds focus on it, clear the visible value so a
-  // stale single URL doesn't sit there.
+
+  const existing = effectiveSettings.value.inputs.urls;
+  const merged = inList
+    ? (() => {
+        const seen = new Set(existing);
+        const fresh = urls.filter((u) => !seen.has(u));
+        return fresh.length ? [...existing, ...fresh] : existing;
+      })()
+    : urls;
+
+  if (!inList) await patchSetting("crawling", "mode", "list");
+  if (merged !== existing) await patchSetting("inputs", "urls", merged);
+  url.value = "";
+}
+
+// Enter on the input while in list-mode-with-urls appends the typed URL
+// to the list (deduped). Spider mode / empty list keep the original
+// behaviour of starting the crawl.
+async function onUrlEnter() {
+  if (!isListWithUrls.value) { handleStart(); return; }
+  const raw = url.value.trim();
+  if (!raw) return;
+  const normalized = normalizeUrl(raw);
+  if (!normalized) return;
+  const existing = effectiveSettings.value.inputs.urls;
+  if (existing.includes(normalized)) { url.value = ""; return; }
+  await patchSetting("inputs", "urls", [...existing, normalized]);
   url.value = "";
 }
 
@@ -534,18 +567,23 @@ async function handleMenuAction(menu: string, item: string) {
              list-mode session shows the LIST MODE badge instead of the
              default-profile's URL input. -->
         <div class="telem-url-group">
-          <div class="telem-url-wrap">
-            <div v-if="effectiveSettings.crawling.mode === 'list' && effectiveSettings.inputs.urls.length > 0" class="telem-list-badge" @click="showSettingsPanel = true">
+          <div class="telem-url-wrap" :class="{ 'telem-url-wrap--list': isListWithUrls }">
+            <div
+              v-if="isListWithUrls"
+              class="telem-list-badge"
+              title="Click to view list settings"
+              @click="showSettingsPanel = true"
+            >
               LIST MODE — {{ effectiveSettings.inputs.urls.length.toLocaleString() }} URL{{ effectiveSettings.inputs.urls.length !== 1 ? 's' : '' }}
             </div>
             <input
-              v-else
               v-model="url"
-              type="url"
-              :placeholder="effectiveSettings.crawling.mode === 'list' ? 'Paste a list of URLs here' : 'https://example.com/  (or paste a list)'"
+              type="text"
+              inputmode="url"
+              :placeholder="isListWithUrls ? 'Paste URLs or type one + Enter to append…' : (effectiveSettings.crawling.mode === 'list' ? 'Paste a list of URLs here' : 'https://example.com/  (or paste a list)')"
               class="telem-url"
               :disabled="crawling"
-              @keyup.enter="handleStart"
+              @keyup.enter="onUrlEnter"
               @paste="onUrlPaste"
             />
           </div>
@@ -943,6 +981,18 @@ async function handleMenuAction(menu: string, item: string) {
   background: rgba(255,255,255,0.04);
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
+}
+.telem-url-wrap--list {
+  display: flex;
+  align-items: center;
+}
+.telem-url-wrap--list .telem-list-badge {
+  flex-shrink: 0;
+  border-right: 1px solid rgba(255,255,255,0.08);
+}
+.telem-url-wrap--list .telem-url {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .telem-url-wrap:focus-within {

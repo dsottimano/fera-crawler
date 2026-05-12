@@ -68,4 +68,34 @@ describe("extractPastedUrls", () => {
       "https://b.com/x#frag",
     ]);
   });
+
+  // Spreadsheet copies (Google Sheets, Excel) put ONLY text/html on the
+  // clipboard, with each URL appearing inside <td>…</td>. The handler
+  // hands that HTML straight to extractPastedUrls, so it must scan inside
+  // tags as well as plain whitespace-separated lists.
+  it("extracts URLs from HTML table cells (spreadsheet-style paste)", () => {
+    const html =
+      "<table><tr><td>https://a.com/1</td></tr>" +
+      "<tr><td>https://a.com/2</td></tr>" +
+      "<tr><td>https://a.com/3</td></tr></table>";
+    expect(extractPastedUrls(html)).toEqual([
+      "https://a.com/1",
+      "https://a.com/2",
+      "https://a.com/3",
+    ]);
+  });
+
+  it("dedupes <a href> vs link text (HTML carries each URL twice)", () => {
+    const html = '<a href="https://a.com/x">https://a.com/x</a>';
+    expect(extractPastedUrls(html)).toEqual(["https://a.com/x"]);
+  });
+
+  it("extracts URLs from anchor hrefs alone (no text node)", () => {
+    const html =
+      '<a href="https://a.com/1">one</a> <a href="https://a.com/2">two</a>';
+    expect(extractPastedUrls(html)).toEqual([
+      "https://a.com/1",
+      "https://a.com/2",
+    ]);
+  });
 });

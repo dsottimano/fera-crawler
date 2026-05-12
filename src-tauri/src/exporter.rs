@@ -24,7 +24,7 @@
 // Progress callback fires every 1000 rows / every image.
 
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{BufReader, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use futures_util::TryStreamExt;
@@ -38,7 +38,9 @@ use crate::db_query::{
 
 const PAGE_SIZE: i64 = 20_000;
 const PROGRESS_EVERY: u64 = 1000;
+const IMG_PROGRESS_EVERY: u64 = 50;
 const BUF_CAPACITY: usize = 1 << 20; // 1 MiB
+const IMG_READ_BUF: usize = 128 * 1024; // 128 KiB — coalesces small-image syscalls
 
 #[derive(Default, Clone, Copy)]
 pub struct ExportProgress {
@@ -108,6 +110,9 @@ pub async fn write_csv_streaming<W: Write, F: FnMut(&ExportProgress, ExportPhase
             let mut v = row_to_json(&r);
             let seo_str: String = r.try_get("seo_json").unwrap_or_default();
             merge_seo_overflow(&mut v, &seo_str);
+            // Mirror the per-directive boolean + max-* columns the data grid
+            // derives client-side, so CSV consumers see the same surface.
+            inject_robots_directive_columns(&mut v);
 
             if headers.is_none() {
                 if let Value::Object(ref obj) = v {
@@ -142,6 +147,64 @@ pub async fn write_csv_streaming<W: Write, F: FnMut(&ExportProgress, ExportPhase
         .map_err(|e| format!("flush csv: {e}"))?;
     on_progress(&prog, ExportPhase::Csv);
     Ok(prog)
+}
+
+// Tokenise metaRobots + metaGooglebot + xRobotsTag and inject one column
+// per directive the data grid surfaces. Boolean columns mirror the grid's
+// directiveFormatter; max-* columns mirror maxNumericDirectiveFormatter.
+// Keep this aligned with frontend/src/components/CrawlGrid.vue.
+fn inject_robots_directive_columns(v: &mut Value) {
+    let mr = v.get("metaRobots").and_then(|x| x.as_str()).unwrap_or("");
+    let mg = v.get("metaGooglebot").and_then(|x| x.as_str()).unwrap_or("");
+    let xr = v.get("xRobotsTag").and_then(|x| x.as_str()).unwrap_or("");
+    let combined = format!("{mr},{mg},{xr}").to_lowercase();
+
+    let mut tokens: std::collections::HashSet<String> = combined
+        .split(|c: char| c == ',' || c == ';')
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| match t.find(':') {
+            Some(i) => t[..i].trim().to_string(),
+            None => t.to_string(),
+        })
+        .collect();
+    if tokens.contains("none") {
+        tokens.insert("noindex".to_string());
+        tokens.insert("nofollow".to_string());
+    }
+
+    if let Value::Object(ref mut obj) = v {
+        for (key, directive) in &[
+            ("isIndex", "index"),
+            ("isFollow", "follow"),
+            ("isNoarchive", "noarchive"),
+            ("isNosnippet", "nosnippet"),
+            ("isNoimageindex", "noimageindex"),
+            ("isNotranslate", "notranslate"),
+            ("isNocache", "nocache"),
+            ("isNoai", "noai"),
+            ("isNoimageai", "noimageai"),
+        ] {
+            obj.insert(key.to_string(), Value::Bool(tokens.contains(*directive)));
+        }
+        for (key, prefix) in &[
+            ("maxSnippet", "max-snippet"),
+            ("maxImagePreview", "max-image-preview"),
+            ("maxVideoPreview", "max-video-preview"),
+        ] {
+            obj.insert(key.to_string(), Value::String(extract_max_directive(&combined, prefix)));
+        }
+    }
+}
+
+fn extract_max_directive(combined_lc: &str, prefix: &str) -> String {
+    let pattern = format!("{prefix}:");
+    let Some(start) = combined_lc.find(&pattern) else { return String::new() };
+    let after = &combined_lc[start + pattern.len()..];
+    let end = after
+        .find(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .unwrap_or(after.len());
+    after[..end].trim().to_string()
 }
 
 fn value_to_cell(v: &Value) -> String {
@@ -195,13 +258,21 @@ pub async fn write_bundle<F: FnMut(&ExportProgress, ExportPhase)>(
                 let zip_path = format!("og-images/{}", rel.to_string_lossy().replace('\\', "/"));
                 zip.start_file(&zip_path, stored)
                     .map_err(|e| format!("zip start {zip_path}: {e}"))?;
-                let mut f = File::open(&path)
+                let f = File::open(&path)
                     .map_err(|e| format!("open {}: {e}", path.display()))?;
+                let mut f = BufReader::with_capacity(IMG_READ_BUF, f);
                 std::io::copy(&mut f, &mut zip)
                     .map_err(|e| format!("copy {}: {e}", path.display()))?;
                 prog.images_written += 1;
-                on_progress(&prog, ExportPhase::Images);
+                if prog.images_written % IMG_PROGRESS_EVERY == 0 {
+                    on_progress(&prog, ExportPhase::Images);
+                }
             }
+        }
+        // Final image-phase tick so the UI's last-known count matches the
+        // actual total even when it's not a multiple of IMG_PROGRESS_EVERY.
+        if prog.images_written > 0 {
+            on_progress(&prog, ExportPhase::Images);
         }
     }
 
