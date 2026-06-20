@@ -4,6 +4,12 @@
 interface Rule {
   allow: boolean;
   pattern: string;
+  // Pattern compiled to a RegExp ONCE at parse time. The matcher ran on every
+  // crawled URL × every rule and used to rebuild + recompile this regex each
+  // call — N×M redundant compilations per crawl. Null if the pattern failed to
+  // compile (treated as no-match). Optional: manually-built rules (tests) may
+  // omit it, in which case isAllowedFor compiles on demand.
+  regex?: RegExp | null;
 }
 
 interface HostRules {
@@ -12,8 +18,9 @@ interface HostRules {
   fetched: boolean;
 }
 
-function matchesPattern(path: string, pattern: string): boolean {
-  // Translate robots-glob to regex: * → .*, $ anchors end, literal everything else.
+// Translate a robots-glob to a RegExp: * → .*, trailing $ anchors end, literal
+// everything else. Returns null on compile failure. Call once per rule.
+function compilePattern(pattern: string): RegExp | null {
   let re = "^";
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i];
@@ -22,10 +29,16 @@ function matchesPattern(path: string, pattern: string): boolean {
     else re += c.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
   }
   try {
-    return new RegExp(re).test(path);
+    return new RegExp(re);
   } catch {
-    return false;
+    return null;
   }
+}
+
+// Kept for unit tests. The hot path uses the precompiled `Rule.regex` instead.
+function matchesPattern(path: string, pattern: string): boolean {
+  const re = compilePattern(pattern);
+  return re ? re.test(path) : false;
 }
 
 function parseRobots(text: string, userAgent: string): HostRules {
@@ -54,10 +67,10 @@ function parseRobots(text: string, userAgent: string): HostRules {
       current.agents.push(value.toLowerCase());
       lastWasAgent = true;
     } else if (field === "disallow" && current) {
-      if (value !== "") current.rules.push({ allow: false, pattern: value });
+      if (value !== "") current.rules.push({ allow: false, pattern: value, regex: compilePattern(value) });
       lastWasAgent = false;
     } else if (field === "allow" && current) {
-      if (value !== "") current.rules.push({ allow: true, pattern: value });
+      if (value !== "") current.rules.push({ allow: true, pattern: value, regex: compilePattern(value) });
       lastWasAgent = false;
     } else if (field === "sitemap") {
       if (value) sitemaps.push(value);
@@ -91,7 +104,11 @@ function isAllowedFor(path: string, rules: Rule[]): boolean {
   // Longest-match wins. On tie, Allow beats Disallow (Google behavior).
   let best: Rule | null = null;
   for (const rule of rules) {
-    if (!matchesPattern(path, rule.pattern)) continue;
+    // Parsed rules carry a precompiled regex (hot path). Rules constructed
+    // without one (tests, manual callers) compile on demand; a deliberate
+    // null (pattern that failed to compile) is honored as no-match.
+    const re = rule.regex !== undefined ? rule.regex : compilePattern(rule.pattern);
+    if (!re || !re.test(path)) continue;
     if (!best || rule.pattern.length > best.pattern.length) best = rule;
     else if (rule.pattern.length === best.pattern.length && rule.allow) best = rule;
   }

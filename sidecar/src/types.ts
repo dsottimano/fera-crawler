@@ -139,6 +139,15 @@ export interface CrawlConfig {
   perHostDelay?: number;
   perHostDelayMax?: number;
   perHostConcurrency?: number;
+  // Per-page navigation timeout (ms) for page.goto. A page that exceeds this
+  // is recorded as a status-0 error and its host-concurrency slot freed.
+  // Lower = dead/slow pages fail fast instead of holding a slot. Default 10000.
+  navTimeout?: number;
+  // Abort image/media/font subresource requests at the context level. SEO
+  // extraction only needs the HTML document + rendered DOM, so blocking these
+  // drops the bulk of per-page bytes/latency. Forced off when captureVitals is
+  // on (LCP/CLS need real paints). Default on.
+  blockResources?: boolean;
   // Visit each unique origin's root with a brief wait before the main crawl
   // loop, so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm)
   // can establish. Non-fatal if any warmup fails.

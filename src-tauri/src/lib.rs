@@ -223,6 +223,7 @@ pub fn run() {
             db_query::distinct_status_codes,
             db_query::aggregate_resource_types,
             db_query::get_skippable_urls,
+            db_query::get_retryable_urls,
             voice_commands::claude_turn_streaming,
             voice_commands::speak,
         ])

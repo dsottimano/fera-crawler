@@ -256,6 +256,8 @@ pub async fn start_crawl(
     per_host_delay: Option<u32>,
     per_host_delay_max: Option<u32>,
     per_host_concurrency: Option<u32>,
+    nav_timeout: Option<u32>,
+    block_resources: Option<bool>,
     session_warmup: Option<bool>,
     exclude_urls: Option<Vec<String>>,
     debug_log: Option<bool>,
@@ -375,6 +377,16 @@ pub async fn start_crawl(
     if let Some(c) = per_host_concurrency {
         args.push("--per-host-concurrency".to_string());
         args.push(c.to_string());
+    }
+
+    if let Some(t) = nav_timeout {
+        args.push("--nav-timeout".to_string());
+        args.push(t.to_string());
+    }
+
+    // Presence flag (sidecar treats it as on-when-present), like capture-vitals.
+    if let Some(true) = block_resources {
+        args.push("--block-resources".to_string());
     }
 
     if let Some(true) = session_warmup {
@@ -646,15 +658,21 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
             // consumer.
             if ev_name == "crawl-result" {
                 if let Some(c) = ctx {
-                    if c.session_id != 0 {
-                        if let Some(writer) = app.try_state::<DbWriter>() {
-                            writer.enqueue(c.session_id, val.clone());
-                        }
-                    }
+                    // Record into the progress aggregate first (borrows val),
+                    // then hand val to the writer by MOVE. Previously the row
+                    // was deep-cloned for the writer — a full Value clone
+                    // (outlinks/headers/scraper included) per crawled URL on
+                    // the single-threaded stdout consumer. val is unused after
+                    // this block, so moving it is free.
                     if let Some(state) = app.try_state::<CrawlChild>() {
                         let arc_opt = lock_or_recover(&state.progress).clone();
                         if let Some(progress) = arc_opt {
                             lock_or_recover(&progress).record(&val);
+                        }
+                    }
+                    if c.session_id != 0 {
+                        if let Some(writer) = app.try_state::<DbWriter>() {
+                            writer.enqueue(c.session_id, val);
                         }
                     }
                 }

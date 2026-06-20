@@ -757,6 +757,26 @@ pub async fn get_skippable_urls_inner(
     .await
 }
 
+/// The inverse of `get_skippable_urls`: URLs that were parked/blocked by the
+/// detector (placeholder rows, never really fetched). On resume the spider's
+/// queue is seeded only from the sitemap + start URL, so these — which are
+/// neither skippable nor sitemap-reachable — would strand forever. The
+/// frontend ships them back as explicit spider seeds. DISTINCT because a URL
+/// can be parked more than once across stop/resume cycles.
+pub async fn get_retryable_urls_inner(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT url FROM crawl_results
+         WHERE session_id = ?
+           AND error LIKE 'host_blocked_by_detector%'",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+}
+
 /// Per-resource-type row counts. Powers the RightSidebar donut. Sorted
 /// descending by count so the chart's segment order is stable.
 pub async fn aggregate_resource_types_inner(
@@ -780,6 +800,28 @@ pub async fn aggregate_resource_types_inner(
 
 // ── Tauri command wrappers ──────────────────────────────────────────────
 
+/// Flush the write buffer so a read sees in-flight rows — but ONLY when no
+/// crawl is active. During a crawl the grid/health screens poll every ~500ms;
+/// forcing a synchronous flush on each poll chops the writer's 1s batch into
+/// tiny WAL commits, defeating batching exactly when ingest throughput matters.
+/// The next batch lands within ~1s and the UI re-polls, so sub-second grid
+/// staleness during a crawl is invisible. When idle (loaded session, post-crawl)
+/// we flush as before for immediate consistency.
+async fn flush_if_idle(app: &tauri::AppHandle) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    use tauri::Manager;
+    let crawling = app
+        .try_state::<crate::commands::CrawlChild>()
+        .map(|s| s.session_id.load(Ordering::SeqCst) != 0)
+        .unwrap_or(false);
+    if !crawling {
+        if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
+            writer.flush().await?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn query_results(
     app: tauri::AppHandle,
@@ -794,11 +836,7 @@ pub async fn query_results(
         .try_state::<DbReadPool>()
         .ok_or_else(|| "DbReadPool state missing".to_string())?;
     let pool = pool_state.pool().await?;
-    // Make sure any in-flight rows from the Rust writer are visible — the
-    // grid otherwise sees a half-empty page during an active crawl.
-    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
-        writer.flush().await?;
-    }
+    flush_if_idle(&app).await?;
     let offset = (page as i64).saturating_mul(limit as i64);
     let f = filter.unwrap_or_default();
     query_results_inner(pool, session_id, offset, limit as i64, &f, sort.as_ref())
@@ -817,9 +855,7 @@ pub async fn count_results(
         .try_state::<DbReadPool>()
         .ok_or_else(|| "DbReadPool state missing".to_string())?;
     let pool = pool_state.pool().await?;
-    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
-        writer.flush().await?;
-    }
+    flush_if_idle(&app).await?;
     let f = filter.unwrap_or_default();
     count_results_inner(pool, session_id, &f)
         .await
@@ -855,9 +891,7 @@ pub async fn aggregate_health(
         .try_state::<DbReadPool>()
         .ok_or_else(|| "DbReadPool state missing".to_string())?;
     let pool = pool_state.pool().await?;
-    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
-        writer.flush().await?;
-    }
+    flush_if_idle(&app).await?;
     aggregate_health_inner(pool, session_id)
         .await
         .map_err(|e| format!("aggregate_health: {e}"))
@@ -933,6 +967,24 @@ pub async fn get_skippable_urls(
     get_skippable_urls_inner(pool, session_id)
         .await
         .map_err(|e| format!("get_skippable_urls: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_retryable_urls(
+    app: tauri::AppHandle,
+    session_id: i64,
+) -> Result<Vec<String>, String> {
+    use tauri::Manager;
+    let pool_state = app
+        .try_state::<DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
+        writer.flush().await?;
+    }
+    get_retryable_urls_inner(pool, session_id)
+        .await
+        .map_err(|e| format!("get_retryable_urls: {e}"))
 }
 
 #[cfg(test)]
@@ -1320,6 +1372,17 @@ mod tests {
         // Non-block-stub URLs all present.
         assert!(urls.iter().any(|u| u == "https://a.com/1"));
         assert!(urls.iter().any(|u| u == "https://a.com/9"));
+    }
+
+    #[tokio::test]
+    async fn get_retryable_urls_returns_only_block_stubs() {
+        // The inverse of skippable: resume re-seeds these into the spider
+        // queue so the parked frontier survives a stop/resume. Fixture row 4
+        // is the only host_blocked_by_detector stub.
+        let pool = fixture_pool().await;
+        insert_fixture_rows(&pool).await;
+        let urls = get_retryable_urls_inner(&pool, 1).await.unwrap();
+        assert_eq!(urls, vec!["https://a.com/4"], "only the block-stub is retryable");
     }
 
     #[tokio::test]

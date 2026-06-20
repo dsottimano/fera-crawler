@@ -43,6 +43,16 @@ import type { CrawlConfig, CrawlResult, MetaTag } from "./types.js";
 const PATCHRIGHT_BROWSERS = ["chromium", "chromium-headless-shell"];
 let browserInstallPromise: Promise<string | undefined> | null = null;
 
+// Subresource types aborted when config.blockResources is on. The HTML
+// document, scripts, and xhr/fetch are always allowed so JS-rendered content
+// and link discovery still work. Hoisted to module scope so the per-request
+// route handler does an O(1) Set lookup instead of allocating per request.
+const BLOCKED_RESOURCE_TYPES = new Set(["image", "media", "font"]);
+
+// Image extensions trusted verbatim when naming a downloaded og:image.
+// Hoisted to module scope so it isn't re-allocated on every og:image download.
+const KNOWN_IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg"]);
+
 /** Ensures a URL has a protocol prefix. */
 export function ensureProtocol(url: string): string {
   if (!/^https?:\/\//i.test(url)) return "https://" + url;
@@ -323,8 +333,7 @@ async function downloadOgImageFile(
 
     // Pick an extension: trust the URL's existing one if it looks like an
     // image, otherwise infer from content-type header. Falls back to .img.
-    const KNOWN_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg"]);
-    let ext = KNOWN_EXTS.has(origExt) ? origExt : "";
+    let ext = KNOWN_IMAGE_EXTS.has(origExt) ? origExt : "";
     if (!ext) {
       const ct = (response.headers.get("content-type") ?? "").toLowerCase();
       if (ct.includes("jpeg")) ext = ".jpg";
@@ -646,6 +655,9 @@ interface CrawlPageOpts {
   userAgent?: string;
   scraperRules?: Array<{ name: string; selector: string }>;
   captureVitals?: boolean;
+  // Navigation timeout (ms) for page.goto. Defaults to 30000 when unset so
+  // direct crawlPage callers (probe matrix, tests) keep prior behavior.
+  navTimeout?: number;
 }
 
 export async function crawlPage(
@@ -691,14 +703,26 @@ export async function crawlPage(
   page.on("response", onResponse);
 
   try {
-    const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: opts?.navTimeout ?? 30000 });
     const responseTime = Date.now() - startTime;
 
-    // Walk the redirect chain up-front so we can label this row with the
-    // *first* hop's status (SEO-crawler convention) and capture the chain
-    // for the row's redirect_chain column. Done before the rest of the
-    // extraction so all downstream code sees the corrected status.
-    const { chain: redirectChain, firstStatus } = await captureRedirectInfo(response);
+    // Three independent browser round-trips that previously ran serially —
+    // the redirect-chain walk, header read, and DOM (SEO) extraction don't
+    // depend on each other. Overlapping the big SEO evaluate with the header/
+    // redirect reads roughly halves per-page CDP latency on the common path.
+    // If the evaluate rejects, Promise.all rejects and the outer catch records
+    // the error row — same behavior as the old bare `await page.evaluate`.
+    // The redirect chain is still resolved before any downstream code reads
+    // `status`, preserving the first-hop-status convention.
+    const [redirectInfo, headers, data] = await Promise.all([
+      captureRedirectInfo(response),
+      response
+        ? response.allHeaders().catch(() => response.headers())
+        : Promise.resolve({} as Record<string, string>),
+      page.evaluate(EXTRACT_SEO_SCRIPT) as Promise<any>,
+    ]);
+
+    const { chain: redirectChain, firstStatus } = redirectInfo;
     status = firstStatus > 0 ? firstStatus : (response?.status() ?? 0);
 
     // Per-request phase timings, ephemeral. The Network Live Map listens
@@ -726,11 +750,7 @@ export async function crawlPage(
     }
 
     if (response) {
-      try {
-        responseHeaders = await response.allHeaders();
-      } catch {
-        responseHeaders = response.headers();
-      }
+      responseHeaders = headers;
       contentType = responseHeaders["content-type"] ?? "";
       serverHeader = responseHeaders["server"] ?? undefined;
 
@@ -752,9 +772,6 @@ export async function crawlPage(
 
     // Extract X-Robots-Tag from response headers
     const xRobotsTag = responseHeaders["x-robots-tag"] ?? "";
-
-    // Use string-based evaluate to avoid tsx/esbuild __name() injection
-    const data: any = await page.evaluate(EXTRACT_SEO_SCRIPT);
 
     // Run scraper rules
     const scraper: Record<string, { value: string; appears: boolean }> = {};
@@ -788,15 +805,13 @@ export async function crawlPage(
     let ogImageHeightReal = 0;
     let ogImageFileSize = 0;
 
-    // Download og:image: fetch + read real dimensions (fast), compress+save in background
-    if (ogImageUrl && opts?.downloadOgImage && opts.downloadDir) {
-      const imgData = await downloadOgImageFile(ogImageUrl, url, opts.downloadDir, opts.userAgent);
-      if (imgData) {
-        ogImageWidthReal = imgData.width;
-        ogImageHeightReal = imgData.height;
-        ogImageFileSize = imgData.fileSize;
-      }
-    }
+    // Kick off the og:image download now but don't block on it — it's an
+    // independent second HTTP request (up to 15s). Awaited just before the
+    // result is assembled so it overlaps the remaining sync extraction, the
+    // captureVitals load-wait, and the perf read instead of stalling the page.
+    const ogImagePromise = (ogImageUrl && opts?.downloadOgImage && opts.downloadDir)
+      ? downloadOgImageFile(ogImageUrl, url, opts.downloadDir, opts.userAgent)
+      : null;
 
     // Standardize dates
     const published = standardizeDate(data.publishedRaw);
@@ -809,8 +824,9 @@ export async function crawlPage(
     // Robots directives
     const directives = parseRobotsDirectives(data.metaRobots, data.metaGooglebot, xRobotsTag);
 
-    // De-duplicate outlinks
-    const uniqueOutlinks = [...new Set(data.allOutlinks)] as string[];
+    // Outlinks are already de-duplicated in-page via `outlinksSet` (see
+    // EXTRACT_SEO_SCRIPT), so no second Set pass is needed here.
+    const uniqueOutlinks = data.allOutlinks as string[];
 
     const securityHeaders = auditSecurityHeaders(responseHeaders);
 
@@ -822,6 +838,16 @@ export async function crawlPage(
     try {
       perf = await page.evaluate(READ_PERF_SCRIPT) as typeof perf;
     } catch {}
+
+    // Collect the og:image result kicked off earlier (overlapped the work above).
+    if (ogImagePromise) {
+      const imgData = await ogImagePromise;
+      if (imgData) {
+        ogImageWidthReal = imgData.width;
+        ogImageHeightReal = imgData.height;
+        ogImageFileSize = imgData.fileSize;
+      }
+    }
 
     return {
       result: {
@@ -1131,6 +1157,19 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     await context.addInitScript(VITALS_INIT_SCRIPT);
   }
 
+  // Resource blocking: abort image/media/font subrequests for every page in
+  // this context (including warmup). One context-level route, registered once
+  // — not per page. Forced off when capturing vitals, which need real paints.
+  if (config.blockResources && !config.captureVitals) {
+    await context.route("**/*", (route) => {
+      if (BLOCKED_RESOURCE_TYPES.has(route.request().resourceType())) {
+        return route.abort();
+      }
+      return route.continue();
+    });
+    log("info", "resource blocking enabled", { blocked: [...BLOCKED_RESOURCE_TYPES] });
+  }
+
   // Per-host rate limiter. delayMin/Max define the uniform-random range
   // sampled per request; if max <= min, jitter is disabled and the limiter
   // behaves like fixed delayMin (back-compat with old single-value config).
@@ -1185,6 +1224,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     ...(config.downloadOgImage ? { downloadOgImage: true, downloadDir: ogImageDownloadDir, userAgent: config.userAgent } : {}),
     ...(config.scraperRules?.length ? { scraperRules: config.scraperRules } : {}),
     ...(config.captureVitals ? { captureVitals: true } : {}),
+    ...(config.navTimeout ? { navTimeout: config.navTimeout } : {}),
   };
 
   const visited = new Set<string>();
@@ -1199,6 +1239,13 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     log("info", "exclude list seeded", { count: config.excludeUrls.length });
   }
   const queue: string[] = [];
+  // Head index for O(1) dequeue. The worker pool consumes from `queueHead`
+  // forward instead of Array.shift() (O(n)) so a spider queue of tens of
+  // thousands of URLs doesn't degrade to O(n²) draining. Consumed head slots
+  // are compacted away periodically in takeNext(). `queueSize()` is the live
+  // pending count (length minus consumed head).
+  let queueHead = 0;
+  const queueSize = (): number => queue.length - queueHead;
   const sitemapUrls = new Set<string>();
   let processed = 0;
 
@@ -1248,7 +1295,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     const n = bucket.length;
     for (const u of bucket) queue.push(u);
     parkedByHost.delete(host);
-    setQueueSize(queue.length);
+    setQueueSize(queueSize());
     return n;
   }
 
@@ -1310,7 +1357,27 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     if (config.respectRobots) {
       phase("sitemap-discovery");
       try {
-        const origin = new URL(startUrl).origin;
+        const requestedOrigin = new URL(startUrl).origin;
+        // Resolve the post-redirect origin: a non-www start URL (or vice versa)
+        // commonly 301s to the canonical host, and every sitemap <loc> lives on
+        // that canonical origin. Filtering against the literal typed origin then
+        // rejects all of them, draining the queue after one URL. Follow the
+        // redirect once and use the final origin for the queue filter.
+        let origin = requestedOrigin;
+        try {
+          const resp = await fetch(startUrl, {
+            signal: AbortSignal.timeout(8000),
+            headers: { "User-Agent": config.userAgent },
+            redirect: "follow",
+          });
+          const finalOrigin = new URL(resp.url).origin;
+          if (finalOrigin !== requestedOrigin) {
+            origin = finalOrigin;
+            log("info", "start url redirected", { from: requestedOrigin, to: origin });
+          }
+        } catch {
+          // Resolution failed (timeout/network) — fall back to the typed origin.
+        }
         const fromRobots = await robotsCache!.getSitemaps(origin);
         log("info", "sitemaps declared in robots.txt", { count: fromRobots.length, origin });
         const discovered = await discoverSitemapUrls(origin, fromRobots, config.userAgent);
@@ -1326,8 +1393,25 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         log("warn", "sitemap discovery failed", { error: String(e?.message ?? e) });
       }
     }
+
+    // Extra seed URLs for spider mode. On resume, the in-memory parked/blocked
+    // frontier dies with the prior sidecar — those URLs aren't in the sitemap
+    // and aren't re-discoverable (their linking pages are already in `visited`),
+    // so they'd strand forever. The frontend ships them here as explicit seeds
+    // so the spider re-fetches them (and re-expands from their links).
+    if (config.urls?.length) {
+      let seeded = 0;
+      for (const u of config.urls) {
+        const seed = ensureProtocol(u);
+        if (!visited.has(seed)) {
+          queue.push(seed);
+          seeded++;
+        }
+      }
+      if (seeded > 0) log("info", "resume seed urls queued", { seeded });
+    }
   }
-  setQueueSize(queue.length);
+  setQueueSize(queueSize());
 
   const effectiveConcurrency = headless ? config.concurrency : 1;
   // Global staggered delay only for headless multi-tab mode (it staggers
@@ -1436,117 +1520,116 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   }
 
   try {
-    let reusePage: Page | null = null;
-    if (!headless) {
-      const existingPages = context.pages();
-      reusePage = existingPages.length > 0 ? existingPages[0] : await context.newPage();
-      for (let i = 1; i < existingPages.length; i++) {
-        await existingPages[i].close().catch(() => {});
-      }
-    }
+    // Worker pool: N workers, each owning ONE reused page, pulling URLs from
+    // the queue continuously. Replaces the old splice+Promise.all batch loop,
+    // which (a) created/destroyed a tab per URL and (b) blocked the whole batch
+    // on its slowest URL — one 10s nav timeout idled the other N-1 workers for
+    // 10s. Here a slow/timed-out URL blocks only its own worker. Pacing is
+    // unchanged: the per-host rate limiter (acquire/release inside
+    // crawlWithPolicy) remains the single source of throttling.
+    const N = effectiveConcurrency;
+    // Count of workers currently holding a URL (robots check + crawl). Drives
+    // the in-flight metric and termination: when the queue is empty AND no
+    // worker is busy, no more links can be discovered, so the crawl is done.
+    let activeWorkers = 0;
 
-    while (queue.length > 0 && withinLimit(processed, config.maxRequests) && !shutdownRequested) {
-      const batchSize = config.maxRequests === 0
-        ? effectiveConcurrency
-        : Math.min(effectiveConcurrency, config.maxRequests - processed);
-      const batch = queue.splice(0, batchSize);
-      const tasks: string[] = [];
-      for (const url of batch) {
+    // Synchronous dequeue with the visited/gated checks the batch loop did
+    // inline. No await inside → safe to call from multiple workers (Node is
+    // single-threaded; nothing interleaves mid-function). Robots (async) is
+    // checked per-URL inside the worker instead.
+    const takeNext = (): string | undefined => {
+      // Compact consumed head slots so the backing array doesn't grow unbounded
+      // on a long spider crawl. Rare and O(n); amortized negligible.
+      if (queueHead > 10000 && queueHead * 2 > queue.length) {
+        queue.splice(0, queueHead);
+        queueHead = 0;
+      }
+      while (queueHead < queue.length) {
+        const url = queue[queueHead++];
         if (visited.has(url)) continue;
         if (detector.isGated(hostOf(url))) {
           park(url);
           continue;
         }
         visited.add(url);
-        tasks.push(url);
+        return url;
       }
+      return undefined;
+    };
 
-      if (tasks.length === 0) continue;
+    // Shared per-URL completion logic (was duplicated across the two branches).
+    const handleResult = (url: string, result: CrawlResult, discoveredLinks: string[]): void => {
+      if (result.error) {
+        recordError();
+        log("warn", "page error", { url, error: result.error, status: result.status });
+      } else {
+        log("debug", "page complete", { url, status: result.status, ms: result.responseTime, links: discoveredLinks.length });
+      }
+      if (sitemapUrls.has(url)) result.inSitemap = true;
+      recordResult(result);
+      processed++;
+      recordCompletion();
+      if (config.mode === "spider" && !(config.respectRobots && result.isNofollow)) {
+        for (const link of discoveredLinks) {
+          if (!visited.has(link) && canEnqueue(queueSize(), processed, config.maxRequests)) {
+            queue.push(link);
+          }
+        }
+      }
+      setQueueSize(queueSize());
+    };
 
-      // Split tasks into blocked-by-robots (recorded, not crawled) and allowed.
-      const allowed: string[] = [];
-      if (robotsCache) {
-        for (const url of tasks) {
-          const ok = await robotsCache.isAllowed(url);
-          if (ok) {
-            allowed.push(url);
-          } else {
+    const worker = async (index: number, page: Page): Promise<void> => {
+      // Stagger worker starts so N workers don't fire their first request in
+      // the same millisecond (the old batch's `delay * i`). Anti-synchronization
+      // only — steady-state pacing is the per-host rate limiter.
+      if (effectiveDelay > 0 && index > 0) {
+        await new Promise((r) => setTimeout(r, effectiveDelay * index));
+      }
+      while (!shutdownRequested && withinLimit(processed, config.maxRequests)) {
+        const url = takeNext();
+        if (url === undefined) {
+          // Queue momentarily empty. If no other worker is mid-URL, the spider
+          // can't produce more links → done. Else wait briefly for a refill.
+          if (activeWorkers === 0) break;
+          await new Promise((r) => setTimeout(r, 15));
+          continue;
+        }
+        // Increment BEFORE the first await so a sibling worker reaching an empty
+        // queue sees us as busy and waits instead of exiting early at startup.
+        activeWorkers++;
+        setInFlight(activeWorkers);
+        try {
+          if (robotsCache && !(await robotsCache.isAllowed(url))) {
             writeLine(makeBlockedResult(url, sitemapUrls.has(url)));
             processed++;
+            continue;
           }
-        }
-      } else {
-        allowed.push(...tasks);
-      }
-
-      if (reusePage) {
-        setInFlight(1);
-        for (const url of allowed) {
-          if (effectiveDelay > 0) await new Promise((r) => setTimeout(r, effectiveDelay));
           log("debug", "navigating", { url });
-          const { result, discoveredLinks } = await crawlWithPolicy(reusePage, url);
-          if (result.error) {
-            recordError();
-            log("warn", "page error", { url, error: result.error, status: result.status });
-          } else {
-            log("debug", "page complete", { url, status: result.status, ms: result.responseTime, links: discoveredLinks.length });
-          }
-          if (sitemapUrls.has(url)) result.inSitemap = true;
-          recordResult(result);
-          processed++;
-          recordCompletion();
-          if (config.mode === "spider" && !(config.respectRobots && result.isNofollow)) {
-            for (const link of discoveredLinks) {
-              if (!visited.has(link) && canEnqueue(queue.length, processed, config.maxRequests)) {
-                queue.push(link);
-              }
-            }
-          }
-          setQueueSize(queue.length);
+          const { result, discoveredLinks } = await crawlWithPolicy(page, url);
+          handleResult(url, result, discoveredLinks);
+        } finally {
+          activeWorkers--;
+          setInFlight(activeWorkers);
         }
-        setInFlight(0);
-      } else {
-        // Stagger tasks so `delay` throttles request rate (1 request per `delay` ms),
-        // rather than firing all N concurrent requests simultaneously after one delay.
-        setInFlight(allowed.length);
-        log("debug", "batch start", { size: allowed.length, queueRemaining: queue.length });
-        const results = await Promise.all(
-          allowed.map(async (url, i) => {
-            if (effectiveDelay > 0) await new Promise((r) => setTimeout(r, effectiveDelay * i));
-            log("debug", "navigating", { url });
-            const page = await context.newPage();
-            try {
-              return { url, data: await crawlWithPolicy(page, url) };
-            } finally {
-              await page.close();
-            }
-          }),
-        );
-        setInFlight(0);
-
-        for (const { url, data } of results) {
-          const { result, discoveredLinks } = data;
-          if (result.error) {
-            recordError();
-            log("warn", "page error", { url, error: result.error, status: result.status });
-          } else {
-            log("debug", "page complete", { url, status: result.status, ms: result.responseTime, links: discoveredLinks.length });
-          }
-          if (sitemapUrls.has(url)) result.inSitemap = true;
-          recordResult(result);
-          processed++;
-          recordCompletion();
-          if (config.mode === "spider" && !(config.respectRobots && result.isNofollow)) {
-            for (const link of discoveredLinks) {
-              if (!visited.has(link) && canEnqueue(queue.length, processed, config.maxRequests)) {
-                queue.push(link);
-              }
-            }
-          }
-        }
-        setQueueSize(queue.length);
       }
+    };
+
+    // One page per worker, created once and reused for the worker's lifetime.
+    // Headed mode is single-worker and reuses the existing context page (the
+    // sign-in tab) rather than opening a new one.
+    const pages: Page[] = [];
+    if (!headless) {
+      const existingPages = context.pages();
+      pages.push(existingPages.length > 0 ? existingPages[0] : await context.newPage());
+      for (let i = 1; i < existingPages.length; i++) {
+        await existingPages[i].close().catch(() => {});
+      }
+    } else {
+      for (let i = 0; i < N; i++) pages.push(await context.newPage());
     }
+
+    await Promise.all(pages.map((page, i) => worker(i, page)));
   } finally {
     phase("shutdown", { processed });
     log("info", "crawl finished", { processed });

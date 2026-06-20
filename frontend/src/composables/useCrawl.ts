@@ -232,12 +232,31 @@ export function useCrawl() {
       }
     }
 
+    // On resume, recover the parked/blocked frontier. URLs the block detector
+    // stranded last session aren't skippable, aren't in the sitemap, and won't
+    // be re-discovered (their linking pages are already crawled) — so without
+    // this they'd never be retried. Re-seed them as explicit spider seeds.
+    // Spider mode only; list/recrawl callers manage their own URL set.
+    let seedUrls = opts.urls;
+    const effectiveMode = opts.mode ?? s.crawling.mode;
+    if (resume && effectiveMode === "spider") {
+      try {
+        const retryable = await invoke<string[]>("get_retryable_urls", { sessionId });
+        if (retryable.length > 0) {
+          seedUrls = [...(opts.urls ?? []), ...retryable];
+          console.info(`resume: re-seeding ${retryable.length} parked/blocked URLs`);
+        }
+      } catch (e) {
+        console.error("get_retryable_urls failed (parked URLs won't be re-seeded):", e);
+      }
+    }
+
     try {
       await invoke(
         "start_crawl",
         buildStartCrawlPayload(url, s, {
           mode: opts.mode,
-          urls: opts.urls,
+          urls: seedUrls,
           maxRequests: opts.maxRequests,
           excludeUrls,
           sessionId,

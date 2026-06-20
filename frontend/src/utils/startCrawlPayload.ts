@@ -25,6 +25,8 @@ export interface StartCrawlPayload {
   perHostDelay: number;
   perHostDelayMax: number;
   perHostConcurrency: number;
+  navTimeout: number;
+  blockResources: boolean;
   sessionWarmup: boolean | null;
   excludeUrls: string[] | null;
   debugLog: boolean;
@@ -79,6 +81,8 @@ export function buildStartCrawlPayload(
     perHostDelay: s.performance.perHostDelay,
     perHostDelayMax: s.performance.perHostDelayMax,
     perHostConcurrency: s.performance.perHostConcurrency,
+    navTimeout: s.performance.navTimeout,
+    blockResources: s.performance.blockResources,
     sessionWarmup: s.performance.sessionWarmup || null,
     excludeUrls: excludeUrlsArr.length ? excludeUrlsArr : null,
     debugLog: s.advanced.debugLog,

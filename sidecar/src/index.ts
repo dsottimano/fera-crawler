@@ -140,6 +140,9 @@ if (command === "open-browser") {
   const perHostDelayMax = perHostDelayMaxRaw ? parseInt(perHostDelayMaxRaw, 10) : undefined;
   const perHostConcurrencyRaw = getFlag("--per-host-concurrency", "");
   const perHostConcurrency = perHostConcurrencyRaw ? parseInt(perHostConcurrencyRaw, 10) : undefined;
+  const navTimeoutRaw = getFlag("--nav-timeout", "");
+  const navTimeout = navTimeoutRaw ? parseInt(navTimeoutRaw, 10) : undefined;
+  const blockResources = hasFlag("--block-resources");
   const sessionWarmup = hasFlag("--session-warmup");
   setDebugEnabled(hasFlag("--debug-log"));
   const sessionIdRaw = getFlag("--session-id", "");
@@ -185,6 +188,8 @@ if (command === "open-browser") {
     ...(perHostDelay !== undefined && !Number.isNaN(perHostDelay) ? { perHostDelay } : {}),
     ...(perHostDelayMax !== undefined && !Number.isNaN(perHostDelayMax) ? { perHostDelayMax } : {}),
     ...(perHostConcurrency !== undefined && !Number.isNaN(perHostConcurrency) ? { perHostConcurrency } : {}),
+    ...(navTimeout !== undefined && !Number.isNaN(navTimeout) ? { navTimeout } : {}),
+    ...(blockResources ? { blockResources } : {}),
     ...(sessionWarmup ? { sessionWarmup } : {}),
     ...(excludeUrls?.length ? { excludeUrls } : {}),
     ...(sessionId !== undefined && !Number.isNaN(sessionId) ? { sessionId } : {}),

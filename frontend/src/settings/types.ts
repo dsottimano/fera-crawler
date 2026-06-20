@@ -44,6 +44,9 @@ export interface SettingsValues {
     perHostDelay: number;
     perHostDelayMax: number;
     perHostConcurrency: number;
+    // Per-page navigation timeout (ms). A timed-out page is a status-0 error
+    // and frees its host-concurrency slot; lower = dead pages fail fast.
+    navTimeout: number;
     sessionWarmup: boolean;
     // When a host gets gated by the block detector, automatically run the
     // probe matrix and apply the first winning row's settings if found.
