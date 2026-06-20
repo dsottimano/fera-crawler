@@ -16,6 +16,11 @@ import { buildStartCrawlPayload } from "../utils/startCrawlPayload";
 
 const crawling = ref(false);
 const stopped = ref(false);
+// True when the user explicitly hit STOP for the in-flight crawl. Read by the
+// crawl-complete handler to tell a user interruption (resumable) apart from a
+// natural queue-drained completion. Plain flag (not reactive) — set/reset
+// synchronously around the crawl lifecycle.
+let userStopped = false;
 const currentSessionId = ref<number | null>(null);
 
 /** Live aggregate from the Rust `crawl-progress` event (Phase 3) plus the
@@ -120,6 +125,7 @@ export function useCrawl() {
     }
     crawling.value = true;
     stopped.value = false;
+    userStopped = false;
     // Resume keeps the loaded count visible. Resetting on resume flashed
     // PAGES CRAWLED to 0 and then to the new-rows-only count (e.g. 10
     // instead of 14,691 already-on-disk). Fresh starts wipe to 0 so the
@@ -153,16 +159,28 @@ export function useCrawl() {
       try {
         const h = await invoke<HealthSnapshot>("aggregate_health", { sessionId });
         rowCount = h.total;
-        // Mirror legacy semantics: error-string rows + 4xx + 5xx + non-HTTP
-        // statuses (0/600+) all count as failures for completion purposes.
+        // Informational only now (hadFailures). Normal 4xx/5xx/timeouts no
+        // longer mark a crawl "stopped" — see decideCompletion.
         errorCount = h.errors + h.status4xx + h.status5xx + h.statusOther;
       } catch (e) {
         console.error("aggregate_health on complete failed:", e);
+      }
+      // Parked/blocked URLs are the real resumable signal (vs. plain HTTP
+      // errors). If any remain, the crawl is "stopped" so the user can resume
+      // to retry them; the resume path re-seeds them via get_retryable_urls.
+      let retryableCount = 0;
+      try {
+        const retryable = await invoke<string[]>("get_retryable_urls", { sessionId });
+        retryableCount = retryable.length;
+      } catch (e) {
+        console.error("get_retryable_urls on complete failed:", e);
       }
       const decision = decideCompletion({
         rowCount,
         errorCount,
         listTotal: inputs.urls.length,
+        interrupted: userStopped,
+        retryableCount,
       });
 
       try {
@@ -232,22 +250,31 @@ export function useCrawl() {
       }
     }
 
-    // On resume, recover the parked/blocked frontier. URLs the block detector
-    // stranded last session aren't skippable, aren't in the sitemap, and won't
-    // be re-discovered (their linking pages are already crawled) — so without
-    // this they'd never be retried. Re-seed them as explicit spider seeds.
-    // Spider mode only; list/recrawl callers manage their own URL set.
+    // On resume, recover everything the prior run discovered but didn't finish,
+    // re-seeded as explicit spider seeds (spider mode only; list/recrawl callers
+    // manage their own URL set):
+    //   - frontier  — discovered-but-never-crawled URLs (the deep frontier).
+    //     These aren't in the sitemap and can't be re-discovered (their linking
+    //     pages are already crawled), so without this they'd be lost on stop.
+    //   - retryable — block-detector-parked placeholder rows, disjoint from the
+    //     frontier (those are already in crawl_results).
     let seedUrls = opts.urls;
     const effectiveMode = opts.mode ?? s.crawling.mode;
     if (resume && effectiveMode === "spider") {
-      try {
-        const retryable = await invoke<string[]>("get_retryable_urls", { sessionId });
-        if (retryable.length > 0) {
-          seedUrls = [...(opts.urls ?? []), ...retryable];
-          console.info(`resume: re-seeding ${retryable.length} parked/blocked URLs`);
-        }
-      } catch (e) {
-        console.error("get_retryable_urls failed (parked URLs won't be re-seeded):", e);
+      const [frontier, retryable] = await Promise.all([
+        invoke<string[]>("get_frontier_urls", { sessionId }).catch((e) => {
+          console.error("get_frontier_urls failed (frontier won't be re-seeded):", e);
+          return [] as string[];
+        }),
+        invoke<string[]>("get_retryable_urls", { sessionId }).catch((e) => {
+          console.error("get_retryable_urls failed (parked URLs won't be re-seeded):", e);
+          return [] as string[];
+        }),
+      ]);
+      const extra = [...new Set([...frontier, ...retryable])];
+      if (extra.length > 0) {
+        seedUrls = [...(opts.urls ?? []), ...extra];
+        console.info(`resume: re-seeding ${frontier.length} frontier + ${retryable.length} parked URLs`);
       }
     }
 
@@ -270,6 +297,10 @@ export function useCrawl() {
   }
 
   async function stopCrawl() {
+    // Mark BEFORE the kill so a crawl-complete racing in from the dying sidecar
+    // is correctly classified as a user interruption (resumable), not a natural
+    // completion.
+    userStopped = true;
     try {
       await invoke("stop_crawl");
     } catch (e) {

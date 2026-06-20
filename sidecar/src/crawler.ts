@@ -1228,13 +1228,23 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   };
 
   const visited = new Set<string>();
+  // Every URL ever placed in the queue this run — see enqueueNew(). Dedups so
+  // a URL linked from many pages is enqueued and reported "discovered" exactly
+  // once. Seeded with the resume skip set so already-crawled URLs aren't
+  // re-reported into the frontier.
+  const everEnqueued = new Set<string>();
   // Resume support: pre-seed visited so already-crawled URLs are skipped.
   if (config.excludeUrls?.length) {
-    for (const u of config.excludeUrls) visited.add(u);
+    for (const u of config.excludeUrls) {
+      visited.add(u);
+      everEnqueued.add(u);
+    }
     // Spider mode still crawls the start URL — without it, link discovery
     // can't bootstrap a resumed crawl.
     if (config.mode === "spider" && config.startUrl) {
-      visited.delete(ensureProtocol(config.startUrl));
+      const s = ensureProtocol(config.startUrl);
+      visited.delete(s);
+      everEnqueued.delete(s);
     }
     log("info", "exclude list seeded", { count: config.excludeUrls.length });
   }
@@ -1248,6 +1258,28 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   const queueSize = (): number => queue.length - queueHead;
   const sitemapUrls = new Set<string>();
   let processed = 0;
+
+  // Discovered-URL stream → Rust persists each to crawl_frontier (the pending
+  // set). Buffered and emitted in chunks to avoid one event per link.
+  const discoveredBuffer: string[] = [];
+  function flushDiscovered(): void {
+    if (discoveredBuffer.length === 0) return;
+    const urls = discoveredBuffer.splice(0, discoveredBuffer.length);
+    writeAnyEvent({ type: "discovered", urls } as any);
+  }
+  // Push a not-yet-seen URL onto the queue and report it discovered. Returns
+  // false (no-op) if already enqueued this run. The single choke point for new
+  // URLs entering the frontier — every NEW enqueue goes through here so the
+  // crawl_frontier table mirrors the in-memory queue. (unparkHost re-queues
+  // already-discovered parked URLs with a raw push and must NOT re-report.)
+  function enqueueNew(url: string): boolean {
+    if (everEnqueued.has(url)) return false;
+    everEnqueued.add(url);
+    queue.push(url);
+    discoveredBuffer.push(url);
+    if (discoveredBuffer.length >= 200) flushDiscovered();
+    return true;
+  }
 
   // URLs parked while their host is gated. Resume-host moves them back to queue.
   const parkedByHost = new Map<string, string[]>();
@@ -1348,10 +1380,10 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   const robotsCache = config.respectRobots ? new RobotsCache(config.userAgent) : null;
 
   if (config.mode === "list" && config.urls?.length) {
-    for (const u of config.urls) queue.push(ensureProtocol(u));
+    for (const u of config.urls) enqueueNew(ensureProtocol(u));
   } else {
     const startUrl = ensureProtocol(config.startUrl);
-    queue.push(startUrl);
+    enqueueNew(startUrl);
 
     // Sitemap discovery — fetch on spider start, seed queue, and track inSitemap flags.
     if (config.respectRobots) {
@@ -1386,7 +1418,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         for (const u of discovered) {
           sitemapUrls.add(u);
           try {
-            if (new URL(u).origin === origin && !visited.has(u)) queue.push(u);
+            if (new URL(u).origin === origin) enqueueNew(u);
           } catch {}
         }
       } catch (e: any) {
@@ -1402,11 +1434,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     if (config.urls?.length) {
       let seeded = 0;
       for (const u of config.urls) {
-        const seed = ensureProtocol(u);
-        if (!visited.has(seed)) {
-          queue.push(seed);
-          seeded++;
-        }
+        if (enqueueNew(ensureProtocol(u))) seeded++;
       }
       if (seeded > 0) log("info", "resume seed urls queued", { seeded });
     }
@@ -1571,8 +1599,8 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
       recordCompletion();
       if (config.mode === "spider" && !(config.respectRobots && result.isNofollow)) {
         for (const link of discoveredLinks) {
-          if (!visited.has(link) && canEnqueue(queueSize(), processed, config.maxRequests)) {
-            queue.push(link);
+          if (canEnqueue(queueSize(), processed, config.maxRequests)) {
+            enqueueNew(link);
           }
         }
       }
@@ -1631,6 +1659,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
 
     await Promise.all(pages.map((page, i) => worker(i, page)));
   } finally {
+    flushDiscovered();
     phase("shutdown", { processed });
     log("info", "crawl finished", { processed });
     await context.close().catch(() => {});

@@ -149,6 +149,23 @@ pub fn run() {
                       ON crawl_results(session_id, meta_description);",
             kind: MigrationKind::Up,
         },
+        // The discovered-but-not-yet-crawled frontier. The sidecar streams
+        // discovered URLs here; the writer removes a url once its crawl-result
+        // lands. So at any time this table holds exactly the pending URLs:
+        //   FOUND = crawl_results + crawl_frontier, REMAINING = crawl_frontier.
+        // Survives any sidecar exit, so a resumed crawl can re-seed from it
+        // instead of re-deriving the frontier from the sitemap. PK doubles as
+        // the index for the per-row delete and the per-session count.
+        Migration {
+            version: 9,
+            description: "create crawl_frontier table (pending discovered URLs)",
+            sql: "CREATE TABLE IF NOT EXISTS crawl_frontier (
+                session_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                PRIMARY KEY (session_id, url)
+            );",
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -224,6 +241,7 @@ pub fn run() {
             db_query::aggregate_resource_types,
             db_query::get_skippable_urls,
             db_query::get_retryable_urls,
+            db_query::get_frontier_urls,
             voice_commands::claude_turn_streaming,
             voice_commands::speak,
         ])

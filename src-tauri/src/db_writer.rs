@@ -40,6 +40,8 @@ struct PendingRow {
 
 enum Msg {
     Row(PendingRow),
+    // Discovered URLs to persist into crawl_frontier (the pending set).
+    Frontier { session_id: i64, urls: Vec<String> },
     Flush(oneshot::Sender<Result<(), String>>),
 }
 
@@ -53,6 +55,14 @@ impl DbWriter {
     /// only surface via flush() or via stderr from the writer loop.
     pub fn enqueue(&self, session_id: i64, value: Value) {
         let _ = self.tx.send(Msg::Row(PendingRow { session_id, value }));
+    }
+
+    /// Persist discovered URLs into the pending frontier. Fire-and-forget.
+    pub fn enqueue_frontier(&self, session_id: i64, urls: Vec<String>) {
+        if urls.is_empty() {
+            return;
+        }
+        let _ = self.tx.send(Msg::Frontier { session_id, urls });
     }
 
     /// Drain pending rows and return when the batch containing this flush
@@ -101,12 +111,16 @@ async fn open_pool(db_path: &std::path::Path) -> Result<SqlitePool, String> {
 async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Msg>, db_path: PathBuf) {
     let mut pool: Option<SqlitePool> = None;
     let mut buffer: Vec<PendingRow> = Vec::with_capacity(BATCH_SIZE);
+    let mut frontier_buffer: Vec<(i64, String)> = Vec::new();
     let mut flush_replies: Vec<oneshot::Sender<Result<(), String>>> = Vec::new();
 
     loop {
         // Block for the first message of the next batch.
         match rx.recv().await {
             Some(Msg::Row(r)) => buffer.push(r),
+            Some(Msg::Frontier { session_id, urls }) => {
+                frontier_buffer.extend(urls.into_iter().map(|u| (session_id, u)));
+            }
             Some(Msg::Flush(tx)) => flush_replies.push(tx),
             None => return,
         }
@@ -122,6 +136,9 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Msg>, db_path: PathBuf) {
             }
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Some(Msg::Row(r))) => buffer.push(r),
+                Ok(Some(Msg::Frontier { session_id, urls })) => {
+                    frontier_buffer.extend(urls.into_iter().map(|u| (session_id, u)));
+                }
                 Ok(Some(Msg::Flush(tx))) => {
                     flush_replies.push(tx);
                     force_flush = true;
@@ -148,7 +165,10 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Msg>, db_path: PathBuf) {
         }
         let p = pool.as_ref().unwrap();
 
-        let result = if buffer.is_empty() {
+        // Rows first — write_batch also removes the crawled urls from the
+        // frontier — then frontier inserts (which skip already-crawled urls).
+        // Ordering keeps a same-batch discover+crawl out of the pending set.
+        let mut result = if buffer.is_empty() {
             Ok(())
         } else {
             let drained = std::mem::take(&mut buffer);
@@ -156,6 +176,13 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Msg>, db_path: PathBuf) {
                 .await
                 .map_err(|e| format!("write_batch: {e}"))
         };
+
+        if result.is_ok() && !frontier_buffer.is_empty() {
+            let drained = std::mem::take(&mut frontier_buffer);
+            result = write_frontier(p, &drained)
+                .await
+                .map_err(|e| format!("write_frontier: {e}"));
+        }
 
         if let Err(ref e) = result {
             eprintln!("[db_writer] {e}");
@@ -240,6 +267,63 @@ async fn write_batch(pool: &SqlitePool, batch: &[PendingRow]) -> Result<(), sqlx
         q.execute(&mut *tx).await?;
     }
 
+    // Remove the just-crawled urls from the pending frontier — they've moved
+    // from "remaining" to crawl_results. Reuses the per-session url grouping.
+    for (session_id, urls) in &by_session {
+        for url_chunk in urls.chunks(DELETE_URL_CHUNK) {
+            if url_chunk.is_empty() {
+                continue;
+            }
+            let placeholders = std::iter::repeat("?")
+                .take(url_chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "DELETE FROM crawl_frontier WHERE session_id = ? AND url IN ({})",
+                placeholders
+            );
+            let mut q = sqlx::query(&sql).bind(*session_id);
+            for u in url_chunk {
+                q = q.bind(*u);
+            }
+            q.execute(&mut *tx).await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Insert discovered URLs into the pending frontier. INSERT OR IGNORE dedups on
+/// the (session_id, url) PK; the NOT EXISTS guard skips urls already crawled —
+/// a buffered `discovered` event can land after that page's crawl-result, which
+/// would otherwise leave a stale pending row for an already-crawled url.
+async fn write_frontier(pool: &SqlitePool, batch: &[(i64, String)]) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    // 2 params/row → 400 rows = 800 params, safe under the 999 legacy ceiling.
+    const FRONTIER_CHUNK: usize = 400;
+    for chunk in batch.chunks(FRONTIER_CHUNK) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let values = std::iter::repeat("(?,?)")
+            .take(chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "INSERT OR IGNORE INTO crawl_frontier (session_id, url)
+             SELECT v.c0, v.c1 FROM (VALUES {}) AS v(c0, c1)
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM crawl_results r WHERE r.session_id = v.c0 AND r.url = v.c1
+             )",
+            values
+        );
+        let mut q = sqlx::query(&sql);
+        for (sid, url) in chunk {
+            q = q.bind(*sid).bind(url);
+        }
+        q.execute(&mut *tx).await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -496,6 +580,16 @@ mod tests {
         .execute(&pool)
         .await
         .expect("create table");
+        sqlx::query(
+            "CREATE TABLE crawl_frontier (
+                session_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                PRIMARY KEY (session_id, url)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create frontier table");
         pool
     }
 
@@ -764,6 +858,16 @@ mod tests {
                     redirect_url TEXT DEFAULT '', server_header TEXT DEFAULT '',
                     seo_json TEXT DEFAULT '{}',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )",
+            )
+            .execute(&setup_pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "CREATE TABLE crawl_frontier (
+                    session_id INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    PRIMARY KEY (session_id, url)
                 )",
             )
             .execute(&setup_pool)

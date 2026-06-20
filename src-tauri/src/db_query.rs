@@ -640,6 +640,9 @@ pub struct HealthSnapshot {
     pub empty_title: i64,
     pub avg_response_time: f64,
     pub max_response_time: i64,
+    // Pending discovered-but-not-yet-crawled URLs. FOUND = total + frontier,
+    // REMAINING = frontier. Survives stop/reload (DB-backed).
+    pub frontier: i64,
 }
 
 pub async fn aggregate_health_inner(
@@ -672,6 +675,13 @@ pub async fn aggregate_health_inner(
     .fetch_one(pool)
     .await?;
 
+    // Pending frontier count — separate table, cheap (PK index on session_id).
+    let frontier: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crawl_frontier WHERE session_id = ?")
+        .bind(session_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
     let i = |c: &str| -> i64 { row.try_get::<Option<i64>, _>(c).ok().flatten().unwrap_or(0) };
     Ok(HealthSnapshot {
         total: i("total"),
@@ -691,6 +701,7 @@ pub async fn aggregate_health_inner(
             .try_get::<f64, _>("avg_response_time")
             .unwrap_or(0.0),
         max_response_time: i("max_response_time"),
+        frontier,
     })
 }
 
@@ -775,6 +786,21 @@ pub async fn get_retryable_urls_inner(
     .bind(session_id)
     .fetch_all(pool)
     .await
+}
+
+/// The pending frontier: URLs discovered last run but never crawled. A resumed
+/// spider re-seeds from this so it continues the deep crawl instead of having
+/// to re-derive the frontier from the sitemap (which can't reach links found
+/// only via page-to-page discovery). Disjoint from get_retryable_urls (those
+/// are placeholder rows already in crawl_results; frontier rows are not).
+pub async fn get_frontier_urls_inner(
+    pool: &SqlitePool,
+    session_id: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>("SELECT url FROM crawl_frontier WHERE session_id = ?")
+        .bind(session_id)
+        .fetch_all(pool)
+        .await
 }
 
 /// Per-resource-type row counts. Powers the RightSidebar donut. Sorted
@@ -987,6 +1013,24 @@ pub async fn get_retryable_urls(
         .map_err(|e| format!("get_retryable_urls: {e}"))
 }
 
+#[tauri::command]
+pub async fn get_frontier_urls(
+    app: tauri::AppHandle,
+    session_id: i64,
+) -> Result<Vec<String>, String> {
+    use tauri::Manager;
+    let pool_state = app
+        .try_state::<DbReadPool>()
+        .ok_or_else(|| "DbReadPool state missing".to_string())?;
+    let pool = pool_state.pool().await?;
+    if let Some(writer) = app.try_state::<crate::db_writer::DbWriter>() {
+        writer.flush().await?;
+    }
+    get_frontier_urls_inner(pool, session_id)
+        .await
+        .map_err(|e| format!("get_frontier_urls: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,6 +1065,16 @@ mod tests {
                 redirect_url TEXT DEFAULT '', server_header TEXT DEFAULT '',
                 seo_json TEXT DEFAULT '{}',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE crawl_frontier (
+                session_id INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                PRIMARY KEY (session_id, url)
             )",
         )
         .execute(&pool)
@@ -1383,6 +1437,22 @@ mod tests {
         insert_fixture_rows(&pool).await;
         let urls = get_retryable_urls_inner(&pool, 1).await.unwrap();
         assert_eq!(urls, vec!["https://a.com/4"], "only the block-stub is retryable");
+    }
+
+    #[tokio::test]
+    async fn get_frontier_urls_returns_pending_for_session_only() {
+        let pool = fixture_pool().await;
+        for (sid, url) in [(1, "https://a.com/p1"), (1, "https://a.com/p2"), (2, "https://b.com/x")] {
+            sqlx::query("INSERT INTO crawl_frontier (session_id, url) VALUES (?, ?)")
+                .bind(sid)
+                .bind(url)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut urls = get_frontier_urls_inner(&pool, 1).await.unwrap();
+        urls.sort();
+        assert_eq!(urls, vec!["https://a.com/p1", "https://a.com/p2"], "session 1 frontier only");
     }
 
     #[tokio::test]

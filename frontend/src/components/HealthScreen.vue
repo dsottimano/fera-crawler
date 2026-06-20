@@ -43,6 +43,7 @@ interface HealthSnapshot {
   emptyTitle: number;
   avgResponseTime: number;
   maxResponseTime: number;
+  frontier: number;
 }
 
 const EMPTY: HealthSnapshot = {
@@ -61,6 +62,7 @@ const EMPTY: HealthSnapshot = {
   emptyTitle: 0,
   avgResponseTime: 0,
   maxResponseTime: 0,
+  frontier: 0,
 };
 
 const health = ref<HealthSnapshot>(EMPTY);
@@ -245,6 +247,11 @@ const heroStatus = computed(() => {
 });
 const heroRowCount = computed(() => props.crawling ? crawlProgress.value.rowCount : health.value.total);
 const heroErrorCount = computed(() => props.crawling ? crawlProgress.value.errorCount : health.value.errors);
+// FOUND = crawled + pending frontier; REMAINING = pending frontier. Both
+// DB-backed (health.frontier), so they're correct on a stopped/reloaded
+// session — answering "did the crawl find more than it crawled?".
+const heroRemaining = computed(() => health.value.frontier);
+const heroFoundCount = computed(() => heroRowCount.value + heroRemaining.value);
 
 // Live throughput, queue, and ETA — only meaningful while a crawl is active.
 // pps / queue / inFlight come straight from the sidecar metric stream.
@@ -350,6 +357,20 @@ function maxResponseTime(): string {
             <span class="info-tip" :data-tip="props.crawling ? 'Live: every URL the sidecar has emitted, including retries. Settles to the de-duped DB count once the crawl finishes.' : 'Distinct URLs persisted to the database for this session.'">i</span>
           </div>
           <div class="hero-stat-value">{{ heroRowCount.toLocaleString() }}</div>
+        </div>
+        <div class="hero-stat">
+          <div class="hero-stat-label">
+            FOUND
+            <span class="info-tip" data-tip="Total URLs discovered for this session = pages crawled + the not-yet-crawled frontier. Persisted, so it's accurate even after a stop or reload.">i</span>
+          </div>
+          <div class="hero-stat-value">{{ heroFoundCount.toLocaleString() }}</div>
+        </div>
+        <div class="hero-stat">
+          <div class="hero-stat-label">
+            NOT CRAWLED
+            <span class="info-tip" data-tip="Discovered URLs still pending (the saved frontier). A resume picks these up. 0 means the reachable set is fully crawled.">i</span>
+          </div>
+          <div class="hero-stat-value">{{ heroRemaining.toLocaleString() }}</div>
         </div>
         <div class="hero-stat">
           <div class="hero-stat-label">

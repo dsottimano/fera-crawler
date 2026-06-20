@@ -620,6 +620,7 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                 Some("probe-result") => "probe-result",
                 Some("probe-matrix-start") => "probe-matrix-start",
                 Some("probe-matrix-complete") => "probe-matrix-complete",
+                Some("discovered") => "discovered",
                 _ => "crawl-result",
             };
             // Gate stale events from replaced sidecars. The dying child can
@@ -632,6 +633,7 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
             if matches!(
                 ev_name,
                 "crawl-result"
+                    | "discovered"
                     | "block-detected"
                     | "block-cooldown-cleared"
                     | "sidecar-metric"
@@ -656,6 +658,24 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
             // query_results and the health screen reads aggregate_health,
             // so a per-row IPC tax was just memory pressure with no
             // consumer.
+            // Discovered URLs → persist into the pending frontier (crawl_frontier).
+            // Not emitted to the webview; the grid/health read DB-backed counts.
+            if ev_name == "discovered" {
+                if let Some(c) = ctx {
+                    if c.session_id != 0 {
+                        if let Some(writer) = app.try_state::<DbWriter>() {
+                            if let Some(arr) = val.get("urls").and_then(|u| u.as_array()) {
+                                let urls: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|u| u.as_str().map(String::from))
+                                    .collect();
+                                writer.enqueue_frontier(c.session_id, urls);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             if ev_name == "crawl-result" {
                 if let Some(c) = ctx {
                     // Record into the progress aggregate first (borrows val),

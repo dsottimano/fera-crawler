@@ -35,7 +35,17 @@ const { config } = useConfig();
 const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
 const { saveCrawl, openCrawl, exportCsv, exportBundle, exportFilteredCsv } = useFileOps();
 const { profileData } = useBrowser();
-const { start: startDebugListeners } = useDebug();
+const { start: startDebugListeners, latestMetric } = useDebug();
+
+// Live "found vs crawled" signal for the header. queueSize + inFlight come from
+// the sidecar metric stream and are only populated during an active crawl, so
+// QUEUED is shown only while crawling. (Persisted found/remaining for a stopped
+// or reloaded session is a separate, DB-backed addition.)
+const queuedCount = computed(() => {
+  const m = latestMetric.value;
+  if (!crawling.value || !m) return 0;
+  return (m.queueSize ?? 0) + (m.inFlight ?? 0);
+});
 const { settings, effectiveSettings, init: initSettings, patch: patchSetting } = useSettings();
 
 // Auto-show profile viewer when cookies arrive after sign-in
@@ -593,10 +603,17 @@ async function handleMenuAction(menu: string, item: string) {
              many of the queued list have come back. Spider mode shows
              just the running count. -->
         <div class="telem-stat">
-          <span class="telem-label">{{ effectiveSettings.crawling.mode === 'list' ? 'PAGES CRAWLED' : 'URLS FOUND' }}</span>
+          <span class="telem-label">{{ effectiveSettings.crawling.mode === 'list' ? 'PAGES CRAWLED' : 'CRAWLED' }}</span>
           <span class="telem-value telem-number">
             {{ crawlProgress.rowCount.toLocaleString() }}<template v-if="effectiveSettings.crawling.mode === 'list' && effectiveSettings.inputs.urls.length > 0"><span class="telem-number-sep"> / </span>{{ effectiveSettings.inputs.urls.length.toLocaleString() }}</template>
           </span>
+        </div>
+
+        <!-- Live "found vs crawled" backlog. Only meaningful during an active
+             crawl (queue/in-flight come from the live metric stream). -->
+        <div v-if="queuedCount > 0" class="telem-stat">
+          <span class="telem-label">QUEUED</span>
+          <span class="telem-value telem-number">{{ queuedCount.toLocaleString() }}</span>
         </div>
 
         <div class="telem-divider"></div>
