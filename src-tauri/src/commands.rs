@@ -178,8 +178,24 @@ fn kill_chrome_for_profile(profile_dir: &str) {
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let needle = format!("--user-data-dir={}", profile_dir);
+            // Match only at an argument boundary so `browser-profile` never
+            // matches `browser-profile-probe`: the char right after the path
+            // must be whitespace/quote/end-of-line, not a continuation like `-`.
+            let matches_profile = |line: &str| {
+                let mut from = 0;
+                while let Some(rel) = line[from..].find(&needle) {
+                    let after = from + rel + needle.len();
+                    match line[after..].chars().next() {
+                        None => return true,
+                        Some(c) if c.is_whitespace() || c == '"' || c == '\'' => return true,
+                        _ => {}
+                    }
+                    from = after;
+                }
+                false
+            };
             for line in stdout.lines() {
-                if !line.contains(&needle) {
+                if !matches_profile(line) {
                     continue;
                 }
                 if let Some(pid_str) = line.trim().split_whitespace().next() {
@@ -198,9 +214,16 @@ fn kill_chrome_for_profile(profile_dir: &str) {
     {
         // Pass the profile dir as a PowerShell pipeline input rather than string-interpolating
         // it into the script — avoids injection via backticks, $(), or quotes in the path.
+        // Require an argument boundary right after the path (space, quote, or
+        // end-of-string) so `browser-profile` never matches the probe's
+        // `browser-profile-probe` dir.
         let script = "$p = [Console]::In.ReadLine(); \
             Get-CimInstance Win32_Process | \
-            Where-Object { $_.CommandLine -like ('*--user-data-dir=' + $p + '*') } | \
+            Where-Object { \
+                $_.CommandLine -like ('*--user-data-dir=' + $p + ' *') -or \
+                $_.CommandLine -like ('*--user-data-dir=' + $p + '\"*') -or \
+                $_.CommandLine -like ('*--user-data-dir=' + $p) \
+            } | \
             ForEach-Object { $_.Terminate() }";
         if let Ok(mut child) = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", script])
@@ -982,10 +1005,16 @@ pub async fn delete_session_images(app: AppHandle, session_id: i64) -> Result<()
 #[tauri::command]
 pub async fn wipe_browser_profile(app: AppHandle) -> Result<String, String> {
     let crawl_state: State<CrawlChild> = app.state();
+    // Bump generation BEFORE killing so late stdout from the dying child is
+    // dropped and no stale `crawl-complete` is emitted — this is an abort, not
+    // a clean finish. Mirrors stop_crawl.
+    crawl_state.generation.fetch_add(1, Ordering::SeqCst);
     if let Some(child) = lock_or_recover(&crawl_state.child).take() {
         let _ = child.kill();
     }
     crawl_state.pid.store(0, Ordering::SeqCst);
+    crawl_state.session_id.store(0, Ordering::SeqCst);
+    *lock_or_recover(&crawl_state.progress) = None;
 
     let browser_state: State<BrowserChild> = app.state();
     if let Some(child) = lock_or_recover(&browser_state.child).take() {

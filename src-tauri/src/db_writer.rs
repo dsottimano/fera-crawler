@@ -523,6 +523,20 @@ fn build_seo_json(v: &Value) -> String {
             .cloned()
             .unwrap_or(Value::Object(Map::new())),
     );
+    // Rich SEO fields the sidecar captures but that used to be dropped here —
+    // now persisted so the report panel (redirect chains, hreflang, structured
+    // data, security, Core Web Vitals, JS errors) can use them. merge_seo_overflow
+    // surfaces every seo_json key back onto the row in query_all_results.
+    let arr = |key: &str| -> Value { v.get(key).cloned().unwrap_or(Value::Array(vec![])) };
+    let obj = |key: &str| -> Value { v.get(key).cloned().unwrap_or(Value::Object(Map::new())) };
+    m.insert("redirectChain".into(), arr("redirectChain"));
+    m.insert("hreflang".into(), arr("hreflang"));
+    m.insert("structuredDataTypes".into(), arr("structuredDataTypes"));
+    m.insert("securityHeaders".into(), obj("securityHeaders"));
+    m.insert("perf".into(), obj("perf"));
+    m.insert("jsErrors".into(), arr("jsErrors"));
+    m.insert("consoleErrors".into(), arr("consoleErrors"));
+    m.insert("failedRequests".into(), arr("failedRequests"));
     Value::Object(m).to_string()
 }
 
@@ -798,6 +812,13 @@ mod tests {
         assert_eq!(parsed["responseHeaders"], json!({}));
         assert_eq!(parsed["scraper"], json!({}));
         assert_eq!(parsed["ogImageWidthReal"], 0);
+        // Newly-persisted rich fields default to empty containers.
+        assert_eq!(parsed["redirectChain"], json!([]));
+        assert_eq!(parsed["hreflang"], json!([]));
+        assert_eq!(parsed["structuredDataTypes"], json!([]));
+        assert_eq!(parsed["securityHeaders"], json!({}));
+        assert_eq!(parsed["perf"], json!({}));
+        assert_eq!(parsed["jsErrors"], json!([]));
     }
 
     #[tokio::test]

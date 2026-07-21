@@ -79,6 +79,9 @@ pub async fn claude_turn_streaming(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // On the timeout/error paths below the Child is dropped; without this the
+    // orphaned `claude` process keeps running (and accumulates on every retry).
+    cmd.kill_on_drop(true);
 
     let mut child = cmd
         .spawn()
@@ -210,12 +213,22 @@ pub async fn speak(text: String) -> Result<(), String> {
     speak_piper(&text, &voice_path).await
 }
 
+/// Removes the temp WAV on every exit path (success, timeout, error) so a
+/// failed/timed-out synth doesn't leak a file in the temp dir.
+struct TempFileGuard(PathBuf);
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 async fn speak_piper(text: &str, voice_path: &PathBuf) -> Result<(), String> {
     let wav_path = std::env::temp_dir().join(format!(
         "fera_speak_{}_{}.wav",
         std::process::id(),
         chrono_micros()
     ));
+    let _wav_guard = TempFileGuard(wav_path.clone());
 
     let piper_bin = std::env::var("FERA_PIPER_BIN").unwrap_or_else(|_| "piper".to_string());
 
@@ -235,6 +248,9 @@ async fn speak_piper(text: &str, voice_path: &PathBuf) -> Result<(), String> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        // On the 30s timeout the Child is dropped mid-wait; without this the
+        // orphaned piper process keeps running.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| {
             format!(
@@ -266,7 +282,6 @@ async fn speak_piper(text: &str, voice_path: &PathBuf) -> Result<(), String> {
     }
 
     play_wav(&wav_path).await?;
-    let _ = std::fs::remove_file(&wav_path);
     Ok(())
 }
 
