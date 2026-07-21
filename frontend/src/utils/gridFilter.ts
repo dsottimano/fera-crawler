@@ -34,6 +34,10 @@ export interface ResultsFilter {
   duplicateField?: "title" | "meta_description" | "h1";
   canonicalState?: "missing" | "self" | "cross";
   urlPattern?: "long" | "params";
+  securityMissing?: "hsts" | "csp" | "xframe";
+  structuredData?: "has" | "missing";
+  imagesMissingAlt?: boolean;
+  h1State?: "multiple";
 }
 
 export interface ResultsSort {
@@ -100,6 +104,9 @@ export const TAB_FILTERS: Record<string, FilterOption[]> = {
   ],
   Security: [
     { label: "All", value: "all" },
+    { label: "Missing HSTS", value: "sec:hsts" },
+    { label: "Missing CSP", value: "sec:csp" },
+    { label: "Missing X-Frame-Options", value: "sec:xframe" },
   ],
   // Response Codes filter options are computed dynamically in FilterBar
   // from the session's distinct status codes; this entry is a sentinel.
@@ -126,6 +133,7 @@ export const TAB_FILTERS: Record<string, FilterOption[]> = {
   H1: [
     { label: "All", value: "all" },
     { label: "Missing", value: "missing:h1" },
+    { label: "Multiple", value: "h1count:multiple" },
     { label: "Short (<10)", value: "h1_len:lt:10" },
     { label: "Long (>70)", value: "h1_len:gt:70" },
     { label: "Duplicate", value: "duplicate:h1" },
@@ -142,8 +150,14 @@ export const TAB_FILTERS: Record<string, FilterOption[]> = {
   ],
   Images: [
     { label: "All", value: "all" },
+    { label: "Missing Alt Text", value: "img:missingalt" },
     { label: "Has og:image", value: "has_og_image" },
     { label: "Missing og:image", value: "missing_og_image" },
+  ],
+  "Structured Data": [
+    { label: "All", value: "all" },
+    { label: "Has Structured Data", value: "sd:has" },
+    { label: "Missing Structured Data", value: "sd:missing" },
   ],
   Canonicals: [
     { label: "All", value: "all" },
@@ -255,6 +269,22 @@ function applyTabFilter(token: string, f: ResultsFilter, tab: string): boolean {
   // has_og_image | missing_og_image
   if (token === "has_og_image") { f.hasOgImage = true; return true; }
   if (token === "missing_og_image") { f.missingOgImage = true; return true; }
+  // sec:hsts | sec:csp | sec:xframe — pages missing that security header
+  if (token.startsWith("sec:")) {
+    const h = token.slice(4);
+    if (["hsts", "csp", "xframe"].includes(h)) f.securityMissing = h as ResultsFilter["securityMissing"];
+    return true;
+  }
+  // sd:has | sd:missing — structured data present/absent
+  if (token.startsWith("sd:")) {
+    const s = token.slice(3);
+    if (["has", "missing"].includes(s)) f.structuredData = s as ResultsFilter["structuredData"];
+    return true;
+  }
+  // img:missingalt — pages with >=1 image lacking an alt attribute
+  if (token === "img:missingalt") { f.imagesMissingAlt = true; return true; }
+  // h1count:multiple — pages with more than one H1
+  if (token === "h1count:multiple") { f.h1State = "multiple"; return true; }
   // Numeric status code (Response Codes tab dynamic options)
   if (tab === "Response Codes" && /^\d+$/.test(token)) {
     const code = parseInt(token, 10);

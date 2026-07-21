@@ -136,6 +136,14 @@ pub struct ResultsFilter {
     pub canonical_state: Option<String>,
     /// URL shape pattern: "long" (>100 chars), "params" (contains ?).
     pub url_pattern: Option<String>,
+    /// Pages missing a security header: "hsts" | "csp" | "xframe".
+    pub security_missing: Option<String>,
+    /// Structured-data presence: "has" | "missing".
+    pub structured_data: Option<String>,
+    /// True → only pages with >=1 image lacking an alt attribute.
+    pub images_missing_alt: Option<bool>,
+    /// Heading state: "multiple" → pages with more than one H1.
+    pub h1_state: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -353,6 +361,41 @@ pub(crate) fn build_where(
             "long" => out_clauses.push("LENGTH(url) > 100".to_string()),
             "params" => out_clauses.push("url LIKE '%?%'".to_string()),
             _ => {}
+        }
+    }
+    // Security-header gaps. The JSON path is chosen from a fixed allowlist
+    // (never interpolated from user input), and json_extract returns 0 for a
+    // header the crawler recorded as absent. NULL (field not captured, e.g.
+    // older rows) does NOT match — we only flag known-missing.
+    if let Some(h) = &filter.security_missing {
+        let path = match h.as_str() {
+            "hsts" => Some("$.securityHeaders.hsts"),
+            "csp" => Some("$.securityHeaders.csp"),
+            "xframe" => Some("$.securityHeaders.xFrameOptions"),
+            _ => None,
+        };
+        if let Some(p) = path {
+            out_clauses.push(format!("json_extract(seo_json, '{p}') = 0"));
+        }
+    }
+    if let Some(sd) = &filter.structured_data {
+        match sd.as_str() {
+            "has" => out_clauses.push(
+                "json_array_length(json_extract(seo_json, '$.structuredDataTypes')) > 0".to_string(),
+            ),
+            "missing" => out_clauses.push(
+                "COALESCE(json_array_length(json_extract(seo_json, '$.structuredDataTypes')), 0) = 0"
+                    .to_string(),
+            ),
+            _ => {}
+        }
+    }
+    if let Some(true) = filter.images_missing_alt {
+        out_clauses.push("json_extract(seo_json, '$.imagesMissingAlt') > 0".to_string());
+    }
+    if let Some(state) = &filter.h1_state {
+        if state == "multiple" {
+            out_clauses.push("json_extract(seo_json, '$.h1Count') > 1".to_string());
         }
     }
 }
@@ -1221,6 +1264,43 @@ mod tests {
         assert_eq!(rows.len(), 8);
         for r in &rows {
             assert_ne!(r["url"], "https://a.com/6", "successful row must not match");
+        }
+    }
+
+    #[tokio::test]
+    async fn seo_json_issue_filters_segment_correctly() {
+        let pool = fixture_pool().await;
+        for (url, seo) in [
+            (
+                "https://a.com/good",
+                r#"{"securityHeaders":{"hsts":true,"csp":true,"xFrameOptions":true},"structuredDataTypes":["Article"],"imagesMissingAlt":0,"h1Count":1}"#,
+            ),
+            (
+                "https://a.com/bad",
+                r#"{"securityHeaders":{"hsts":false,"csp":false,"xFrameOptions":false},"structuredDataTypes":[],"imagesMissingAlt":3,"h1Count":2}"#,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO crawl_results (session_id, url, status, resource_type, seo_json)
+                 VALUES (1, ?, 200, 'HTML', ?)",
+            )
+            .bind(url)
+            .bind(seo)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // Each issue filter must return exactly the /bad row (except sd:has → /good).
+        for (f, expect) in [
+            (ResultsFilter { security_missing: Some("hsts".into()), ..Default::default() }, "https://a.com/bad"),
+            (ResultsFilter { structured_data: Some("missing".into()), ..Default::default() }, "https://a.com/bad"),
+            (ResultsFilter { images_missing_alt: Some(true), ..Default::default() }, "https://a.com/bad"),
+            (ResultsFilter { h1_state: Some("multiple".into()), ..Default::default() }, "https://a.com/bad"),
+            (ResultsFilter { structured_data: Some("has".into()), ..Default::default() }, "https://a.com/good"),
+        ] {
+            let r = query_results_inner(&pool, 1, 0, 100, &f, None).await.unwrap();
+            assert_eq!(r.len(), 1, "filter {f:?} should match exactly one row");
+            assert_eq!(r[0]["url"], expect);
         }
     }
 

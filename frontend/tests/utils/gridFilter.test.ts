@@ -35,6 +35,15 @@ describe("buildResultsFilter", () => {
     expect(f.issuesOnly).toBe(true);
   });
 
+  it("SF issue-segment tokens map to the seo_json filters", () => {
+    expect(buildResultsFilter({ ...noQueue, tab: "Security", filterType: "sec:hsts" }).securityMissing).toBe("hsts");
+    expect(buildResultsFilter({ ...noQueue, tab: "Security", filterType: "sec:xframe" }).securityMissing).toBe("xframe");
+    expect(buildResultsFilter({ ...noQueue, tab: "Structured Data", filterType: "sd:missing" }).structuredData).toBe("missing");
+    expect(buildResultsFilter({ ...noQueue, tab: "Structured Data", filterType: "sd:has" }).structuredData).toBe("has");
+    expect(buildResultsFilter({ ...noQueue, tab: "Images", filterType: "img:missingalt" }).imagesMissingAlt).toBe(true);
+    expect(buildResultsFilter({ ...noQueue, tab: "H1", filterType: "h1count:multiple" }).h1State).toBe("multiple");
+  });
+
   it("Recrawl Queue tab sources urlIn from the live recrawl queue", () => {
     const queue = ["https://a", "https://b", "https://c"];
     const f = buildResultsFilter({ tab: "Recrawl Queue", recrawlQueue: queue });
