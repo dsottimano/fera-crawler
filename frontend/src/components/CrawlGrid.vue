@@ -184,6 +184,36 @@ function indexableFormatter(cell: any) {
   return "";
 }
 
+// Security response header: present is GOOD (green), absent is a hardening gap
+// (red). Undefined (no data captured) renders blank.
+function secHeaderFormatter(cell: any) {
+  const val = cell.getValue();
+  if (val === true) return '<span style="color:#4ec9b0;font-weight:600">Yes</span>';
+  if (val === false) return '<span style="color:#f44747;font-weight:600">No</span>';
+  return "";
+}
+
+// Milliseconds metric (TTFB/LCP/FCP). Blank when unmeasured (0/undefined).
+function msFormatter(cell: any) {
+  const v = Number(cell.getValue() ?? 0);
+  return v > 0 ? `${Math.round(v)} ms` : "";
+}
+
+// Cumulative Layout Shift — unitless, red when poor (>0.25), amber (>0.1).
+function clsFormatter(cell: any) {
+  const v = Number(cell.getValue() ?? 0);
+  if (!v) return "";
+  const color = v > 0.25 ? "#f44747" : v > 0.1 ? "#dcdcaa" : undefined;
+  const s = v.toFixed(3);
+  return color ? `<span style="color:${color};font-weight:600">${s}</span>` : s;
+}
+
+// JSON-LD @types present on the page (array → comma list).
+function sdTypesFormatter(cell: any) {
+  const v = cell.getValue();
+  return Array.isArray(v) && v.length ? v.join(", ") : "";
+}
+
 function dimensionFormatter(cell: any) {
   const val = cell.getValue() as number;
   return val ? `${val}px` : "";
@@ -305,6 +335,23 @@ const COL = {
   dateMod:        { title: "Date Modified", field: "dateModified", width: 120 },
   dateModTime:    { title: "Modified Time", field: "dateModifiedTime", width: 120 },
 
+  // Core Web Vitals (perf.*). TTFB/DCL/load are on every HTML page; LCP/CLS/FCP
+  // need --capture-vitals (0 otherwise). Nested field access via seo_json merge.
+  ttfb:           { title: "TTFB", field: "perf.ttfb", width: 90, hozAlign: "right", formatter: msFormatter },
+  fcp:            { title: "FCP", field: "perf.fcp", width: 90, hozAlign: "right", formatter: msFormatter },
+  lcp:            { title: "LCP", field: "perf.lcp", width: 90, hozAlign: "right", formatter: msFormatter },
+  cls:            { title: "CLS", field: "perf.cls", width: 70, hozAlign: "right", formatter: clsFormatter },
+
+  // Structured data (@types present in JSON-LD)
+  sdTypes:        { title: "Structured Data", field: "structuredDataTypes", minWidth: 160, widthGrow: 1, tooltip: true, formatter: sdTypesFormatter },
+
+  // Security response headers (present = good)
+  hsts:           { title: "HSTS", field: "securityHeaders.hsts", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
+  csp:            { title: "CSP", field: "securityHeaders.csp", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
+  xFrame:         { title: "X-Frame-Options", field: "securityHeaders.xFrameOptions", width: 130, hozAlign: "center", formatter: secHeaderFormatter },
+  xContentType:   { title: "X-Content-Type", field: "securityHeaders.xContentTypeOptions", width: 120, hozAlign: "center", formatter: secHeaderFormatter },
+  referrerPolicy: { title: "Referrer-Policy", field: "securityHeaders.referrerPolicy", width: 120, hozAlign: "center", formatter: secHeaderFormatter },
+
   // Queue status
   queueStatus: {
     title: "Queue Status", field: "_queueStatus", width: 130, hozAlign: "center",
@@ -340,10 +387,11 @@ const TAB_COLUMNS: Record<string, any[]> = {
     COL.ogImgW, COL.ogImgH, COL.ogImgWReal, COL.ogImgHReal, COL.ogImgRatio, COL.ogImgSize,
     COL.datePub, COL.datePubTime, COL.dateMod, COL.dateModTime,
     COL.intLinks, COL.extLinks, COL.uniqueOutlinks,
-    COL.wordCount, COL.resource, COL.responseTime, COL.size, COL.server,
+    COL.wordCount, COL.resource, COL.responseTime, COL.ttfb, COL.lcp, COL.cls, COL.size, COL.server,
+    COL.sdTypes, COL.hsts, COL.csp, COL.xFrame,
   ],
   "External":         [COL.address, COL.contentType, COL.statusCode, COL.statusText, COL.server, COL.intLinks, COL.extLinks, COL.responseTime, COL.resource, COL.size],
-  "Security":         [COL.address, COL.statusCode, COL.server, COL.contentType, COL.xRobotsTag, COL.size],
+  "Security":         [COL.address, COL.statusCode, COL.hsts, COL.csp, COL.xFrame, COL.xContentType, COL.referrerPolicy, COL.server],
   "Response Codes":   [COL.address, COL.statusCode, COL.statusText, COL.redirectUrl, COL.server, COL.contentType, COL.responseTime],
   "URL":              [COL.address, COL.statusCode, COL.contentType, COL.size, COL.responseTime],
   "Page Titles":      [COL.address, COL.title, COL.titleLen, COL.statusCode, COL.indexable],
@@ -361,11 +409,11 @@ const TAB_COLUMNS: Record<string, any[]> = {
   ],
   "JavaScript":       [COL.address, COL.statusCode, COL.size, COL.responseTime],
   "Links":            [COL.address, COL.intLinks, COL.extLinks, COL.uniqueOutlinks, COL.statusCode],
-  "Structured Data":  [COL.address, COL.ogTitle, COL.ogDesc, COL.ogType, COL.ogImage, COL.datePub, COL.dateMod, COL.statusCode],
+  "Structured Data":  [COL.address, COL.statusCode, COL.sdTypes, COL.ogTitle, COL.ogType, COL.datePub, COL.dateMod],
   "Overview":         [COL.address, COL.statusCode, COL.statusText, COL.title, COL.metaDesc, COL.h1, COL.canonical, COL.ogImage, COL.ogImgW, COL.ogImgH, COL.metaRobots, COL.indexable, COL.intLinks, COL.extLinks, COL.wordCount, COL.responseTime, COL.size, COL.datePub, COL.dateMod],
   "Issues":           [COL.address, COL.statusCode, COL.statusText, COL.title, COL.metaDesc, COL.h1, COL.canonical, COL.indexable, COL.noindex],
   "Site Structure":   [COL.address, COL.statusCode, COL.intLinks, COL.extLinks, COL.wordCount, COL.size],
-  "Response Times":   [COL.address, COL.responseTime, COL.statusCode, COL.size, COL.server],
+  "Response Times":   [COL.address, COL.responseTime, COL.ttfb, COL.fcp, COL.lcp, COL.cls, COL.statusCode, COL.size, COL.server],
   "Recrawl Queue":    [COL.address, COL.queueStatus, COL.statusCode, COL.statusText, COL.contentType, COL.responseTime, COL.size],
 };
 
