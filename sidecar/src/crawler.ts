@@ -1300,11 +1300,12 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   };
 
   const visited = new Set<string>();
-  // Every URL ever placed in the queue this run — see enqueueNew(). Dedups so
-  // a URL linked from many pages is enqueued and reported "discovered" exactly
+  // Click-depth from the nearest seed, keyed on every URL ever enqueued this
+  // run. Doubles as the enqueue-dedup set (its key set IS "everEnqueued") so a
+  // URL linked from many pages is enqueued and reported "discovered" exactly
   // once. Seeded with the resume skip set so already-crawled URLs aren't
-  // re-reported into the frontier.
-  const everEnqueued = new Set<string>();
+  // re-reported into the frontier. Seeds are depth 0; link N+1 (see enqueueNew).
+  const depthOf = new Map<string, number>();
   // Resume support: pre-seed visited so already-crawled URLs are skipped.
   if (config.excludeUrls?.length) {
     // Normalize with the SAME canonicalization enqueueNew uses, or the dedup
@@ -1313,14 +1314,14 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     for (const u of config.excludeUrls) {
       const n = normalizeUrl(u);
       visited.add(n);
-      everEnqueued.add(n);
+      depthOf.set(n, 0);
     }
     // Spider mode still crawls the start URL — without it, link discovery
     // can't bootstrap a resumed crawl.
     if (config.mode === "spider" && config.startUrl) {
       const s = normalizeUrl(ensureProtocol(config.startUrl));
       visited.delete(s);
-      everEnqueued.delete(s);
+      depthOf.delete(s);
     }
     log("info", "exclude list seeded", { count: config.excludeUrls.length });
   }
@@ -1348,17 +1349,14 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   // URLs entering the frontier — every NEW enqueue goes through here so the
   // crawl_frontier table mirrors the in-memory queue. (unparkHost re-queues
   // already-discovered parked URLs with a raw push and must NOT re-report.)
-  // Click-depth from the nearest seed. Seeds are depth 0; a link discovered on
-  // a depth-N page is depth N+1. Set once, on first enqueue (the shallowest
-  // path wins because BFS reaches a URL via its shortest route first).
-  const depthOf = new Map<string, number>();
-
+  // Seeds are depth 0; a link discovered on a depth-N page is depth N+1. The
+  // shallowest path wins because BFS reaches a URL via its shortest route first.
   function enqueueNew(rawUrl: string, depth = 0): boolean {
     // Normalize at the single choke point so the queue, the visited set, and
     // the persisted frontier all key on one canonical spelling per resource.
     const url = normalizeUrl(rawUrl);
-    if (everEnqueued.has(url)) return false;
-    everEnqueued.add(url);
+    // depthOf's key set is the dedup set — presence means already enqueued.
+    if (depthOf.has(url)) return false;
     depthOf.set(url, depth);
     queue.push(url);
     discoveredBuffer.push(url);
