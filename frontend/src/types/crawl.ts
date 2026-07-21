@@ -61,6 +61,9 @@ export interface CrawlResult {
   error?: string;
   responseHeaders?: Record<string, string>;
   redirectUrl?: string;
+  // Intermediate hop URLs for a redirected request (empty when not redirected).
+  // Present in the query_all_results seo_json payload; typed here for reports.
+  redirectChain?: string[];
   serverHeader?: string;
 
   // All meta tags

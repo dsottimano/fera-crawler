@@ -47,12 +47,78 @@ const overviewStats = computed(() => {
 });
 
 const redirectResults = computed(() => rows.value.filter((r) => r.status >= 300 && r.status < 400));
-const duplicateTitles = computed(() => {
+// Full hop path for a redirected row: the captured intermediate URLs plus the
+// final destination. redirectChain[0] is the requested URL, so this reads
+// requested → … → final.
+function redirectChainOf(r: CrawlResult): string {
+  const hops = [...(r.redirectChain ?? [])];
+  if (r.redirectUrl && r.redirectUrl !== hops[hops.length - 1]) hops.push(r.redirectUrl);
+  return hops.join(" → ");
+}
+// Number of redirect hops (SF flags chains of 2+ as an issue worth fixing).
+function redirectHops(r: CrawlResult): number {
+  const chainLen = r.redirectChain?.length ?? 0;
+  if (chainLen > 0) return chainLen;
+  return r.redirectUrl ? 1 : 0;
+}
+
+// Group by an arbitrary field, keeping only values shared by >1 URL. Used by
+// the Duplicate Content report for titles, meta descriptions, and H1s.
+function duplicatesBy(field: "title" | "metaDescription" | "h1") {
   const m: Record<string, CrawlResult[]> = {};
-  for (const r of rows.value) { if (!r.title) continue; if (!m[r.title]) m[r.title] = []; m[r.title].push(r); }
-  return Object.entries(m).filter(([, u]) => u.length > 1);
+  for (const r of rows.value) {
+    const key = (r[field] || "").trim();
+    if (!key) continue;
+    if (!m[key]) m[key] = [];
+    m[key].push(r);
+  }
+  return Object.entries(m).filter(([, u]) => u.length > 1).sort((a, b) => b[1].length - a[1].length);
+}
+const duplicateTitles = computed(() => duplicatesBy("title"));
+const duplicateDescriptions = computed(() => duplicatesBy("metaDescription"));
+const duplicateH1s = computed(() => duplicatesBy("h1"));
+
+// Shared internal-link graph over the crawled universe — the backbone of the
+// PageRank and Orphan reports. Edges = each row's outlinks ∩ crawled URLs
+// (self-loops dropped). `inDegree[i]` = count of crawled pages linking TO row i.
+interface LinkGraph { out: number[][]; inDegree: Int32Array; }
+const linkGraph = computed<LinkGraph>(() => {
+  const rs = rows.value;
+  const N = rs.length;
+  const indexOf = new Map<string, number>();
+  for (let i = 0; i < N; i++) indexOf.set(rs[i].url, i);
+  const out: number[][] = new Array(N);
+  const inDegree = new Int32Array(N);
+  for (let i = 0; i < N; i++) {
+    const ol = rs[i].outlinks ?? [];
+    const seen = new Set<number>();
+    for (const link of ol) {
+      const j = indexOf.get(link);
+      if (j === undefined || j === i) continue;
+      if (seen.has(j)) continue;
+      seen.add(j);
+      inDegree[j]++;
+    }
+    out[i] = [...seen];
+  }
+  return { out, inDegree };
 });
-const orphanPages = computed(() => rows.value.filter((r) => r.internalLinks === 0 && r.resourceType === "HTML"));
+
+// True orphans: indexable HTML pages that NO other crawled page links to
+// (in-degree 0). Previously this used internalLinks===0, which is the count of
+// OUTgoing internal links — a page can link out heavily yet still be an orphan.
+// The start URL is excluded (it's the crawl entry point, inherently "linked").
+const orphanPages = computed(() => {
+  const rs = rows.value;
+  const { inDegree } = linkGraph.value;
+  const start = rs[0]?.url;
+  return rs.filter((r, i) =>
+    r.resourceType === "HTML" &&
+    r.status >= 200 && r.status < 300 &&
+    inDegree[i] === 0 &&
+    r.url !== start,
+  );
+});
 
 // Internal PageRank — runs over the existing outlinks data, no schema change.
 // Universe = the set of crawled URLs in this session. Edges = each row's
@@ -64,28 +130,8 @@ interface RankRow { url: string; score: number; indegree: number; outdegree: num
 const pageRankResults = computed<RankRow[]>(() => {
   const rs = rows.value;
   if (!rs.length) return [];
-
-  // Universe = crawled URLs, indexed for O(1) edge filter.
-  const indexOf = new Map<string, number>();
-  for (let i = 0; i < rs.length; i++) indexOf.set(rs[i].url, i);
   const N = rs.length;
-
-  // Adjacency: for each node, its internal outlink indices (deduped).
-  // Drop self-loops (url → url) — they don't carry SEO equity.
-  const out: number[][] = new Array(N);
-  const inDeg = new Int32Array(N);
-  for (let i = 0; i < N; i++) {
-    const ol = rs[i].outlinks ?? [];
-    const seen = new Set<number>();
-    for (const link of ol) {
-      const j = indexOf.get(link);
-      if (j === undefined || j === i) continue;
-      if (seen.has(j)) continue;
-      seen.add(j);
-      inDeg[j]++;
-    }
-    out[i] = [...seen];
-  }
+  const { out, inDegree: inDeg } = linkGraph.value;
 
   // Standard iterative PageRank.
   const d = 0.85;
@@ -169,11 +215,31 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
         </template>
         <template v-else-if="report === 'redirects'">
           <div v-if="!redirectResults.length" class="empty">No redirects found.</div>
-          <table v-else class="report-table"><thead><tr><th>URL</th><th>Status</th></tr></thead><tbody><tr v-for="r in redirectResults" :key="r.url"><td class="url-cell">{{ r.url }}</td><td class="status-cell">{{ r.status }}</td></tr></tbody></table>
+          <table v-else class="report-table">
+            <thead><tr><th>URL</th><th>Status</th><th style="width: 60px; text-align: center;">Hops</th><th>Redirect Chain</th></tr></thead>
+            <tbody>
+              <tr v-for="r in redirectResults" :key="r.url" :class="{ 'chain-warn': redirectHops(r) >= 2 }">
+                <td class="url-cell">{{ r.url }}</td>
+                <td class="status-cell">{{ r.status }}</td>
+                <td class="status-cell">{{ redirectHops(r) }}</td>
+                <td class="chain-cell">{{ redirectChainOf(r) || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
         </template>
         <template v-else-if="report === 'duplicates'">
-          <div v-if="!duplicateTitles.length" class="empty">No duplicate titles found.</div>
-          <div v-else v-for="[title, urls] in duplicateTitles" :key="title" class="dup-group"><h4 class="dup-title">{{ title }} ({{ urls.length }})</h4><ul><li v-for="u in urls" :key="u.url" class="dup-url">{{ u.url }}</li></ul></div>
+          <div v-if="!duplicateTitles.length && !duplicateDescriptions.length && !duplicateH1s.length" class="empty">No duplicate titles, descriptions, or H1s found.</div>
+          <template v-else>
+            <h4>Duplicate Titles ({{ duplicateTitles.length }})</h4>
+            <div v-if="!duplicateTitles.length" class="empty">None.</div>
+            <div v-else v-for="[title, urls] in duplicateTitles" :key="'t-' + title" class="dup-group"><div class="dup-title">{{ title }} ({{ urls.length }})</div><ul><li v-for="u in urls" :key="u.url" class="dup-url">{{ u.url }}</li></ul></div>
+            <h4>Duplicate Meta Descriptions ({{ duplicateDescriptions.length }})</h4>
+            <div v-if="!duplicateDescriptions.length" class="empty">None.</div>
+            <div v-else v-for="[desc, urls] in duplicateDescriptions" :key="'d-' + desc" class="dup-group"><div class="dup-title">{{ desc }} ({{ urls.length }})</div><ul><li v-for="u in urls" :key="u.url" class="dup-url">{{ u.url }}</li></ul></div>
+            <h4>Duplicate H1s ({{ duplicateH1s.length }})</h4>
+            <div v-if="!duplicateH1s.length" class="empty">None.</div>
+            <div v-else v-for="[h1, urls] in duplicateH1s" :key="'h-' + h1" class="dup-group"><div class="dup-title">{{ h1 }} ({{ urls.length }})</div><ul><li v-for="u in urls" :key="u.url" class="dup-url">{{ u.url }}</li></ul></div>
+          </template>
         </template>
         <template v-else-if="report === 'orphans'">
           <div v-if="!orphanPages.length" class="empty">No orphan pages detected.</div>
@@ -238,6 +304,9 @@ h4 { margin: 14px 0 8px; font-size: 9px; color: rgba(255,255,255,0.25); letter-s
 .report-table td { padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); }
 .url-cell { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-cell { text-align: center; }
+.chain-cell { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'Ubuntu Mono', monospace; color: rgba(255,255,255,0.5); font-size: 10px; }
+.chain-warn td { background: rgba(220,220,170,0.06); }
+.chain-warn .status-cell { color: #dcdcaa; }
 .dup-group { margin-bottom: 12px; }
 .dup-title { color: #dcdcaa !important; margin: 0 0 4px !important; font-size: 11px !important; letter-spacing: 0 !important; text-transform: none !important; }
 .dup-url { font-size: 11px; color: rgba(255,255,255,0.25); padding: 1px 0; list-style: none; font-family: 'Ubuntu Mono', monospace; }
