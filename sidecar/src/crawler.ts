@@ -1536,7 +1536,10 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     perHostStates.recordClassification(h, cls);
     adaptiveController.tick(h, cls, snap);
 
-    const trip = detector.record({ url: result.url, status: result.status, title: result.title }, h);
+    const trip = detector.record(
+      { url: result.url, status: result.status, title: result.title, bodyBytes: snap.bodyBytes },
+      h,
+    );
     if (trip) {
       writeAnyEvent(trip);
       log("warn", "block-detected: host paused", {
@@ -1636,6 +1639,19 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
           log("debug", "navigating", { url });
           const { result, discoveredLinks } = await crawlWithPolicy(page, url);
           handleResult(url, result, discoveredLinks);
+        } catch (err) {
+          // Contain any per-URL failure so it can never reject Promise.all and
+          // tear down the whole crawl (which would close the context under the
+          // other live workers and exit the sidecar). crawlWithPolicy is
+          // designed to RETURN an error result rather than throw; this guards
+          // the unexpected — a throw inside it, or in the classify/record path
+          // reached via handleResult. The URL is already marked visited, so it
+          // won't be retried. We deliberately do NOT emit a stub row here:
+          // recordResult writes the row BEFORE its throwy classify/record calls,
+          // so a good row may already be out and re-emitting would overwrite it.
+          const message = err instanceof Error ? err.message : String(err);
+          recordError();
+          log("error", "worker: contained per-URL failure", { url, error: message });
         } finally {
           activeWorkers--;
           setInFlight(activeWorkers);

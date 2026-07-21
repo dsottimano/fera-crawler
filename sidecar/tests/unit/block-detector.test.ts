@@ -55,16 +55,39 @@ describe("BlockDetector — classify", () => {
     expect(r.blocked).toBe(false);
   });
 
-  it("classifies 200 with title repeated across ≥3 distinct URLs as soft block", () => {
+  it("classifies 200 with a SMALL-bodied title repeated across ≥3 distinct URLs as soft block", () => {
     const d = new BlockDetector();
     const T = "Generic Page";
+    const tiny = 2_000; // WAF-stub-sized body
     // First 2 distinct URLs with same title — not yet a repeat
-    d.record({ url: url("a"), status: 200, title: T }, HOST);
-    d.record({ url: url("b"), status: 200, title: T }, HOST);
-    expect(d.classify({ url: url("c"), status: 200, title: T }, HOST).blocked).toBe(false);
-    // Add a 3rd: now the title-set has 3 URLs, classify returns soft block
-    d.record({ url: url("c"), status: 200, title: T }, HOST);
-    expect(d.classify({ url: url("d"), status: 200, title: T }, HOST).reason).toBe("soft_title_repeat");
+    d.record({ url: url("a"), status: 200, title: T, bodyBytes: tiny }, HOST);
+    d.record({ url: url("b"), status: 200, title: T, bodyBytes: tiny }, HOST);
+    expect(d.classify({ url: url("c"), status: 200, title: T, bodyBytes: tiny }, HOST).blocked).toBe(false);
+    // Add a 3rd: now the title-set has 3 small URLs, classify returns soft block
+    d.record({ url: url("c"), status: 200, title: T, bodyBytes: tiny }, HOST);
+    expect(d.classify({ url: url("d"), status: 200, title: T, bodyBytes: tiny }, HOST).reason).toBe("soft_title_repeat");
+  });
+
+  it("does NOT gate on a repeated title when bodies are full-size (real duplicate-title content)", () => {
+    const d = new BlockDetector();
+    const T = "My Blog — Page"; // shared across paginated pages
+    const full = 60_000; // real content page
+    // Many distinct URLs share the title, but every body is full-size, so
+    // none enter the title-repeat set and none is ever classified blocked.
+    for (let i = 0; i < 12; i++) {
+      const p = d.record({ url: url(`p-${i}`), status: 200, title: T, bodyBytes: full }, HOST);
+      expect(p).toBeNull();
+    }
+    expect(d.classify({ url: url("next"), status: 200, title: T, bodyBytes: full }, HOST).blocked).toBe(false);
+    expect(d.isGated(HOST)).toBe(false);
+  });
+
+  it("does NOT count a repeated title as a block when body size is unknown", () => {
+    const d = new BlockDetector();
+    const T = "Generic Page";
+    for (let i = 0; i < 5; i++) d.record({ url: url(`u-${i}`), status: 200, title: T }, HOST);
+    expect(d.classify({ url: url("z"), status: 200, title: T }, HOST).blocked).toBe(false);
+    expect(d.isGated(HOST)).toBe(false);
   });
 });
 
@@ -111,7 +134,7 @@ describe("BlockDetector — trip threshold", () => {
     const T = "Generic Page Title";
     let payload: ReturnType<typeof d.record> = null;
     for (let i = 0; i < 8; i++) {
-      const p = d.record({ url: url(`x-${i}`), status: 200, title: T }, HOST);
+      const p = d.record({ url: url(`x-${i}`), status: 200, title: T, bodyBytes: 2_000 }, HOST);
       if (p) payload = p;
     }
     expect(d.isGated(HOST)).toBe(true);
@@ -123,16 +146,17 @@ describe("BlockDetector — trip threshold", () => {
   it("does NOT fast-trip when a non-blocked entry interrupts the run", () => {
     const d = new BlockDetector();
     const T = "Generic Page Title";  // doesn't match BLOCK_PHRASE_RE
-    // 4 same-titled (soft_title_repeat warms up after the 3rd, so entries
-    // 3 and 4 are blocked; entries 0,1 are not).
+    const tiny = 2_000;
+    // 4 same-titled small-bodied (soft_title_repeat warms up after the 3rd, so
+    // entries 3 and 4 are blocked; entries 0,1 are not).
     for (let i = 0; i < 4; i++) {
-      d.record({ url: url(`s-${i}`), status: 200, title: T }, HOST);
+      d.record({ url: url(`s-${i}`), status: 200, title: T, bodyBytes: tiny }, HOST);
     }
     // Clean entry breaks the run.
-    d.record({ url: url("clean"), status: 200, title: "Different page" }, HOST);
+    d.record({ url: url("clean"), status: 200, title: "Different page", bodyBytes: tiny }, HOST);
     // 3 more same-titled — trailing run is 3, below the fast-trip floor.
     for (let i = 0; i < 3; i++) {
-      d.record({ url: url(`c-${i}`), status: 200, title: T }, HOST);
+      d.record({ url: url(`c-${i}`), status: 200, title: T, bodyBytes: tiny }, HOST);
     }
     // Total blocked count is below 10/15 AND trailing run is below 5 →
     // NOT gated. Confirms the fast-path doesn't fire on scattered blocks.

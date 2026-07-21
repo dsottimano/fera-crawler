@@ -35,7 +35,10 @@ export function classifyResponse(
   if (resp.status === 429) return "blocked-status:429";
   if (resp.status === 503) return "blocked-status:503";
 
-  const verdict = detector.classify({ url: resp.url, status: resp.status, title: resp.title }, host);
+  const verdict = detector.classify(
+    { url: resp.url, status: resp.status, title: resp.title, bodyBytes: resp.bodyBytes },
+    host,
+  );
   if (verdict.blocked) {
     if (verdict.reason === "status_5xx") return "blocked-status:5xx";
     return "blocked-content";

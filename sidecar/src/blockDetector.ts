@@ -1,7 +1,13 @@
 // Per-host block detection. Trips when a rolling window of the last 15
 // responses for a host contains >=10 "blocked" signals. Hard blocks
-// (403/429/5xx) and soft blocks (block-phrase title, or repeated title
-// across distinct URLs) are both counted.
+// (403/429/5xx) and soft blocks (block-phrase title, or an identical title
+// repeated across distinct URLs whose bodies are ALL small) are both counted.
+//
+// The title-repeat signal is deliberately corroborated by body size: a WAF
+// wall serves the SAME tiny stub under many URLs, whereas legitimate duplicate
+// titles (pagination, faceted nav, CMS defaults) sit on full-size pages —
+// and duplicate titles are themselves a first-class SEO metric this tool
+// REPORTS, so they must never gate a host on their own.
 //
 // After a trip, an auto-cooldown timer is scheduled. When it fires, the
 // gate clears, parked URLs go back into the queue, and the host gets
@@ -19,6 +25,12 @@ const TRIP_THRESHOLD = 10;
 // 5 more wasted requests of waiting.
 const CONSECUTIVE_TRIP_THRESHOLD = 5;
 const SOFT_TITLE_REPEAT_THRESHOLD = 3;
+// A repeated title only counts as a soft block when the pages carrying it are
+// this small or smaller (bytes). Bot-wall / challenge stubs are typically a
+// few KB of HTML; real content pages are well above this. Pages larger than
+// the cap never enter the title-repeat set, so ordinary duplicate-title pages
+// (pagination, tags, CMS defaults) can never trip the gate.
+const SOFT_TITLE_REPEAT_MAX_BODY_BYTES = 15_000;
 
 // Phrases that show up on bot-wall interstitials regardless of the upstream
 // HTTP status. Walls increasingly serve "you've been blocked" pages with
@@ -67,6 +79,11 @@ export interface ObservedResponse {
   url: string;
   status: number;
   title?: string;
+  // Response body size in bytes. Corroborates the title-repeat signal (see
+  // SOFT_TITLE_REPEAT_MAX_BODY_BYTES). When omitted, the title-repeat path is
+  // skipped entirely — we can't confirm the "small stub" precondition, so we
+  // fail toward NOT blocking.
+  bodyBytes?: number;
 }
 
 export interface ClassifyResult {
@@ -128,7 +145,10 @@ export class BlockDetector {
       return { blocked: true, reason: "soft_title_phrase" };
     }
 
-    if (status === 200 && title) {
+    if (status === 200 && title && isSmallBody(resp.bodyBytes)) {
+      // titleToUrls only ever holds small-bodied pages (see record), so a set
+      // at/over threshold means N distinct tiny pages share this title — a WAF
+      // stub, not ordinary duplicate content.
       const urls = this.getState(host).titleToUrls.get(title);
       if (urls && urls.size >= SOFT_TITLE_REPEAT_THRESHOLD) {
         return { blocked: true, reason: "soft_title_repeat" };
@@ -143,7 +163,11 @@ export class BlockDetector {
   record(resp: ObservedResponse, host: string): BlockDetectedPayload | null {
     const state = this.getState(host);
 
-    if (resp.title && resp.status === 200) {
+    // Only small-bodied pages join the title-repeat set. Full-size pages that
+    // happen to share a title (pagination, facets, CMS defaults) never enter,
+    // so they can neither grow a set to threshold nor be classified as a
+    // repeat-block.
+    if (resp.title && resp.status === 200 && isSmallBody(resp.bodyBytes)) {
       let set = state.titleToUrls.get(resp.title);
       if (!set) {
         set = new Set();
@@ -238,6 +262,13 @@ export function hostOf(url: string): string {
   } catch {
     return "";
   }
+}
+
+// A body qualifies as a "small stub" for the title-repeat signal only when its
+// size is known AND at/under the cap. Unknown size (undefined) fails toward
+// NOT small, so the title-repeat path is skipped rather than guessed.
+function isSmallBody(bodyBytes: number | undefined): boolean {
+  return bodyBytes !== undefined && bodyBytes <= SOFT_TITLE_REPEAT_MAX_BODY_BYTES;
 }
 
 // Length of the trailing run of `blocked: true` entries in the window.

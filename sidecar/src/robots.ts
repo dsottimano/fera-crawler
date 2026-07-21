@@ -4,12 +4,6 @@
 interface Rule {
   allow: boolean;
   pattern: string;
-  // Pattern compiled to a RegExp ONCE at parse time. The matcher ran on every
-  // crawled URL × every rule and used to rebuild + recompile this regex each
-  // call — N×M redundant compilations per crawl. Null if the pattern failed to
-  // compile (treated as no-match). Optional: manually-built rules (tests) may
-  // omit it, in which case isAllowedFor compiles on demand.
-  regex?: RegExp | null;
 }
 
 interface HostRules {
@@ -18,27 +12,53 @@ interface HostRules {
   fetched: boolean;
 }
 
-// Translate a robots-glob to a RegExp: * → .*, trailing $ anchors end, literal
-// everything else. Returns null on compile failure. Call once per rule.
-function compilePattern(pattern: string): RegExp | null {
-  let re = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*") re += ".*";
-    else if (c === "$" && i === pattern.length - 1) re += "$";
-    else re += c.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+// Match a robots-glob against a path. Only `*` (matches any run of chars) and a
+// trailing `$` (end-anchor) are special; everything else is literal. A
+// non-anchored pattern is a PREFIX match (path must begin with it), which is
+// equivalent to a full match with an implicit trailing wildcard.
+//
+// Implemented as greedy two-pointer matching with a single backtrack point, so
+// it runs in O(path × pattern) with NO catastrophic backtracking. The previous
+// form compiled `*` → `.*` into a RegExp (`^/a.*a.*a.*…`) which was
+// exponentially backtrackable — a robots.txt with a few wildcards could hang
+// the whole sidecar (isAllowed runs synchronously per URL). See ReDoS fix.
+function robotsMatch(pattern: string, path: string): boolean {
+  let pat = pattern;
+  let anchored = false;
+  if (pat.endsWith("$")) {
+    anchored = true;
+    pat = pat.slice(0, -1);
   }
-  try {
-    return new RegExp(re);
-  } catch {
-    return null;
+  if (!anchored) pat = pat + "*"; // prefix match ⇒ implicit trailing wildcard
+
+  const pl = pat.length;
+  const sl = path.length;
+  let p = 0;
+  let s = 0;
+  let star = -1; // index in pat of the last '*' seen
+  let mark = 0; // index in path where that '*' started matching
+  while (s < sl) {
+    if (p < pl && pat[p] === "*") {
+      star = p++;
+      mark = s;
+    } else if (p < pl && pat[p] === path[s]) {
+      p++;
+      s++;
+    } else if (star !== -1) {
+      // Backtrack: let the last '*' absorb one more char.
+      p = star + 1;
+      s = ++mark;
+    } else {
+      return false;
+    }
   }
+  while (p < pl && pat[p] === "*") p++;
+  return p === pl;
 }
 
-// Kept for unit tests. The hot path uses the precompiled `Rule.regex` instead.
+// Kept for unit tests. Argument order mirrors the test call sites.
 function matchesPattern(path: string, pattern: string): boolean {
-  const re = compilePattern(pattern);
-  return re ? re.test(path) : false;
+  return robotsMatch(pattern, path);
 }
 
 function parseRobots(text: string, userAgent: string): HostRules {
@@ -67,10 +87,10 @@ function parseRobots(text: string, userAgent: string): HostRules {
       current.agents.push(value.toLowerCase());
       lastWasAgent = true;
     } else if (field === "disallow" && current) {
-      if (value !== "") current.rules.push({ allow: false, pattern: value, regex: compilePattern(value) });
+      if (value !== "") current.rules.push({ allow: false, pattern: value });
       lastWasAgent = false;
     } else if (field === "allow" && current) {
-      if (value !== "") current.rules.push({ allow: true, pattern: value, regex: compilePattern(value) });
+      if (value !== "") current.rules.push({ allow: true, pattern: value });
       lastWasAgent = false;
     } else if (field === "sitemap") {
       if (value) sitemaps.push(value);
@@ -104,11 +124,7 @@ function isAllowedFor(path: string, rules: Rule[]): boolean {
   // Longest-match wins. On tie, Allow beats Disallow (Google behavior).
   let best: Rule | null = null;
   for (const rule of rules) {
-    // Parsed rules carry a precompiled regex (hot path). Rules constructed
-    // without one (tests, manual callers) compile on demand; a deliberate
-    // null (pattern that failed to compile) is honored as no-match.
-    const re = rule.regex !== undefined ? rule.regex : compilePattern(rule.pattern);
-    if (!re || !re.test(path)) continue;
+    if (!robotsMatch(rule.pattern, path)) continue;
     if (!best || rule.pattern.length > best.pattern.length) best = rule;
     else if (rule.pattern.length === best.pattern.length && rule.allow) best = rule;
   }

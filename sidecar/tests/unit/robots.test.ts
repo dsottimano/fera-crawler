@@ -18,6 +18,22 @@ describe("robots.txt: pattern matching", () => {
     expect(matchesPattern("/page.html", "/page.html$")).toBe(true);
     expect(matchesPattern("/page.html?q=1", "/page.html$")).toBe(false);
   });
+
+  it("handles many wildcards in linear time (no ReDoS)", () => {
+    // The old regex form compiled this to `^/a.*a.*a.*…Z`, which backtracked
+    // exponentially against a long path lacking the terminal char and hung
+    // the sidecar. The two-pointer matcher must return promptly.
+    const pattern = "/" + "a*".repeat(20) + "Z";
+    const path = "/" + "a".repeat(200);
+    const start = performance.now();
+    expect(matchesPattern(path, pattern)).toBe(false);
+    expect(performance.now() - start).toBeLessThan(100);
+  });
+
+  it("matches wildcards without the pathological terminal", () => {
+    expect(matchesPattern("/a/b/c/file.pdf", "/*/*/*.pdf")).toBe(true);
+    expect(matchesPattern("/x/y.pdf", "/*/*/*.pdf")).toBe(false);
+  });
 });
 
 describe("robots.txt: allow/disallow resolution", () => {
