@@ -208,10 +208,20 @@ function clsFormatter(cell: any) {
   return color ? `<span style="color:${color};font-weight:600">${s}</span>` : s;
 }
 
-// JSON-LD @types present on the page (array → comma list).
+// Escape crawled text before it goes into a formatter's HTML return — Tabulator
+// renders formatter return values as innerHTML, so unescaped page content (here,
+// attacker-controlled JSON-LD @type strings) would be a stored-XSS vector.
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
+  );
+}
+
+// JSON-LD @types present on the page (array → comma list). Escaped: @type
+// values come straight from the crawled page and are untrusted.
 function sdTypesFormatter(cell: any) {
   const v = cell.getValue();
-  return Array.isArray(v) && v.length ? v.join(", ") : "";
+  return Array.isArray(v) && v.length ? escapeHtml(v.join(", ")) : "";
 }
 
 function dimensionFormatter(cell: any) {
