@@ -132,20 +132,29 @@ export function useCrawl() {
     // hero card doesn't carry over the prior crawl's numbers.
     if (!resume) resetCrawlProgress();
 
-    // Create a DB session (or reuse current for resume).
+    // Create a DB session (or reuse current for resume). Guarded: these awaits
+    // run AFTER crawling.value=true but BEFORE the complete listener is wired,
+    // so a throw here would otherwise strand the UI in a "crawling" state with
+    // no sidecar and no listener (recoverable only via STOP).
     let sessionId: number;
-    if (resume && currentSessionId.value) {
-      sessionId = currentSessionId.value;
-      await updateSessionConfig(sessionId, s);
-    } else {
-      sessionId = await createSession(url, s);
-      currentSessionId.value = sessionId;
-      // First crawl from the default-settings path — pin them so any
-      // subsequent stop/resume/refresh on this session keeps using them
-      // even if the user switches the default profile in the meantime.
-      if (!pinnedSettings.value) {
-        pinnedSettings.value = JSON.parse(JSON.stringify(s)) as SettingsValues;
+    try {
+      if (resume && currentSessionId.value) {
+        sessionId = currentSessionId.value;
+        await updateSessionConfig(sessionId, s);
+      } else {
+        sessionId = await createSession(url, s);
+        currentSessionId.value = sessionId;
+        // First crawl from the default-settings path — pin them so any
+        // subsequent stop/resume/refresh on this session keeps using them
+        // even if the user switches the default profile in the meantime.
+        if (!pinnedSettings.value) {
+          pinnedSettings.value = JSON.parse(JSON.stringify(s)) as SettingsValues;
+        }
       }
+    } catch (e) {
+      crawling.value = false;
+      cleanup();
+      throw e; // let handleStart surface it instead of silently hanging
     }
 
     unlistenComplete = await listen<void>("crawl-complete", async () => {
@@ -319,6 +328,17 @@ export function useCrawl() {
   }
 
   async function clearResults() {
+    // If a crawl is in flight, stop the sidecar FIRST. Clearing must never
+    // leave an orphaned sidecar writing rows into a session we're abandoning
+    // (which also let a stale crawl-complete fire against the old sessionId).
+    if (crawling.value) {
+      userStopped = true;
+      try {
+        await invoke("stop_crawl");
+      } catch (e) {
+        console.error("stop_crawl on clear failed:", e);
+      }
+    }
     if (currentSessionId.value) {
       try {
         await completeSession(currentSessionId.value);
@@ -326,14 +346,22 @@ export function useCrawl() {
         console.error("DB session complete on clear failed:", e);
       }
     }
+    crawling.value = false;
     currentSessionId.value = null;
     stopped.value = false;
     pinnedSettings.value = null;
     resetCrawlProgress();
+    // Drop the crawl-complete listener — its closure captured the now-cleared
+    // sessionId, so leaving it live would run completion logic on a dead session.
+    cleanup();
     useDebug().clearLogs();
   }
 
   async function loadSession(sessionId: number): Promise<SettingsValues | null> {
+    // Drop any crawl-complete listener still bound to a prior in-flight crawl —
+    // otherwise its closure could run completion logic against this newly
+    // opened session's id after we switch currentSessionId below.
+    cleanup();
     useDebug().clearLogs();
     currentSessionId.value = sessionId;
     const snapshot = await loadSessionConfig(sessionId);

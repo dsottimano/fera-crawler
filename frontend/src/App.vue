@@ -456,7 +456,7 @@ function handleClearWithoutSave() {
 }
 
 async function doClear() {
-  clearResults();
+  await clearResults();
   url.value = "";
   selectedResult.value = null;
   await patchSetting("inputs", "urls", []);
