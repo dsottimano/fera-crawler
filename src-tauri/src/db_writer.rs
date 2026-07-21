@@ -16,15 +16,25 @@
 // see all in-flight rows committed (listing/loading sessions).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 const BATCH_SIZE: usize = 200;
 const FLUSH_MS: u64 = 1000;
+// Backpressure watermarks (rows enqueued-but-not-yet-written). The channel
+// itself stays unbounded so enqueue never blocks the stdout parser, but the
+// stdout READER (commands.rs) awaits wait_for_capacity() when the backlog
+// crosses HIGH, so it stops draining the sidecar pipe → the pipe fills → the
+// sidecar's own stdout backpressure (whenStdoutDrained) pauses its workers.
+// This is the Rust half of the end-to-end backpressure chain.
+const PENDING_HIGH_WATER: usize = 20_000;
+const PENDING_LOW_WATER: usize = 10_000;
 const COLS_PER_ROW: usize = 30;
 // SQLite's SQLITE_LIMIT_VARIABLE_NUMBER defaults to 999 on builds before
 // 3.32.0. Modern sqlx links 3.42+, but we don't want a hard dependency
@@ -48,13 +58,21 @@ enum Msg {
 #[derive(Clone)]
 pub struct DbWriter {
     tx: mpsc::UnboundedSender<Msg>,
+    // Rows enqueued but not yet written — the backlog the reader throttles on.
+    pending: Arc<AtomicUsize>,
+    // Signaled by the writer loop when the backlog drains below LOW_WATER.
+    drained: Arc<Notify>,
 }
 
 impl DbWriter {
     /// Push a crawl-result onto the writer's queue. Fire-and-forget: errors
     /// only surface via flush() or via stderr from the writer loop.
     pub fn enqueue(&self, session_id: i64, value: Value) {
-        let _ = self.tx.send(Msg::Row(PendingRow { session_id, value }));
+        self.pending.fetch_add(1, Ordering::Relaxed);
+        if self.tx.send(Msg::Row(PendingRow { session_id, value })).is_err() {
+            // Receiver gone — undo the count so wait_for_capacity can't wedge.
+            self.pending.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Persist discovered URLs into the pending frontier. Fire-and-forget.
@@ -63,6 +81,23 @@ impl DbWriter {
             return;
         }
         let _ = self.tx.send(Msg::Frontier { session_id, urls });
+    }
+
+    /// Await while the write backlog is over the high-water mark. Called by the
+    /// stdout reader so it stops draining the sidecar pipe when the writer
+    /// lags — the backpressure signal that keeps the backlog (and heap) bounded.
+    pub async fn wait_for_capacity(&self) {
+        while self.pending.load(Ordering::Relaxed) >= PENDING_HIGH_WATER {
+            // The writer notify_one()s on drain (its permit survives a race with
+            // the load above); the short timeout is a backstop so a missed
+            // signal can never wedge the reader. Only active during backpressure.
+            let _ = tokio::time::timeout(Duration::from_millis(50), self.drained.notified()).await;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn pending_count(&self) -> usize {
+        self.pending.load(Ordering::Relaxed)
     }
 
     /// Drain pending rows and return when the batch containing this flush
@@ -85,8 +120,10 @@ impl DbWriter {
 /// migration phase at startup.
 pub fn spawn(db_path: PathBuf) -> DbWriter {
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(writer_loop(rx, db_path));
-    DbWriter { tx }
+    let pending = Arc::new(AtomicUsize::new(0));
+    let drained = Arc::new(Notify::new());
+    tokio::spawn(writer_loop(rx, db_path, pending.clone(), drained.clone()));
+    DbWriter { tx, pending, drained }
 }
 
 async fn open_pool(db_path: &std::path::Path) -> Result<SqlitePool, String> {
@@ -108,7 +145,24 @@ async fn open_pool(db_path: &std::path::Path) -> Result<SqlitePool, String> {
         .map_err(|e| format!("open sqlite pool: {e}"))
 }
 
-async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Msg>, db_path: PathBuf) {
+async fn writer_loop(
+    mut rx: mpsc::UnboundedReceiver<Msg>,
+    db_path: PathBuf,
+    pending: Arc<AtomicUsize>,
+    drained: Arc<Notify>,
+) {
+    // Decrement the backlog by `n` rows and wake the reader if it dropped below
+    // the low-water mark. Called after each drain, so `pending` tracks
+    // enqueued-but-not-yet-written rows (bounded by the reader's throttling).
+    let settle = |n: usize| {
+        if n == 0 {
+            return;
+        }
+        let prev = pending.fetch_sub(n, Ordering::Relaxed);
+        if prev.saturating_sub(n) < PENDING_LOW_WATER {
+            drained.notify_one();
+        }
+    };
     let mut pool: Option<SqlitePool> = None;
     let mut buffer: Vec<PendingRow> = Vec::with_capacity(BATCH_SIZE);
     let mut frontier_buffer: Vec<(i64, String)> = Vec::new();
@@ -158,6 +212,7 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Msg>, db_path: PathBuf) {
                     for r in flush_replies.drain(..) {
                         let _ = r.send(Err(e.clone()));
                     }
+                    settle(buffer.len());
                     buffer.clear();
                     continue;
                 }
@@ -171,15 +226,19 @@ async fn writer_loop(mut rx: mpsc::UnboundedReceiver<Msg>, db_path: PathBuf) {
         let mut result = if buffer.is_empty() {
             Ok(())
         } else {
-            let drained = std::mem::take(&mut buffer);
-            write_batch(p, &drained)
+            let rows = std::mem::take(&mut buffer);
+            let r = write_batch(p, &rows)
                 .await
-                .map_err(|e| format!("write_batch: {e}"))
+                .map_err(|e| format!("write_batch: {e}"));
+            // Rows have left the buffer (committed or dropped on error) — clear
+            // them from the backlog so the reader's throttle can release.
+            settle(rows.len());
+            r
         };
 
         if result.is_ok() && !frontier_buffer.is_empty() {
-            let drained = std::mem::take(&mut frontier_buffer);
-            result = write_frontier(p, &drained)
+            let frontier_rows = std::mem::take(&mut frontier_buffer);
+            result = write_frontier(p, &frontier_rows)
                 .await
                 .map_err(|e| format!("write_frontier: {e}"));
         }
@@ -925,6 +984,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count.0, 2);
+
+        // Backpressure accounting: every enqueued row was written, so the
+        // pending backlog settled back to 0 (else the reader throttle would
+        // never release). Also verify wait_for_capacity doesn't block now.
+        assert_eq!(writer.pending_count(), 0, "backlog must drain after flush");
+        tokio::time::timeout(Duration::from_secs(1), writer.wait_for_capacity())
+            .await
+            .expect("wait_for_capacity must not block under the high-water mark");
 
         let _ = std::fs::remove_file(&tmp);
     }

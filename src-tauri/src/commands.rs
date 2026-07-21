@@ -538,6 +538,13 @@ pub async fn start_crawl(
         while let Some(event) = rx.recv().await {
             match event {
                 CommandEvent::Stdout(line) => {
+                    // Backpressure: if the DB writer's backlog is over its
+                    // high-water mark, stop draining the sidecar pipe here so the
+                    // pipe fills and the sidecar's own stdout backpressure pauses
+                    // its workers — bounding total in-flight memory end to end.
+                    if let Some(writer) = app_handle.try_state::<DbWriter>() {
+                        writer.wait_for_capacity().await;
+                    }
                     let line_str = String::from_utf8_lossy(&line);
                     route_sidecar_stdout_lines(&app_handle, &line_str, Some(ctx));
                 }
