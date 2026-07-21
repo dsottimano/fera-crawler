@@ -77,6 +77,7 @@ export interface CrawlResult {
   // Optional because older sessions / the paged grid may not carry them.
   hreflang?: Array<{ lang: string; href: string }>;
   structuredDataTypes?: string[];
+  inSitemap?: boolean;
   securityHeaders?: {
     hsts: boolean;
     csp: boolean;

@@ -24,7 +24,7 @@ onMounted(async () => {
 });
 
 const title = computed(() => {
-  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages", structured: "Structured Data", security: "Security Headers", hreflang: "Hreflang", broken: "Broken Links / Crawl Errors", images: "Images Missing Alt Text" };
+  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages", structured: "Structured Data", security: "Security Headers", hreflang: "Hreflang", broken: "Broken Links / Crawl Errors", images: "Images Missing Alt Text", sitemap: "Sitemap Coverage", directives: "Directives" };
   return titles[props.report] ?? "Report";
 });
 
@@ -153,6 +153,28 @@ const imagesMissingAlt = computed(() =>
     .map((r) => ({ url: r.url, count: r.imagesMissingAlt ?? 0, images: r.missingAltImages ?? [] }))
     .sort((a, b) => b.count - a.count),
 );
+
+// ── Sitemap coverage report ──
+const sitemapCoverage = computed(() => {
+  const html = rows.value.filter((r) => r.resourceType === "HTML");
+  const inSitemap = html.filter((r) => r.inSitemap);
+  const nonOkInSitemap = inSitemap.filter((r) => !(r.status >= 200 && r.status < 300));
+  const nonIndexableInSitemap = inSitemap.filter((r) => r.status >= 200 && r.status < 300 && !r.isIndexable);
+  const notInSitemap = html.filter((r) => !r.inSitemap && r.status >= 200 && r.status < 300);
+  return { total: html.length, inSitemap, nonOkInSitemap, nonIndexableInSitemap, notInSitemap };
+});
+
+// ── Directives report: robots-directive aggregate ──
+const directivesSummary = computed(() => {
+  const html = rows.value.filter((r) => r.resourceType === "HTML" && r.status >= 200 && r.status < 300);
+  return {
+    total: html.length,
+    noindex: html.filter((r) => r.isNoindex),
+    nofollow: html.filter((r) => r.isNofollow),
+    xRobots: html.filter((r) => (r.xRobotsTag || "").trim() !== ""),
+    canonicalised: html.filter((r) => r.canonical && stripSlash(r.canonical) !== stripSlash(r.url)),
+  };
+});
 
 // ── Broken Links / Crawl Errors report ──
 // Every crawled URL that returned an error (4xx/5xx or status 0 = timeout/network),
@@ -472,6 +494,39 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
               <div class="dup-title">{{ p.url }} <span class="broken-count">— {{ p.count }} missing</span></div>
               <ul><li v-for="(img, idx) in p.images.slice(0, 50)" :key="idx" class="dup-url">{{ img }}</li></ul>
             </div>
+          </template>
+        </template>
+        <template v-else-if="report === 'sitemap'">
+          <div v-if="!sitemapCoverage.total" class="empty">No HTML pages crawled.</div>
+          <template v-else>
+            <div class="stat-grid">
+              <div class="stat"><span class="stat-value">{{ sitemapCoverage.inSitemap.length }}</span><span class="stat-label">IN SITEMAP</span></div>
+              <div class="stat"><span class="stat-value">{{ sitemapCoverage.notInSitemap.length }}</span><span class="stat-label">CRAWLED, NOT IN SITEMAP</span></div>
+              <div class="stat"><span class="stat-value">{{ sitemapCoverage.nonOkInSitemap.length }}</span><span class="stat-label">NON-200 IN SITEMAP</span></div>
+            </div>
+            <h4>Non-200 URLs in sitemap ({{ sitemapCoverage.nonOkInSitemap.length }}) — shouldn't be listed</h4>
+            <div v-if="!sitemapCoverage.nonOkInSitemap.length" class="empty">None.</div>
+            <table v-else class="report-table"><tbody><tr v-for="r in sitemapCoverage.nonOkInSitemap" :key="r.url"><td class="url-cell">{{ r.url }}</td><td class="status-cell">{{ r.status }}</td></tr></tbody></table>
+            <h4>Non-indexable URLs in sitemap ({{ sitemapCoverage.nonIndexableInSitemap.length }})</h4>
+            <div v-if="!sitemapCoverage.nonIndexableInSitemap.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in sitemapCoverage.nonIndexableInSitemap.slice(0, 200)" :key="'ni-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+          </template>
+        </template>
+        <template v-else-if="report === 'directives'">
+          <div v-if="!directivesSummary.total" class="empty">No indexable HTML pages crawled.</div>
+          <template v-else>
+            <div class="stat-grid">
+              <div class="stat"><span class="stat-value">{{ directivesSummary.noindex.length }}</span><span class="stat-label">NOINDEX</span></div>
+              <div class="stat"><span class="stat-value">{{ directivesSummary.nofollow.length }}</span><span class="stat-label">NOFOLLOW</span></div>
+              <div class="stat"><span class="stat-value">{{ directivesSummary.canonicalised.length }}</span><span class="stat-label">CANONICALISED</span></div>
+              <div class="stat"><span class="stat-value">{{ directivesSummary.xRobots.length }}</span><span class="stat-label">X-ROBOTS-TAG</span></div>
+            </div>
+            <h4>Noindex ({{ directivesSummary.noindex.length }})</h4>
+            <div v-if="!directivesSummary.noindex.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in directivesSummary.noindex.slice(0, 200)" :key="'nx-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+            <h4>Nofollow ({{ directivesSummary.nofollow.length }})</h4>
+            <div v-if="!directivesSummary.nofollow.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in directivesSummary.nofollow.slice(0, 200)" :key="'nf-' + r.url" class="dup-url">{{ r.url }}</li></ul>
           </template>
         </template>
         <template v-else-if="report === 'hreflang'">

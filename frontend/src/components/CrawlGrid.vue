@@ -224,6 +224,12 @@ function sdTypesFormatter(cell: any) {
   return Array.isArray(v) && v.length ? escapeHtml(v.join(", ")) : "";
 }
 
+// Count of an array-valued field (e.g. hreflang alternates). Blank when empty.
+function arrayCountFormatter(cell: any) {
+  const v = cell.getValue();
+  return Array.isArray(v) && v.length ? String(v.length) : "";
+}
+
 // Missing-alt image count: red when any image on the page lacks an alt attribute.
 function missingAltFormatter(cell: any) {
   const n = Number(cell.getValue() ?? 0);
@@ -377,6 +383,9 @@ const COL = {
   imageCount:     { title: "Images", field: "imageCount", width: 80, hozAlign: "center", formatter: wordCountFormatter },
   imagesMissingAlt: { title: "Missing Alt", field: "imagesMissingAlt", width: 100, hozAlign: "center", formatter: missingAltFormatter },
 
+  // Hreflang alternate count
+  hreflangCount:  { title: "Hreflang", field: "hreflang", width: 85, hozAlign: "center", formatter: arrayCountFormatter },
+
   // Security response headers (present = good)
   hsts:           { title: "HSTS", field: "securityHeaders.hsts", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
   csp:            { title: "CSP", field: "securityHeaders.csp", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
@@ -420,7 +429,7 @@ const TAB_COLUMNS: Record<string, any[]> = {
     COL.datePub, COL.datePubTime, COL.dateMod, COL.dateModTime,
     COL.intLinks, COL.extLinks, COL.uniqueOutlinks,
     COL.wordCount, COL.resource, COL.responseTime, COL.ttfb, COL.lcp, COL.cls, COL.size, COL.server,
-    COL.sdTypes, COL.hsts, COL.csp, COL.xFrame,
+    COL.sdTypes, COL.hreflangCount, COL.imageCount, COL.imagesMissingAlt, COL.hsts, COL.csp, COL.xFrame,
   ],
   "External":         [COL.address, COL.contentType, COL.statusCode, COL.statusText, COL.server, COL.intLinks, COL.extLinks, COL.responseTime, COL.resource, COL.size],
   "Security":         [COL.address, COL.statusCode, COL.hsts, COL.csp, COL.xFrame, COL.xContentType, COL.referrerPolicy, COL.server],
