@@ -11,7 +11,7 @@ const menus: Record<string, string[]> = {
   File: ["New Crawl", "-", "Saved Crawls...", "-", "Open...", "Save As...", "-", "Export CSV", "Export Excel", "Export Bundle (CSV + Images)...", "-", "Exit"],
   Configuration: ["Settings", "Scraper"],
   Export: ["Internal HTML", "All Links", "Response Codes", "Page Titles", "Redirects"],
-  Reports: ["Crawl Overview", "Redirect Chains", "Duplicate Content", "Non-Indexable Pages", "Missing Metadata", "Insecure (HTTP) URLs", "Orphan Pages", "Internal PageRank"],
+  Reports: ["Crawl Overview", "Redirect Chains", "Duplicate Content", "Non-Indexable Pages", "Missing Metadata", "Insecure (HTTP) URLs", "Slowest Pages", "Orphan Pages", "Internal PageRank"],
   Help: ["Documentation", "About Fera"],
 };
 

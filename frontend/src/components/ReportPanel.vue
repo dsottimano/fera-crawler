@@ -24,7 +24,7 @@ onMounted(async () => {
 });
 
 const title = computed(() => {
-  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs" };
+  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages" };
   return titles[props.report] ?? "Report";
 });
 
@@ -105,6 +105,15 @@ const missingH1 = computed(() => indexableHtml.value.filter((r) => !(r.h1 || "")
 
 // ── Insecure (HTTP) URLs report ──
 const insecureUrls = computed(() => rows.value.filter((r) => r.url.startsWith("http://")));
+
+// ── Page Speed report: slowest HTML pages by response time ──
+const slowestPages = computed(() =>
+  rows.value
+    .filter((r) => r.resourceType === "HTML" && (r.responseTime || 0) > 0)
+    .slice()
+    .sort((a, b) => (b.responseTime || 0) - (a.responseTime || 0))
+    .slice(0, 100),
+);
 
 // Shared internal-link graph over the crawled universe — the backbone of the
 // PageRank and Orphan reports. Edges = each row's outlinks ∩ crawled URLs
@@ -333,6 +342,18 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
               <tr v-for="r in insecureUrls" :key="r.url">
                 <td class="url-cell">{{ r.url }}</td>
                 <td class="status-cell">{{ r.status }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+        <template v-else-if="report === 'pagespeed'">
+          <div v-if="!slowestPages.length" class="empty">No timed HTML pages yet.</div>
+          <table v-else class="report-table">
+            <thead><tr><th>URL</th><th style="width: 120px; text-align: right;">Response Time</th></tr></thead>
+            <tbody>
+              <tr v-for="r in slowestPages" :key="r.url">
+                <td class="url-cell">{{ r.url }}</td>
+                <td class="num-cell" :style="{ color: (r.responseTime || 0) > 1000 ? '#f44747' : ((r.responseTime || 0) > 500 ? '#dcdcaa' : undefined) }">{{ r.responseTime }} ms</td>
               </tr>
             </tbody>
           </table>
