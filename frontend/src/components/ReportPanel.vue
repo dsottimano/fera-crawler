@@ -24,7 +24,7 @@ onMounted(async () => {
 });
 
 const title = computed(() => {
-  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank" };
+  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs" };
   return titles[props.report] ?? "Report";
 });
 
@@ -77,6 +77,34 @@ function duplicatesBy(field: "title" | "metaDescription" | "h1") {
 const duplicateTitles = computed(() => duplicatesBy("title"));
 const duplicateDescriptions = computed(() => duplicatesBy("metaDescription"));
 const duplicateH1s = computed(() => duplicatesBy("h1"));
+
+// ── Indexability report ──
+function stripSlash(u: string): string {
+  return u.replace(/\/+$/, "");
+}
+function nonIndexableReason(r: CrawlResult): string {
+  if (r.status >= 400 || r.status === 0) return `HTTP ${r.status || "error"}`;
+  if (r.status >= 300 && r.status < 400) return "Redirect";
+  if (r.isNoindex || /noindex/i.test(r.metaRobots || "") || /noindex/i.test(r.xRobotsTag || "")) return "noindex";
+  if (r.canonical && stripSlash(r.canonical) !== stripSlash(r.url)) return "Canonicalised";
+  return "Non-indexable";
+}
+const nonIndexablePages = computed(() =>
+  rows.value
+    .filter((r) => r.resourceType === "HTML" && !r.isIndexable)
+    .map((r) => ({ url: r.url, reason: nonIndexableReason(r) })),
+);
+
+// ── Missing metadata report (indexable 2xx HTML only) ──
+const indexableHtml = computed(() =>
+  rows.value.filter((r) => r.resourceType === "HTML" && r.status >= 200 && r.status < 300),
+);
+const missingTitle = computed(() => indexableHtml.value.filter((r) => !(r.title || "").trim()));
+const missingDescription = computed(() => indexableHtml.value.filter((r) => !(r.metaDescription || "").trim()));
+const missingH1 = computed(() => indexableHtml.value.filter((r) => !(r.h1 || "").trim()));
+
+// ── Insecure (HTTP) URLs report ──
+const insecureUrls = computed(() => rows.value.filter((r) => r.url.startsWith("http://")));
 
 // Shared internal-link graph over the crawled universe — the backbone of the
 // PageRank and Orphan reports. Edges = each row's outlinks ∩ crawled URLs
@@ -271,6 +299,44 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
             </table>
           </template>
         </template>
+        <template v-else-if="report === 'indexability'">
+          <div v-if="!nonIndexablePages.length" class="empty">All crawled HTML pages are indexable.</div>
+          <table v-else class="report-table">
+            <thead><tr><th>URL</th><th style="width: 150px;">Reason</th></tr></thead>
+            <tbody>
+              <tr v-for="r in nonIndexablePages" :key="r.url">
+                <td class="url-cell">{{ r.url }}</td>
+                <td><span class="reason-tag">{{ r.reason }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+        <template v-else-if="report === 'missing'">
+          <div v-if="!missingTitle.length && !missingDescription.length && !missingH1.length" class="empty">No missing titles, descriptions, or H1s on indexable pages.</div>
+          <template v-else>
+            <h4>Missing Title ({{ missingTitle.length }})</h4>
+            <div v-if="!missingTitle.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in missingTitle" :key="'mt-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+            <h4>Missing Meta Description ({{ missingDescription.length }})</h4>
+            <div v-if="!missingDescription.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in missingDescription" :key="'md-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+            <h4>Missing H1 ({{ missingH1.length }})</h4>
+            <div v-if="!missingH1.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in missingH1" :key="'mh-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+          </template>
+        </template>
+        <template v-else-if="report === 'insecure'">
+          <div v-if="!insecureUrls.length" class="empty">No insecure (HTTP) URLs found — all crawled URLs use HTTPS.</div>
+          <table v-else class="report-table">
+            <thead><tr><th>URL</th><th style="width: 90px; text-align: center;">Status</th></tr></thead>
+            <tbody>
+              <tr v-for="r in insecureUrls" :key="r.url">
+                <td class="url-cell">{{ r.url }}</td>
+                <td class="status-cell">{{ r.status }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
       </div>
     </div>
   </div>
@@ -311,6 +377,8 @@ h4 { margin: 14px 0 8px; font-size: 9px; color: rgba(255,255,255,0.25); letter-s
 .dup-title { color: #dcdcaa !important; margin: 0 0 4px !important; font-size: 11px !important; letter-spacing: 0 !important; text-transform: none !important; }
 .dup-url { font-size: 11px; color: rgba(255,255,255,0.25); padding: 1px 0; list-style: none; font-family: 'Ubuntu Mono', monospace; }
 .dup-group ul { margin: 0; padding: 0 0 0 12px; }
+.url-list { margin: 0 0 8px; padding: 0 0 0 12px; }
+.reason-tag { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: rgba(244,71,71,0.12); color: #f44747; }
 .pr-note { font-size: 10px; color: rgba(255,255,255,0.45); margin-bottom: 12px; line-height: 1.5; }
 .rank-cell { color: rgba(255,255,255,0.45); font-variant-numeric: tabular-nums; text-align: right; padding-right: 8px; }
 .num-cell { font-variant-numeric: tabular-nums; text-align: right; font-family: 'Ubuntu Mono', monospace; }
