@@ -537,6 +537,10 @@ fn build_seo_json(v: &Value) -> String {
     m.insert("jsErrors".into(), arr("jsErrors"));
     m.insert("consoleErrors".into(), arr("consoleErrors"));
     m.insert("failedRequests".into(), arr("failedRequests"));
+    m.insert(
+        "inSitemap".into(),
+        v.get("inSitemap").cloned().unwrap_or(Value::Bool(false)),
+    );
     Value::Object(m).to_string()
 }
 

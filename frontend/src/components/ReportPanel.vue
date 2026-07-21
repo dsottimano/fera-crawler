@@ -24,7 +24,7 @@ onMounted(async () => {
 });
 
 const title = computed(() => {
-  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages", structured: "Structured Data", security: "Security Headers", hreflang: "Hreflang" };
+  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages", structured: "Structured Data", security: "Security Headers", hreflang: "Hreflang", broken: "Broken Links / Crawl Errors" };
   return titles[props.report] ?? "Report";
 });
 
@@ -146,10 +146,29 @@ const hreflangPages = computed(() =>
     .map((r) => ({ url: r.url, langs: (r.hreflang ?? []).map((h) => h.lang).join(", "), count: r.hreflang?.length ?? 0 })),
 );
 
+// ── Broken Links / Crawl Errors report ──
+// Every crawled URL that returned an error (4xx/5xx or status 0 = timeout/network),
+// with the crawled pages that link TO it ("linked from"), inverted from the
+// outlink graph. Sorted most-linked-first so the highest-impact breakages lead.
+const brokenLinks = computed(() => {
+  const rs = rows.value;
+  const { inlinks } = linkGraph.value;
+  const out: Array<{ url: string; status: number; error?: string; linkedFrom: string[] }> = [];
+  for (let i = 0; i < rs.length; i++) {
+    const r = rs[i];
+    if (!(r.status >= 400 || r.status === 0)) continue;
+    out.push({ url: r.url, status: r.status, error: r.error, linkedFrom: inlinks[i].map((si) => rs[si].url) });
+  }
+  out.sort((a, b) => b.linkedFrom.length - a.linkedFrom.length);
+  return out;
+});
+
 // Shared internal-link graph over the crawled universe — the backbone of the
-// PageRank and Orphan reports. Edges = each row's outlinks ∩ crawled URLs
-// (self-loops dropped). `inDegree[i]` = count of crawled pages linking TO row i.
-interface LinkGraph { out: number[][]; inDegree: Int32Array; }
+// PageRank, Orphan, and Broken-Links reports. Edges = each row's outlinks ∩
+// crawled URLs (self-loops dropped). `inDegree[i]` = count of crawled pages
+// linking TO row i; `inlinks[i]` = the source row indices themselves (for the
+// "linked from" list). `indexOf` maps a URL to its row index.
+interface LinkGraph { out: number[][]; inDegree: Int32Array; inlinks: number[][]; indexOf: Map<string, number>; }
 const linkGraph = computed<LinkGraph>(() => {
   const rs = rows.value;
   const N = rs.length;
@@ -157,6 +176,7 @@ const linkGraph = computed<LinkGraph>(() => {
   for (let i = 0; i < N; i++) indexOf.set(rs[i].url, i);
   const out: number[][] = new Array(N);
   const inDegree = new Int32Array(N);
+  const inlinks: number[][] = Array.from({ length: N }, () => []);
   for (let i = 0; i < N; i++) {
     const ol = rs[i].outlinks ?? [];
     const seen = new Set<number>();
@@ -166,10 +186,11 @@ const linkGraph = computed<LinkGraph>(() => {
       if (seen.has(j)) continue;
       seen.add(j);
       inDegree[j]++;
+      inlinks[j].push(i);
     }
     out[i] = [...seen];
   }
-  return { out, inDegree };
+  return { out, inDegree, inlinks, indexOf };
 });
 
 // True orphans: indexable HTML pages that NO other crawled page links to
@@ -424,6 +445,17 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
             <ul v-else class="url-list"><li v-for="r in securityIssues.noXFrame.slice(0, 200)" :key="'xfo-' + r.url" class="dup-url">{{ r.url }}</li></ul>
           </template>
         </template>
+        <template v-else-if="report === 'broken'">
+          <div v-if="!brokenLinks.length" class="empty">No broken links or crawl errors found.</div>
+          <template v-else>
+            <div class="pr-note">{{ brokenLinks.length }} URL(s) returned an error, ordered by number of internal pages linking to them (highest impact first).</div>
+            <div v-for="b in brokenLinks" :key="b.url" class="dup-group">
+              <div class="dup-title"><span class="broken-status">{{ b.status === 0 ? (b.error || 'Error') : b.status }}</span> {{ b.url }} <span class="broken-count">— linked from {{ b.linkedFrom.length }}</span></div>
+              <ul v-if="b.linkedFrom.length"><li v-for="src in b.linkedFrom.slice(0, 50)" :key="src" class="dup-url">{{ src }}</li></ul>
+              <div v-else class="empty" style="text-align:left;padding:2px 0 6px 12px;">No internal inlinks (orphaned error).</div>
+            </div>
+          </template>
+        </template>
         <template v-else-if="report === 'hreflang'">
           <div v-if="!hreflangPages.length" class="empty">No pages declare hreflang alternates.</div>
           <table v-else class="report-table">
@@ -479,6 +511,8 @@ h4 { margin: 14px 0 8px; font-size: 9px; color: rgba(255,255,255,0.25); letter-s
 .dup-group ul { margin: 0; padding: 0 0 0 12px; }
 .url-list { margin: 0 0 8px; padding: 0 0 0 12px; }
 .reason-tag { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: rgba(244,71,71,0.12); color: #f44747; }
+.broken-status { display: inline-block; font-weight: 700; color: #f44747; font-variant-numeric: tabular-nums; margin-right: 4px; }
+.broken-count { color: rgba(255,255,255,0.35); font-weight: 400; }
 .pr-note { font-size: 10px; color: rgba(255,255,255,0.45); margin-bottom: 12px; line-height: 1.5; }
 .rank-cell { color: rgba(255,255,255,0.45); font-variant-numeric: tabular-nums; text-align: right; padding-right: 8px; }
 .num-cell { font-variant-numeric: tabular-nums; text-align: right; font-family: 'Ubuntu Mono', monospace; }

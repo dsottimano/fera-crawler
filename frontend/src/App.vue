@@ -538,7 +538,7 @@ async function handleMenuAction(menu: string, item: string) {
     await exportFilteredCsv(currentSessionId.value, f[item] ?? {}, item.toLowerCase().replace(/\s+/g, "-"));
   }
   if (menu === "Reports") {
-    const m: Record<string, string> = { "Crawl Overview": "overview", "Redirect Chains": "redirects", "Duplicate Content": "duplicates", "Non-Indexable Pages": "indexability", "Missing Metadata": "missing", "Structured Data": "structured", "Hreflang": "hreflang", "Security Headers": "security", "Insecure (HTTP) URLs": "insecure", "Slowest Pages": "pagespeed", "Orphan Pages": "orphans", "Internal PageRank": "pagerank" };
+    const m: Record<string, string> = { "Crawl Overview": "overview", "Broken Links / Crawl Errors": "broken", "Redirect Chains": "redirects", "Duplicate Content": "duplicates", "Non-Indexable Pages": "indexability", "Missing Metadata": "missing", "Structured Data": "structured", "Hreflang": "hreflang", "Security Headers": "security", "Insecure (HTTP) URLs": "insecure", "Slowest Pages": "pagespeed", "Orphan Pages": "orphans", "Internal PageRank": "pagerank" };
     activeReport.value = m[item] ?? null;
   }
   if (menu === "Help") {
