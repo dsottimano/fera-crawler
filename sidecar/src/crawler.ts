@@ -443,19 +443,28 @@ const EXTRACT_SEO_SCRIPT = `(() => {
 
   var title = (document.querySelector("title") || {}).textContent || "";
   title = title.trim();
-  var h1 = (document.querySelector("h1") || {}).textContent || "";
-  h1 = h1.trim();
-  var h2 = (document.querySelector("h2") || {}).textContent || "";
-  h2 = h2.trim();
+  var h1Els = document.querySelectorAll("h1");
+  var h1 = h1Els.length ? (h1Els[0].textContent || "").trim() : "";
+  var h1Count = h1Els.length;
+  var h2Els = document.querySelectorAll("h2");
+  var h2 = h2Els.length ? (h2Els[0].textContent || "").trim() : "";
+  var h2Count = h2Els.length;
   var metaDesc = _m("name", "description") || _m("property", "description");
   var canonicalEl = document.querySelector('link[rel="canonical"]');
   var canonical = canonicalEl ? canonicalEl.getAttribute("href") || "" : "";
 
   var bodyText = document.body ? document.body.innerText || "" : "";
-  // Word-count approximation — avoids allocating an N-element array on large DOMs.
-  // ~5 chars per word is the standard English-text heuristic.
-  var trimmed = bodyText.trim();
-  var wordCount = trimmed ? Math.max(1, Math.round(trimmed.length / 5)) : 0;
+  // Real word count: count runs of non-whitespace via a single manual scan, so
+  // large DOMs don't allocate an N-element split array. (Was a length/5
+  // heuristic, which visibly disagreed with Screaming Frog's true token count.)
+  var wordCount = 0;
+  var inWord = false;
+  for (var wi = 0; wi < bodyText.length; wi++) {
+    var cc = bodyText.charCodeAt(wi);
+    var isWs = cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12 || cc === 160;
+    if (isWs) { inWord = false; }
+    else if (!inWord) { wordCount++; inWord = true; }
+  }
 
   var metaRobots = _m("name", "robots");
   var metaGooglebot = _m("name", "googlebot");
@@ -546,7 +555,7 @@ const EXTRACT_SEO_SCRIPT = `(() => {
   }
 
   return {
-    title: title, h1: h1, h2: h2, metaDescription: metaDesc, canonical: canonical, wordCount: wordCount,
+    title: title, h1: h1, h2: h2, h1Count: h1Count, h2Count: h2Count, metaDescription: metaDesc, canonical: canonical, wordCount: wordCount,
     metaRobots: metaRobots, metaGooglebot: metaGooglebot,
     ogTitle: ogTitle, ogDescription: ogDescription, ogType: ogType, ogUrl: ogUrl, ogImage: ogImage,
     ogImageWidth: ogImageWidthStr ? parseInt(ogImageWidthStr, 10) || 0 : 0,
@@ -894,6 +903,8 @@ export async function crawlPage(
         title: data.title,
         h1: data.h1,
         h2: data.h2,
+        h1Count: data.h1Count,
+        h2Count: data.h2Count,
         metaDescription: data.metaDescription,
         canonical: data.canonical,
         wordCount: data.wordCount,
@@ -948,7 +959,7 @@ export async function crawlPage(
   } catch (err: any) {
     return {
       result: {
-        url, status: 0, title: "", h1: "", h2: "", metaDescription: "", canonical: "",
+        url, status: 0, title: "", h1: "", h2: "", h1Count: 0, h2Count: 0, metaDescription: "", canonical: "",
         wordCount: 0, metaRobots: "", metaGooglebot: "", xRobotsTag: "",
         isIndexable: false, isNoindex: false, isNofollow: false,
         ogTitle: "", ogDescription: "", ogType: "", ogUrl: "", ogImage: "",
@@ -989,7 +1000,7 @@ export async function crawlPage(
 
 function makeBlockedResult(url: string, inSitemap: boolean): CrawlResult {
   return {
-    url, status: 0, title: "", h1: "", h2: "", metaDescription: "", canonical: "",
+    url, status: 0, title: "", h1: "", h2: "", h1Count: 0, h2Count: 0, metaDescription: "", canonical: "",
     wordCount: 0, metaRobots: "", metaGooglebot: "", xRobotsTag: "",
     isIndexable: false, isNoindex: false, isNofollow: false,
     ogTitle: "", ogDescription: "", ogType: "", ogUrl: "", ogImage: "",

@@ -224,6 +224,15 @@ function sdTypesFormatter(cell: any) {
   return Array.isArray(v) && v.length ? escapeHtml(v.join(", ")) : "";
 }
 
+// Heading count: red when 0 (missing) or >1 (SF flags "Multiple H1"), plain at 1.
+function headingCountFormatter(cell: any) {
+  const v = cell.getValue();
+  if (v === undefined || v === null) return "";
+  const n = Number(v);
+  if (n === 1) return "1";
+  return `<span style="color:#f44747;font-weight:600" title="${n === 0 ? "Missing" : "Multiple"} — 1 is recommended">${n}</span>`;
+}
+
 function dimensionFormatter(cell: any) {
   const val = cell.getValue() as number;
   return val ? `${val}px` : "";
@@ -291,8 +300,10 @@ const COL = {
   titleLen:       { title: "Title Length", field: "title", width: 100, hozAlign: "center", formatter: lengthQualityFormatter(30, 60) },
   h1:             { title: "H1", field: "h1", minWidth: 200, widthGrow: 2, tooltip: true },
   h1Len:          { title: "H1 Length", field: "h1", width: 90, hozAlign: "center", formatter: lengthFormatter },
+  h1Count:        { title: "H1 Count", field: "h1Count", width: 85, hozAlign: "center", formatter: headingCountFormatter },
   h2:             { title: "H2", field: "h2", minWidth: 200, widthGrow: 2, tooltip: true },
   h2Len:          { title: "H2 Length", field: "h2", width: 90, hozAlign: "center", formatter: lengthFormatter },
+  h2Count:        { title: "H2 Count", field: "h2Count", width: 85, hozAlign: "center", formatter: headingCountFormatter },
   metaDesc:       { title: "Meta Description", field: "metaDescription", minWidth: 200, widthGrow: 2, tooltip: true },
   metaDescLen:    { title: "Meta Desc Length", field: "metaDescription", width: 110, hozAlign: "center", formatter: lengthQualityFormatter(70, 155) },
   canonical:      { title: "Canonical", field: "canonical", minWidth: 200, widthGrow: 2, tooltip: true },
@@ -389,7 +400,7 @@ const TAB_COLUMNS: Record<string, any[]> = {
   "Internal":         [
     COL.address, COL.contentType, COL.statusCode, COL.statusText, COL.redirectUrl,
     COL.title, COL.titleLen, COL.metaDesc, COL.metaDescLen,
-    COL.h1, COL.h1Len, COL.h2, COL.h2Len, COL.canonical,
+    COL.h1, COL.h1Len, COL.h1Count, COL.h2, COL.h2Len, COL.h2Count, COL.canonical,
     COL.indexable, COL.index, COL.noindex, COL.follow, COL.nofollow,
     COL.noarchive, COL.nosnippet, COL.noimageindex, COL.notranslate, COL.nocache, COL.noai, COL.noimageai,
     COL.maxImgPreview, COL.maxSnippet, COL.maxVideoPreview, COL.xRobotsTag,
@@ -406,8 +417,8 @@ const TAB_COLUMNS: Record<string, any[]> = {
   "URL":              [COL.address, COL.statusCode, COL.contentType, COL.size, COL.responseTime],
   "Page Titles":      [COL.address, COL.title, COL.titleLen, COL.statusCode, COL.indexable],
   "Meta Description": [COL.address, COL.metaDesc, COL.metaDescLen, COL.statusCode, COL.indexable],
-  "H1":               [COL.address, COL.h1, COL.h1Len, COL.statusCode],
-  "H2":               [COL.address, COL.h2, COL.h2Len, COL.statusCode],
+  "H1":               [COL.address, COL.h1, COL.h1Len, COL.h1Count, COL.statusCode],
+  "H2":               [COL.address, COL.h2, COL.h2Len, COL.h2Count, COL.statusCode],
   "Content":          [COL.address, COL.wordCount, COL.contentType, COL.size, COL.statusCode, COL.responseTime],
   "Images":           [COL.address, COL.ogImage, COL.ogImgW, COL.ogImgH, COL.ogImgWReal, COL.ogImgHReal, COL.ogImgRatio, COL.ogImgSize, COL.maxImgPreview, COL.statusCode, COL.size],
   "Canonicals":       [COL.address, COL.canonical, COL.statusCode, COL.indexable],

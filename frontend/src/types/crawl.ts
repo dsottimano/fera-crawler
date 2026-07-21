@@ -17,6 +17,8 @@ export interface CrawlResult {
   title: string;
   h1: string;
   h2: string;
+  h1Count?: number;
+  h2Count?: number;
   metaDescription: string;
   canonical: string;
   wordCount: number;

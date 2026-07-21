@@ -541,6 +541,8 @@ fn build_seo_json(v: &Value) -> String {
         "inSitemap".into(),
         v.get("inSitemap").cloned().unwrap_or(Value::Bool(false)),
     );
+    m.insert("h1Count".into(), i64_or_zero("h1Count"));
+    m.insert("h2Count".into(), i64_or_zero("h2Count"));
     Value::Object(m).to_string()
 }
 

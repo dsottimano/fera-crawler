@@ -17,6 +17,10 @@ export interface CrawlResult {
   title: string;
   h1: string;
   h2: string;
+  // Count of <h1>/<h2> elements on the page — powers "Missing H1" and
+  // "Multiple H1" detection (SF filters). h1/h2 above hold the first element's text.
+  h1Count: number;
+  h2Count: number;
   metaDescription: string;
   canonical: string;
   wordCount: number;
