@@ -31,6 +31,11 @@ describe("spider mode", () => {
     expect(about).toBeDefined();
     expect(about!.title).toBe("About - Fera Test");
     expect(about!.status).toBe(200);
+
+    // Crawl depth: the start URL is a seed (0); /about is linked from it (1).
+    const start = results.find((r) => r.url === `${BASE_URL}/`);
+    expect(start!.crawlDepth).toBe(0);
+    expect(about!.crawlDepth).toBe(1);
   });
 
   it("does not exceed maxRequests", async () => {

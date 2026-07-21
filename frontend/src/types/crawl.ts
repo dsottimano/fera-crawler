@@ -78,6 +78,7 @@ export interface CrawlResult {
   hreflang?: Array<{ lang: string; href: string }>;
   structuredDataTypes?: string[];
   inSitemap?: boolean;
+  crawlDepth?: number;
   securityHeaders?: {
     hsts: boolean;
     csp: boolean;

@@ -386,6 +386,9 @@ const COL = {
   // Hreflang alternate count
   hreflangCount:  { title: "Hreflang", field: "hreflang", width: 85, hozAlign: "center", formatter: arrayCountFormatter },
 
+  // Click-depth from the nearest seed (0 = seed; shown, not blanked)
+  crawlDepth:     { title: "Crawl Depth", field: "crawlDepth", width: 100, hozAlign: "center", formatter: (cell: any) => { const v = cell.getValue(); return v === undefined || v === null ? "" : String(v); } },
+
   // Security response headers (present = good)
   hsts:           { title: "HSTS", field: "securityHeaders.hsts", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
   csp:            { title: "CSP", field: "securityHeaders.csp", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
@@ -427,7 +430,7 @@ const TAB_COLUMNS: Record<string, any[]> = {
     COL.ogTitle, COL.ogDesc, COL.ogImage, COL.ogType, COL.ogUrl,
     COL.ogImgW, COL.ogImgH, COL.ogImgWReal, COL.ogImgHReal, COL.ogImgRatio, COL.ogImgSize,
     COL.datePub, COL.datePubTime, COL.dateMod, COL.dateModTime,
-    COL.intLinks, COL.extLinks, COL.uniqueOutlinks,
+    COL.crawlDepth, COL.intLinks, COL.extLinks, COL.uniqueOutlinks,
     COL.wordCount, COL.resource, COL.responseTime, COL.ttfb, COL.lcp, COL.cls, COL.size, COL.server,
     COL.sdTypes, COL.hreflangCount, COL.imageCount, COL.imagesMissingAlt, COL.hsts, COL.csp, COL.xFrame,
   ],
@@ -453,7 +456,7 @@ const TAB_COLUMNS: Record<string, any[]> = {
   "Structured Data":  [COL.address, COL.statusCode, COL.sdTypes, COL.ogTitle, COL.ogType, COL.datePub, COL.dateMod],
   "Overview":         [COL.address, COL.statusCode, COL.statusText, COL.title, COL.metaDesc, COL.h1, COL.canonical, COL.ogImage, COL.ogImgW, COL.ogImgH, COL.metaRobots, COL.indexable, COL.intLinks, COL.extLinks, COL.wordCount, COL.responseTime, COL.size, COL.datePub, COL.dateMod],
   "Issues":           [COL.address, COL.statusCode, COL.statusText, COL.title, COL.metaDesc, COL.h1, COL.canonical, COL.indexable, COL.noindex],
-  "Site Structure":   [COL.address, COL.statusCode, COL.intLinks, COL.extLinks, COL.wordCount, COL.size],
+  "Site Structure":   [COL.address, COL.statusCode, COL.crawlDepth, COL.intLinks, COL.extLinks, COL.wordCount, COL.size],
   "Response Times":   [COL.address, COL.responseTime, COL.ttfb, COL.fcp, COL.lcp, COL.cls, COL.statusCode, COL.size, COL.server],
   "Recrawl Queue":    [COL.address, COL.queueStatus, COL.statusCode, COL.statusText, COL.contentType, COL.responseTime, COL.size],
 };

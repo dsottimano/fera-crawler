@@ -1348,12 +1348,18 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   // URLs entering the frontier — every NEW enqueue goes through here so the
   // crawl_frontier table mirrors the in-memory queue. (unparkHost re-queues
   // already-discovered parked URLs with a raw push and must NOT re-report.)
-  function enqueueNew(rawUrl: string): boolean {
+  // Click-depth from the nearest seed. Seeds are depth 0; a link discovered on
+  // a depth-N page is depth N+1. Set once, on first enqueue (the shallowest
+  // path wins because BFS reaches a URL via its shortest route first).
+  const depthOf = new Map<string, number>();
+
+  function enqueueNew(rawUrl: string, depth = 0): boolean {
     // Normalize at the single choke point so the queue, the visited set, and
     // the persisted frontier all key on one canonical spelling per resource.
     const url = normalizeUrl(rawUrl);
     if (everEnqueued.has(url)) return false;
     everEnqueued.add(url);
+    depthOf.set(url, depth);
     queue.push(url);
     discoveredBuffer.push(url);
     if (discoveredBuffer.length >= 200) flushDiscovered();
@@ -1676,13 +1682,15 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         log("debug", "page complete", { url, status: result.status, ms: result.responseTime, links: discoveredLinks.length });
       }
       if (sitemapUrls.has(url)) result.inSitemap = true;
+      const depth = depthOf.get(url) ?? 0;
+      result.crawlDepth = depth;
       recordResult(result);
       processed++;
       recordCompletion();
       if (config.mode === "spider" && !(config.respectRobots && result.isNofollow)) {
         for (const link of discoveredLinks) {
           if (canEnqueue(queueSize(), processed, config.maxRequests)) {
-            enqueueNew(link);
+            enqueueNew(link, depth + 1);
           }
         }
       }

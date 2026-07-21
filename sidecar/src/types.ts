@@ -100,6 +100,9 @@ export interface CrawlResult {
   // Discovery flags
   inSitemap: boolean;
   blockedByRobots: boolean;
+  // Click-depth from the nearest seed (0 = seed). Set by the crawl loop, so
+  // direct crawlPage callers (probe/tests) may omit it.
+  crawlDepth?: number;
 
   // JS runtime errors thrown on the page (Error.message strings)
   jsErrors: string[];
