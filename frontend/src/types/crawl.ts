@@ -55,6 +55,11 @@ export interface CrawlResult {
   externalLinks: number;
   outlinks: string[];
 
+  // Image alt-text audit (optional — older sessions / paged grid may omit)
+  imageCount?: number;
+  imagesMissingAlt?: number;
+  missingAltImages?: string[];
+
   // Response
   responseTime: number;
   contentType: string;

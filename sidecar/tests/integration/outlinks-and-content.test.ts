@@ -79,4 +79,21 @@ describe("Outlinks and content extraction", () => {
     expect(results).toHaveLength(1);
     expect(results[0].h2).toBe("");
   });
+
+  it("audits images missing alt text and counts headings", async () => {
+    const results = await runCrawlerProcess([
+      "crawl", `${BASE_URL}/page-with-errors`,
+      "--mode", "list",
+      "--urls", `${BASE_URL}/page-with-errors`,
+      "--max-requests", "1",
+    ]);
+
+    expect(results).toHaveLength(1);
+    const r = results[0];
+    // The fixture has one <img> with no alt attribute and a single <h1>.
+    expect(r.imageCount).toBe(1);
+    expect(r.imagesMissingAlt).toBe(1);
+    expect(r.missingAltImages.some((s: string) => s.includes("does-not-exist.png"))).toBe(true);
+    expect(r.h1Count).toBe(1);
+  });
 });

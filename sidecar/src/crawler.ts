@@ -554,6 +554,25 @@ const EXTRACT_SEO_SCRIPT = `(() => {
     } catch(e) {}
   }
 
+  // Image alt-text audit. Images don't load when blockResources is on, so we
+  // read attributes only: an <img> WITHOUT an alt attribute is a genuine
+  // accessibility/SEO issue. alt="" is intentional (decorative) and NOT flagged.
+  var imgEls = document.querySelectorAll("img");
+  var imageCount = imgEls.length;
+  var imagesMissingAlt = 0;
+  var missingAltImages = [];
+  var IMG_CAP = 200;
+  for (var mi = 0; mi < imgEls.length; mi++) {
+    if (!imgEls[mi].hasAttribute("alt")) {
+      imagesMissingAlt++;
+      if (missingAltImages.length < IMG_CAP) {
+        var isrc = imgEls[mi].getAttribute("src") || "";
+        try { isrc = new URL(isrc, location.origin).href; } catch(e3) {}
+        missingAltImages.push(isrc);
+      }
+    }
+  }
+
   return {
     title: title, h1: h1, h2: h2, h1Count: h1Count, h2Count: h2Count, metaDescription: metaDesc, canonical: canonical, wordCount: wordCount,
     metaRobots: metaRobots, metaGooglebot: metaGooglebot,
@@ -564,6 +583,7 @@ const EXTRACT_SEO_SCRIPT = `(() => {
     metaTags: metaTags,
     internalLinks: internal, externalLinks: external,
     internalUrls: internalUrls, allOutlinks: allOutlinks,
+    imageCount: imageCount, imagesMissingAlt: imagesMissingAlt, missingAltImages: missingAltImages,
     hreflang: hreflang,
     structuredDataTypes: structuredDataTypes,
   };
@@ -934,6 +954,9 @@ export async function crawlPage(
         internalLinks: data.internalLinks,
         externalLinks: data.externalLinks,
         outlinks: uniqueOutlinks,
+        imageCount: data.imageCount,
+        imagesMissingAlt: data.imagesMissingAlt,
+        missingAltImages: data.missingAltImages,
         responseTime,
         contentType,
         resourceType: classifyResource(contentType),
@@ -967,7 +990,7 @@ export async function crawlPage(
         ogImageWidthReal: 0, ogImageHeightReal: 0,
         ogImageRatio: 0, ogImageFileSize: 0,
         datePublished: "", dateModified: "", datePublishedTime: "", dateModifiedTime: "",
-        internalLinks: 0, externalLinks: 0, outlinks: [],
+        internalLinks: 0, externalLinks: 0, outlinks: [], imageCount: 0, imagesMissingAlt: 0, missingAltImages: [],
         responseTime: Date.now() - startTime, contentType: "", resourceType: "Other",
         size: 0, error: err.message, responseHeaders: {},
         metaTags: [],
@@ -1008,7 +1031,7 @@ function makeBlockedResult(url: string, inSitemap: boolean): CrawlResult {
     ogImageWidthReal: 0, ogImageHeightReal: 0,
     ogImageRatio: 0, ogImageFileSize: 0,
     datePublished: "", dateModified: "", datePublishedTime: "", dateModifiedTime: "",
-    internalLinks: 0, externalLinks: 0, outlinks: [],
+    internalLinks: 0, externalLinks: 0, outlinks: [], imageCount: 0, imagesMissingAlt: 0, missingAltImages: [],
     responseTime: 0, contentType: "", resourceType: "Other",
     size: 0, responseHeaders: {},
     metaTags: [], scraper: {},

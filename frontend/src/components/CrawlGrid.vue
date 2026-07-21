@@ -224,6 +224,13 @@ function sdTypesFormatter(cell: any) {
   return Array.isArray(v) && v.length ? escapeHtml(v.join(", ")) : "";
 }
 
+// Missing-alt image count: red when any image on the page lacks an alt attribute.
+function missingAltFormatter(cell: any) {
+  const n = Number(cell.getValue() ?? 0);
+  if (!n) return "";
+  return `<span style="color:#f44747;font-weight:600" title="${n} image(s) missing an alt attribute">${n}</span>`;
+}
+
 // Heading count: red when 0 (missing) or >1 (SF flags "Multiple H1"), plain at 1.
 function headingCountFormatter(cell: any) {
   const v = cell.getValue();
@@ -366,6 +373,10 @@ const COL = {
   // Structured data (@types present in JSON-LD)
   sdTypes:        { title: "Structured Data", field: "structuredDataTypes", minWidth: 160, widthGrow: 1, tooltip: true, formatter: sdTypesFormatter },
 
+  // Image alt-text audit
+  imageCount:     { title: "Images", field: "imageCount", width: 80, hozAlign: "center", formatter: wordCountFormatter },
+  imagesMissingAlt: { title: "Missing Alt", field: "imagesMissingAlt", width: 100, hozAlign: "center", formatter: missingAltFormatter },
+
   // Security response headers (present = good)
   hsts:           { title: "HSTS", field: "securityHeaders.hsts", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
   csp:            { title: "CSP", field: "securityHeaders.csp", width: 70, hozAlign: "center", formatter: secHeaderFormatter },
@@ -420,7 +431,7 @@ const TAB_COLUMNS: Record<string, any[]> = {
   "H1":               [COL.address, COL.h1, COL.h1Len, COL.h1Count, COL.statusCode],
   "H2":               [COL.address, COL.h2, COL.h2Len, COL.h2Count, COL.statusCode],
   "Content":          [COL.address, COL.wordCount, COL.contentType, COL.size, COL.statusCode, COL.responseTime],
-  "Images":           [COL.address, COL.ogImage, COL.ogImgW, COL.ogImgH, COL.ogImgWReal, COL.ogImgHReal, COL.ogImgRatio, COL.ogImgSize, COL.maxImgPreview, COL.statusCode, COL.size],
+  "Images":           [COL.address, COL.imageCount, COL.imagesMissingAlt, COL.ogImage, COL.ogImgW, COL.ogImgH, COL.ogImgWReal, COL.ogImgHReal, COL.ogImgRatio, COL.ogImgSize, COL.maxImgPreview, COL.statusCode],
   "Canonicals":       [COL.address, COL.canonical, COL.statusCode, COL.indexable],
   "Directives":       [
     COL.address, COL.statusCode, COL.metaRobots, COL.metaGooglebot, COL.xRobotsTag,

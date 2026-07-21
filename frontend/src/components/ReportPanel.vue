@@ -24,7 +24,7 @@ onMounted(async () => {
 });
 
 const title = computed(() => {
-  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages", structured: "Structured Data", security: "Security Headers", hreflang: "Hreflang", broken: "Broken Links / Crawl Errors" };
+  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages", structured: "Structured Data", security: "Security Headers", hreflang: "Hreflang", broken: "Broken Links / Crawl Errors", images: "Images Missing Alt Text" };
   return titles[props.report] ?? "Report";
 });
 
@@ -144,6 +144,14 @@ const hreflangPages = computed(() =>
   rows.value
     .filter((r) => (r.hreflang?.length ?? 0) > 0)
     .map((r) => ({ url: r.url, langs: (r.hreflang ?? []).map((h) => h.lang).join(", "), count: r.hreflang?.length ?? 0 })),
+);
+
+// ── Images missing alt text report ──
+const imagesMissingAlt = computed(() =>
+  rows.value
+    .filter((r) => (r.imagesMissingAlt ?? 0) > 0)
+    .map((r) => ({ url: r.url, count: r.imagesMissingAlt ?? 0, images: r.missingAltImages ?? [] }))
+    .sort((a, b) => b.count - a.count),
 );
 
 // ── Broken Links / Crawl Errors report ──
@@ -453,6 +461,16 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
               <div class="dup-title"><span class="broken-status">{{ b.status === 0 ? (b.error || 'Error') : b.status }}</span> {{ b.url }} <span class="broken-count">— linked from {{ b.linkedFrom.length }}</span></div>
               <ul v-if="b.linkedFrom.length"><li v-for="src in b.linkedFrom.slice(0, 50)" :key="src" class="dup-url">{{ src }}</li></ul>
               <div v-else class="empty" style="text-align:left;padding:2px 0 6px 12px;">No internal inlinks (orphaned error).</div>
+            </div>
+          </template>
+        </template>
+        <template v-else-if="report === 'images'">
+          <div v-if="!imagesMissingAlt.length" class="empty">No images missing alt text.</div>
+          <template v-else>
+            <div class="pr-note">{{ imagesMissingAlt.length }} page(s) contain images with no alt attribute, most first.</div>
+            <div v-for="p in imagesMissingAlt" :key="p.url" class="dup-group">
+              <div class="dup-title">{{ p.url }} <span class="broken-count">— {{ p.count }} missing</span></div>
+              <ul><li v-for="(img, idx) in p.images.slice(0, 50)" :key="idx" class="dup-url">{{ img }}</li></ul>
             </div>
           </template>
         </template>

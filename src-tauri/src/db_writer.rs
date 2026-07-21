@@ -543,6 +543,9 @@ fn build_seo_json(v: &Value) -> String {
     );
     m.insert("h1Count".into(), i64_or_zero("h1Count"));
     m.insert("h2Count".into(), i64_or_zero("h2Count"));
+    m.insert("imageCount".into(), i64_or_zero("imageCount"));
+    m.insert("imagesMissingAlt".into(), i64_or_zero("imagesMissingAlt"));
+    m.insert("missingAltImages".into(), arr("missingAltImages"));
     Value::Object(m).to_string()
 }
 

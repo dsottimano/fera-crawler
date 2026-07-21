@@ -57,6 +57,11 @@ export interface CrawlResult {
   externalLinks: number;
   outlinks: string[];
 
+  // Image alt-text audit
+  imageCount: number;
+  imagesMissingAlt: number;
+  missingAltImages: string[];
+
   // Response
   responseTime: number;
   contentType: string;
