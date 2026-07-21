@@ -14,6 +14,10 @@ const CEILING_SATURATED_MS = 5 * 60_000;
 const CEILING_BLOCK_RATE_THRESHOLD = 0.2;
 const REPROBE_COOLDOWN_MS = 5 * 60_000;
 const STATE_EMIT_DEBOUNCE_MS = 1000;
+// Bound the per-host control map on huge list-mode crawls. Entries are pure
+// timing data (no live handles), so LRU-evicting the oldest is safe — a
+// re-encountered host just restarts its re-probe/emit timers from scratch.
+const MAX_HOSTS = 2048;
 
 export type ControllerEvent =
   | {
@@ -180,14 +184,22 @@ export class AdaptiveController {
 
   private touchCtl(host: string): PerHostCtl {
     let c = this.ctl.get(host);
-    if (!c) {
-      c = {
-        ceilingSinceMonoMs: null,
-        consec403StartMonoMs: null,
-        lastReprobeMonoMs: null,
-        lastEmitMonoMs: -Infinity,
-      };
+    if (c) {
+      // LRU touch — move to the most-recently-used end.
+      this.ctl.delete(host);
       this.ctl.set(host, c);
+      return c;
+    }
+    c = {
+      ceilingSinceMonoMs: null,
+      consec403StartMonoMs: null,
+      lastReprobeMonoMs: null,
+      lastEmitMonoMs: -Infinity,
+    };
+    this.ctl.set(host, c);
+    if (this.ctl.size > MAX_HOSTS) {
+      const oldest = this.ctl.keys().next().value as string | undefined;
+      if (oldest !== undefined) this.ctl.delete(oldest);
     }
     return c;
   }

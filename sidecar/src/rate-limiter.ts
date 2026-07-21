@@ -57,6 +57,12 @@ export interface PerHostRateLimiterOpts {
   maxConcurrency: number;
 }
 
+// Bound the per-host state map so a list-mode crawl across tens of thousands of
+// distinct hosts can't accumulate state for the whole process lifetime. Only
+// fully-idle, un-bumped hosts are ever evicted (see evictOldestIdle), so the
+// cap can't drop live concurrency accounting or a misbehaving host's backoff.
+const MAX_HOSTS = 2048;
+
 export class PerHostRateLimiter {
   private states = new Map<string, HostState>();
   public readonly delayMinMs: number;
@@ -92,8 +98,23 @@ export class PerHostRateLimiter {
     if (!s) {
       s = { lastRequestStartMs: 0, inFlight: 0, waiters: [], delayMultiplier: 1, lastGapMs: 0 };
       this.states.set(host, s);
+      if (this.states.size > MAX_HOSTS) this.evictOldestIdle();
     }
     return s;
+  }
+
+  // Drop the least-recently-inserted host that is fully idle (no in-flight
+  // request, no waiters) AND carries no backoff multiplier. Re-encountering an
+  // evicted host just recreates a fresh state (no pacing history), which is
+  // harmless — it had gone quiet. Active or backed-off hosts are never evicted,
+  // so nothing in flight can lose its slot accounting.
+  private evictOldestIdle(): void {
+    for (const [host, s] of this.states) {
+      if (s.inFlight === 0 && s.waiters.length === 0 && s.delayMultiplier === 1) {
+        this.states.delete(host);
+        return;
+      }
+    }
   }
 
   /**

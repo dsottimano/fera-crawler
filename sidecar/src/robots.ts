@@ -1,6 +1,13 @@
 // Per-host robots.txt fetcher, parser, and matcher.
 // Standards: RFC 9309 + the de-facto Google extensions (Allow, wildcards, $ anchor).
 
+import { readResponseCapped } from "./utils.js";
+
+// Google parses at most the first 500KB of a robots.txt and ignores the rest;
+// we cap the read at the same ceiling so a hostile origin can't stream an
+// unbounded body (or a robots.txt with millions of Disallow lines) into memory.
+const MAX_ROBOTS_BYTES = 512 * 1024;
+
 interface Rule {
   allow: boolean;
   pattern: string;
@@ -148,7 +155,8 @@ export class RobotsCache {
         redirect: "follow",
       });
       if (!res.ok) return { rules: [], sitemaps: [], fetched: true };
-      const text = await res.text();
+      const { bytes } = await readResponseCapped(res, MAX_ROBOTS_BYTES);
+      const text = Buffer.from(bytes).toString("utf-8");
       return parseRobots(text, this.userAgent);
     } catch {
       // Network error or timeout → treat as no rules (fail-open).

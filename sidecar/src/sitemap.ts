@@ -1,9 +1,18 @@
 // Sitemap.xml discovery + parsing with sitemap-index recursion.
 
+import { gunzipSync } from "node:zlib";
+import { readResponseCapped } from "./utils.js";
+
 const MAX_URLS = 50000;
 const MAX_SITEMAPS = 50;
 const MAX_DEPTH = 3;
 const FETCH_TIMEOUT = 15000;
+// Cap the on-wire body so a hostile/huge sitemap can't exhaust memory. 30MB is
+// far above any legitimate sitemap (the protocol caps uncompressed at 50MB, but
+// on-wire they're XML that gzips hard). Decompressed output is separately capped
+// to guard against gzip bombs.
+const MAX_FETCH_BYTES = 30 * 1024 * 1024;
+const MAX_DECOMPRESSED_BYTES = 60 * 1024 * 1024;
 
 function extractLocs(xml: string): string[] {
   const out: string[] = [];
@@ -36,7 +45,20 @@ async function fetchXml(url: string, userAgent: string): Promise<string | null> 
       redirect: "follow",
     });
     if (!res.ok) return null;
-    return await res.text();
+    const { bytes } = await readResponseCapped(res, MAX_FETCH_BYTES);
+    // Gzip magic (0x1f 0x8b): many sites publish only `.xml.gz` sitemaps served
+    // WITHOUT a Content-Encoding header, so fetch doesn't auto-inflate them and
+    // res.text() would decode raw gzip as UTF-8 garbage → zero URLs extracted,
+    // silently under-seeding the crawl. Detect + inflate ourselves, with an
+    // output cap so a gzip bomb can't blow up the heap.
+    if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      try {
+        return gunzipSync(bytes, { maxOutputLength: MAX_DECOMPRESSED_BYTES }).toString("utf-8");
+      } catch {
+        return null;
+      }
+    }
+    return Buffer.from(bytes).toString("utf-8");
   } catch {
     return null;
   }

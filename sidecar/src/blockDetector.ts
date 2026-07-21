@@ -25,6 +25,11 @@ const TRIP_THRESHOLD = 10;
 // 5 more wasted requests of waiting.
 const CONSECUTIVE_TRIP_THRESHOLD = 5;
 const SOFT_TITLE_REPEAT_THRESHOLD = 3;
+// Bound the per-host state map and per-host title map so a large list-mode
+// crawl (many hosts) or a host serving many unique small pages can't grow
+// BlockDetector memory without bound — keeping it inside the flat-memory budget.
+const MAX_HOSTS = 2048;
+const MAX_TITLES_PER_HOST = 512;
 // A repeated title only counts as a soft block when the pages carrying it are
 // this small or smaller (bytes). Bot-wall / challenge stubs are typically a
 // few KB of HTML; real content pages are well above this. Pages larger than
@@ -170,10 +175,18 @@ export class BlockDetector {
     if (resp.title && resp.status === 200 && isSmallBody(resp.bodyBytes)) {
       let set = state.titleToUrls.get(resp.title);
       if (!set) {
+        // Cap distinct titles tracked per host (LRU-evict the oldest) so a host
+        // serving many unique small pages can't grow this map without bound.
+        if (state.titleToUrls.size >= MAX_TITLES_PER_HOST) {
+          const oldest = state.titleToUrls.keys().next().value as string | undefined;
+          if (oldest !== undefined) state.titleToUrls.delete(oldest);
+        }
         set = new Set();
         state.titleToUrls.set(resp.title, set);
       }
-      set.add(resp.url);
+      // Only enough URLs to confirm the repeat threshold are needed; stop there
+      // so a single hot title's Set can't grow unbounded.
+      if (set.size < SOFT_TITLE_REPEAT_THRESHOLD) set.add(resp.url);
     }
 
     const { blocked, reason } = this.classify(resp, host);
@@ -243,6 +256,7 @@ export class BlockDetector {
   private getState(host: string): HostState {
     let s = this.hosts.get(host);
     if (!s) {
+      if (this.hosts.size >= MAX_HOSTS) this.evictOldestHost();
       s = {
         window: [],
         titleToUrls: new Map(),
@@ -253,6 +267,19 @@ export class BlockDetector {
       this.hosts.set(host, s);
     }
     return s;
+  }
+
+  // Evict the oldest NON-gated host to bound the map. Non-gated hosts never
+  // hold a pending cooldown timer, so nothing is leaked or left to late-fire. A
+  // gated host (rare — only tripped ones) is never dropped; it keeps its
+  // cooldown so parked URLs still auto-requeue.
+  private evictOldestHost(): void {
+    for (const [host, s] of this.hosts) {
+      if (!s.gated) {
+        this.hosts.delete(host);
+        return;
+      }
+    }
   }
 }
 
