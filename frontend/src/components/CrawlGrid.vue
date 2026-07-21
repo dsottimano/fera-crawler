@@ -157,6 +157,19 @@ function lengthFormatter(cell: any) {
   return val.length ? String(val.length) : "";
 }
 
+// SF-style length-quality signal: red when over the recommended maximum
+// (truncated in SERPs), amber when under the recommended minimum (thin), plain
+// when in range or empty. Applied to Title (30–60) and Meta Description (70–155).
+function lengthQualityFormatter(min: number, max: number) {
+  return (cell: any) => {
+    const len = ((cell.getValue() as string) || "").length;
+    if (!len) return "";
+    if (len > max) return `<span style="color:#f44747;font-weight:600" title="Over ${max} chars — may be truncated">${len}</span>`;
+    if (len < min) return `<span style="color:#dcdcaa;font-weight:600" title="Under ${min} chars — consider expanding">${len}</span>`;
+    return String(len);
+  };
+}
+
 function boolFormatter(cell: any) {
   const val = cell.getValue();
   if (val === true) return '<span style="color:#f44747;font-weight:600">Yes</span>';
@@ -235,13 +248,13 @@ const COL = {
   statusCode:     { title: "Status Code", field: "status", width: 90, hozAlign: "center", formatter: statusCodeFormatter },
   statusText:     { title: "Status", field: "_statusText", width: 130, formatter: statusTextFormatter },
   title:          { title: "Title 1", field: "title", minWidth: 200, widthGrow: 2, tooltip: true },
-  titleLen:       { title: "Title Length", field: "title", width: 100, hozAlign: "center", formatter: lengthFormatter },
+  titleLen:       { title: "Title Length", field: "title", width: 100, hozAlign: "center", formatter: lengthQualityFormatter(30, 60) },
   h1:             { title: "H1", field: "h1", minWidth: 200, widthGrow: 2, tooltip: true },
   h1Len:          { title: "H1 Length", field: "h1", width: 90, hozAlign: "center", formatter: lengthFormatter },
   h2:             { title: "H2", field: "h2", minWidth: 200, widthGrow: 2, tooltip: true },
   h2Len:          { title: "H2 Length", field: "h2", width: 90, hozAlign: "center", formatter: lengthFormatter },
   metaDesc:       { title: "Meta Description", field: "metaDescription", minWidth: 200, widthGrow: 2, tooltip: true },
-  metaDescLen:    { title: "Meta Desc Length", field: "metaDescription", width: 110, hozAlign: "center", formatter: lengthFormatter },
+  metaDescLen:    { title: "Meta Desc Length", field: "metaDescription", width: 110, hozAlign: "center", formatter: lengthQualityFormatter(70, 155) },
   canonical:      { title: "Canonical", field: "canonical", minWidth: 200, widthGrow: 2, tooltip: true },
   intLinks:       { title: "Internal Outlinks", field: "internalLinks", width: 110, hozAlign: "center" },
   extLinks:       { title: "External Outlinks", field: "externalLinks", width: 110, hozAlign: "center" },
