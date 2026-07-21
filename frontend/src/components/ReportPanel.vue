@@ -24,7 +24,7 @@ onMounted(async () => {
 });
 
 const title = computed(() => {
-  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages" };
+  const titles: Record<string, string> = { overview: "Crawl Overview", redirects: "Redirect Chains", duplicates: "Duplicate Content", orphans: "Orphan Pages", pagerank: "Internal PageRank", indexability: "Non-Indexable Pages", missing: "Missing Metadata", insecure: "Insecure (HTTP) URLs", pagespeed: "Slowest Pages", structured: "Structured Data", security: "Security Headers", hreflang: "Hreflang" };
   return titles[props.report] ?? "Report";
 });
 
@@ -113,6 +113,37 @@ const slowestPages = computed(() =>
     .slice()
     .sort((a, b) => (b.responseTime || 0) - (a.responseTime || 0))
     .slice(0, 100),
+);
+
+// ── Structured Data report ──
+const structuredData = computed(() => {
+  const html = rows.value.filter((r) => r.resourceType === "HTML" && r.status >= 200 && r.status < 300);
+  const withData = html.filter((r) => (r.structuredDataTypes?.length ?? 0) > 0);
+  const missing = html.filter((r) => (r.structuredDataTypes?.length ?? 0) === 0);
+  const typeCounts: Record<string, number> = {};
+  for (const r of withData) for (const t of r.structuredDataTypes ?? []) typeCounts[t] = (typeCounts[t] || 0) + 1;
+  const types = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]);
+  return { withData, missing, types, total: html.length };
+});
+
+// ── Security report: HTML pages missing key response-security headers ──
+const securityIssues = computed(() => {
+  const html = rows.value.filter((r) => r.resourceType === "HTML" && r.status >= 200 && r.status < 300);
+  const missing = (key: "hsts" | "csp" | "xFrameOptions") => html.filter((r) => r.securityHeaders && r.securityHeaders[key] === false);
+  return {
+    total: html.length,
+    noHsts: missing("hsts"),
+    noCsp: missing("csp"),
+    noXFrame: missing("xFrameOptions"),
+    hasData: html.some((r) => !!r.securityHeaders),
+  };
+});
+
+// ── Hreflang report: pages declaring hreflang alternates ──
+const hreflangPages = computed(() =>
+  rows.value
+    .filter((r) => (r.hreflang?.length ?? 0) > 0)
+    .map((r) => ({ url: r.url, langs: (r.hreflang ?? []).map((h) => h.lang).join(", "), count: r.hreflang?.length ?? 0 })),
 );
 
 // Shared internal-link graph over the crawled universe — the backbone of the
@@ -354,6 +385,54 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
               <tr v-for="r in slowestPages" :key="r.url">
                 <td class="url-cell">{{ r.url }}</td>
                 <td class="num-cell" :style="{ color: (r.responseTime || 0) > 1000 ? '#f44747' : ((r.responseTime || 0) > 500 ? '#dcdcaa' : undefined) }">{{ r.responseTime }} ms</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+        <template v-else-if="report === 'structured'">
+          <div v-if="!structuredData.total" class="empty">No HTML pages crawled.</div>
+          <template v-else>
+            <div class="stat-grid">
+              <div class="stat"><span class="stat-value">{{ structuredData.withData.length }}</span><span class="stat-label">WITH STRUCTURED DATA</span></div>
+              <div class="stat"><span class="stat-value">{{ structuredData.missing.length }}</span><span class="stat-label">MISSING</span></div>
+              <div class="stat"><span class="stat-value">{{ structuredData.types.length }}</span><span class="stat-label">DISTINCT @TYPES</span></div>
+            </div>
+            <h4>@types across the crawl</h4>
+            <div v-if="!structuredData.types.length" class="empty">No JSON-LD @types found.</div>
+            <div v-else class="breakdown">
+              <div v-for="[t, count] in structuredData.types" :key="t" class="breakdown-row">
+                <span class="breakdown-label">{{ t }}</span>
+                <div class="bar-container"><div class="bar bar-type" :style="{ width: (count / structuredData.withData.length * 100) + '%' }"></div></div>
+                <span class="breakdown-count">{{ count }}</span>
+              </div>
+            </div>
+            <h4>Pages missing structured data ({{ structuredData.missing.length }})</h4>
+            <ul class="url-list"><li v-for="r in structuredData.missing.slice(0, 200)" :key="r.url" class="dup-url">{{ r.url }}</li></ul>
+          </template>
+        </template>
+        <template v-else-if="report === 'security'">
+          <div v-if="!securityIssues.hasData" class="empty">No security-header data captured for this session.</div>
+          <template v-else>
+            <h4>Missing HSTS ({{ securityIssues.noHsts.length }} of {{ securityIssues.total }})</h4>
+            <div v-if="!securityIssues.noHsts.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in securityIssues.noHsts.slice(0, 200)" :key="'hsts-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+            <h4>Missing Content-Security-Policy ({{ securityIssues.noCsp.length }})</h4>
+            <div v-if="!securityIssues.noCsp.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in securityIssues.noCsp.slice(0, 200)" :key="'csp-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+            <h4>Missing X-Frame-Options ({{ securityIssues.noXFrame.length }})</h4>
+            <div v-if="!securityIssues.noXFrame.length" class="empty">None.</div>
+            <ul v-else class="url-list"><li v-for="r in securityIssues.noXFrame.slice(0, 200)" :key="'xfo-' + r.url" class="dup-url">{{ r.url }}</li></ul>
+          </template>
+        </template>
+        <template v-else-if="report === 'hreflang'">
+          <div v-if="!hreflangPages.length" class="empty">No pages declare hreflang alternates.</div>
+          <table v-else class="report-table">
+            <thead><tr><th>URL</th><th style="width: 70px; text-align: center;">Alts</th><th>Languages</th></tr></thead>
+            <tbody>
+              <tr v-for="r in hreflangPages" :key="r.url">
+                <td class="url-cell">{{ r.url }}</td>
+                <td class="status-cell">{{ r.count }}</td>
+                <td class="chain-cell">{{ r.langs }}</td>
               </tr>
             </tbody>
           </table>

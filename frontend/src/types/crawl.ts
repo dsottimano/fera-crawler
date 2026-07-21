@@ -66,6 +66,19 @@ export interface CrawlResult {
   redirectChain?: string[];
   serverHeader?: string;
 
+  // Rich SEO fields surfaced by query_all_results (persisted in seo_json).
+  // Optional because older sessions / the paged grid may not carry them.
+  hreflang?: Array<{ lang: string; href: string }>;
+  structuredDataTypes?: string[];
+  securityHeaders?: {
+    hsts: boolean;
+    csp: boolean;
+    xFrameOptions: boolean;
+    referrerPolicy: boolean;
+    xContentTypeOptions: boolean;
+    permissionsPolicy: boolean;
+  };
+
   // All meta tags
   metaTags: MetaTag[];
 
