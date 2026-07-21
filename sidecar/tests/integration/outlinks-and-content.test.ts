@@ -54,6 +54,8 @@ describe("Outlinks and content extraction", () => {
     expect(results).toHaveLength(1);
     // Should have >0 words from body text + link text
     expect(results[0].wordCount).toBeGreaterThan(5);
+    // A content page produces a non-empty content fingerprint (exact-dup key).
+    expect(results[0].contentHash).toBeTruthy();
   });
 
   it("extracts h2 tag", async () => {

@@ -59,6 +59,7 @@ export interface CrawlResult {
   imageCount?: number;
   imagesMissingAlt?: number;
   missingAltImages?: string[];
+  contentHash?: string;
 
   // Response
   responseTime: number;

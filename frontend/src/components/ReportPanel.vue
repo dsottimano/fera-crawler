@@ -78,6 +78,19 @@ const duplicateTitles = computed(() => duplicatesBy("title"));
 const duplicateDescriptions = computed(() => duplicatesBy("metaDescription"));
 const duplicateH1s = computed(() => duplicatesBy("h1"));
 
+// Exact duplicate BODY content — pages sharing a content fingerprint. Grouped
+// by hash; each group's URLs have byte-identical visible text.
+const duplicateBodies = computed(() => {
+  const m: Record<string, CrawlResult[]> = {};
+  for (const r of rows.value) {
+    const h = r.contentHash;
+    if (!h) continue;
+    if (!m[h]) m[h] = [];
+    m[h].push(r);
+  }
+  return Object.values(m).filter((u) => u.length > 1).sort((a, b) => b.length - a.length);
+});
+
 // ── Indexability report ──
 function stripSlash(u: string): string {
   return u.replace(/\/+$/, "");
@@ -347,8 +360,11 @@ const pageRankTop = computed(() => pageRankResults.value.slice(0, 100));
           </table>
         </template>
         <template v-else-if="report === 'duplicates'">
-          <div v-if="!duplicateTitles.length && !duplicateDescriptions.length && !duplicateH1s.length" class="empty">No duplicate titles, descriptions, or H1s found.</div>
+          <div v-if="!duplicateTitles.length && !duplicateDescriptions.length && !duplicateH1s.length && !duplicateBodies.length" class="empty">No duplicate titles, descriptions, H1s, or body content found.</div>
           <template v-else>
+            <h4>Duplicate Body Content ({{ duplicateBodies.length }})</h4>
+            <div v-if="!duplicateBodies.length" class="empty">None.</div>
+            <div v-else v-for="(urls, gi) in duplicateBodies" :key="'b-' + gi" class="dup-group"><div class="dup-title">Identical content ({{ urls.length }} pages)</div><ul><li v-for="u in urls" :key="u.url" class="dup-url">{{ u.url }}</li></ul></div>
             <h4>Duplicate Titles ({{ duplicateTitles.length }})</h4>
             <div v-if="!duplicateTitles.length" class="empty">None.</div>
             <div v-else v-for="[title, urls] in duplicateTitles" :key="'t-' + title" class="dup-group"><div class="dup-title">{{ title }} ({{ urls.length }})</div><ul><li v-for="u in urls" :key="u.url" class="dup-url">{{ u.url }}</li></ul></div>

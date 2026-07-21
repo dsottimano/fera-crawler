@@ -547,6 +547,7 @@ fn build_seo_json(v: &Value) -> String {
     m.insert("imagesMissingAlt".into(), i64_or_zero("imagesMissingAlt"));
     m.insert("missingAltImages".into(), arr("missingAltImages"));
     m.insert("crawlDepth".into(), i64_or_zero("crawlDepth"));
+    m.insert("contentHash".into(), str_or_empty("contentHash"));
     Value::Object(m).to_string()
 }
 

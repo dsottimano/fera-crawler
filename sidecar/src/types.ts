@@ -62,6 +62,10 @@ export interface CrawlResult {
   imagesMissingAlt: number;
   missingAltImages: string[];
 
+  // Content fingerprint (FNV-1a of visible text). Same hash = exact duplicate
+  // body. Empty for pages with no visible text. Optional: error stubs omit it.
+  contentHash?: string;
+
   // Response
   responseTime: number;
   contentType: string;

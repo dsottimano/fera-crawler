@@ -459,12 +459,26 @@ const EXTRACT_SEO_SCRIPT = `(() => {
   // heuristic, which visibly disagreed with Screaming Frog's true token count.)
   var wordCount = 0;
   var inWord = false;
+  // Content fingerprint: FNV-1a (32-bit) over the visible text, folding runs of
+  // whitespace to a single space so trivial formatting differences don't change
+  // it. Pages sharing a hash are EXACT content duplicates (same body, different
+  // URL). Computed in the same single pass as the word count — no extra alloc.
+  var fnv = 2166136261;
+  var prevWs = true;
   for (var wi = 0; wi < bodyText.length; wi++) {
     var cc = bodyText.charCodeAt(wi);
     var isWs = cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12 || cc === 160;
-    if (isWs) { inWord = false; }
-    else if (!inWord) { wordCount++; inWord = true; }
+    if (isWs) {
+      inWord = false;
+      if (!prevWs) { fnv = (fnv ^ 32) >>> 0; fnv = Math.imul(fnv, 16777619) >>> 0; }
+    } else {
+      if (!inWord) { wordCount++; inWord = true; }
+      fnv = (fnv ^ cc) >>> 0;
+      fnv = Math.imul(fnv, 16777619) >>> 0;
+    }
+    prevWs = isWs;
   }
+  var contentHash = wordCount ? fnv.toString(16) : "";
 
   var metaRobots = _m("name", "robots");
   var metaGooglebot = _m("name", "googlebot");
@@ -584,6 +598,7 @@ const EXTRACT_SEO_SCRIPT = `(() => {
     internalLinks: internal, externalLinks: external,
     internalUrls: internalUrls, allOutlinks: allOutlinks,
     imageCount: imageCount, imagesMissingAlt: imagesMissingAlt, missingAltImages: missingAltImages,
+    contentHash: contentHash,
     hreflang: hreflang,
     structuredDataTypes: structuredDataTypes,
   };
@@ -957,6 +972,7 @@ export async function crawlPage(
         imageCount: data.imageCount,
         imagesMissingAlt: data.imagesMissingAlt,
         missingAltImages: data.missingAltImages,
+        contentHash: data.contentHash,
         responseTime,
         contentType,
         resourceType: classifyResource(contentType),
