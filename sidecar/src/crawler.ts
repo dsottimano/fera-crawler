@@ -10,7 +10,7 @@ import { chromium, type BrowserContext, type Page } from "patchright";
 // in their original format. Tradeoff: ~2-3x more disk per saved image, no
 // native deps. Dimension reading was always handled by getImageDimensions
 // (manual byte-header parse) — sharp was strictly the compress-and-write step.
-import { writeLine, writeAnyEvent } from "./pipeline.js";
+import { writeLine, writeAnyEvent, whenStdoutDrained } from "./pipeline.js";
 import { BlockDetector, hostOf } from "./blockDetector.js";
 import { PerHostStates } from "./perHostState.js";
 import { AdaptiveController, type ControllerEvent } from "./adaptiveController.js";
@@ -57,6 +57,44 @@ const KNOWN_IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".av
 export function ensureProtocol(url: string): string {
   if (!/^https?:\/\//i.test(url)) return "https://" + url;
   return url;
+}
+
+// Tracking / analytics query params that never change page content. Stripped
+// during normalization so the same page linked with different campaign tags
+// dedups to a single crawl instead of exploding the frontier.
+const TRACKING_PARAMS = new Set([
+  "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+  "utm_id", "utm_name", "utm_source_platform", "utm_creative_format",
+  "gclid", "gclsrc", "dclid", "gbraid", "wbraid", "fbclid", "msclkid",
+  "mc_eid", "mc_cid", "_ga", "_gl", "igshid", "yclid", "ttclid", "twclid",
+]);
+
+/**
+ * Canonicalize a URL so trivially-different spellings of the SAME resource
+ * dedup to one queue/frontier entry — the primary defense against param-
+ * explosion crawls (faceted nav, calendars, session ids, campaign tags) that
+ * would otherwise enqueue effectively infinite distinct URLs and never finish.
+ *
+ * WHATWG `URL` already lowercases the host, drops default ports (:80/:443), and
+ * resolves `.`/`..` path segments. On top of that this: strips the fragment,
+ * removes known tracking params, and sorts the remaining query params into a
+ * stable order (so `?b=2&a=1` and `?a=1&b=2` collapse). Path case and
+ * meaningful query params are deliberately PRESERVED — they can be significant
+ * (`/Page` ≠ `/page` on many servers; `?id=5` ≠ `?id=6`). Returns the input
+ * unchanged if it can't be parsed.
+ */
+export function normalizeUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.hash = "";
+    for (const key of [...u.searchParams.keys()]) {
+      if (TRACKING_PARAMS.has(key.toLowerCase())) u.searchParams.delete(key);
+    }
+    u.searchParams.sort();
+    return u.href;
+  } catch {
+    return raw;
+  }
 }
 
 export async function killChromeForProfile(profileDir: string): Promise<void> {
@@ -1235,14 +1273,18 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   const everEnqueued = new Set<string>();
   // Resume support: pre-seed visited so already-crawled URLs are skipped.
   if (config.excludeUrls?.length) {
+    // Normalize with the SAME canonicalization enqueueNew uses, or the dedup
+    // sets won't match freshly-discovered (normalized) URLs and already-crawled
+    // pages would be re-fetched on resume.
     for (const u of config.excludeUrls) {
-      visited.add(u);
-      everEnqueued.add(u);
+      const n = normalizeUrl(u);
+      visited.add(n);
+      everEnqueued.add(n);
     }
     // Spider mode still crawls the start URL — without it, link discovery
     // can't bootstrap a resumed crawl.
     if (config.mode === "spider" && config.startUrl) {
-      const s = ensureProtocol(config.startUrl);
+      const s = normalizeUrl(ensureProtocol(config.startUrl));
       visited.delete(s);
       everEnqueued.delete(s);
     }
@@ -1272,7 +1314,10 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   // URLs entering the frontier — every NEW enqueue goes through here so the
   // crawl_frontier table mirrors the in-memory queue. (unparkHost re-queues
   // already-discovered parked URLs with a raw push and must NOT re-report.)
-  function enqueueNew(url: string): boolean {
+  function enqueueNew(rawUrl: string): boolean {
+    // Normalize at the single choke point so the queue, the visited set, and
+    // the persisted frontier all key on one canonical spelling per resource.
+    const url = normalizeUrl(rawUrl);
     if (everEnqueued.has(url)) return false;
     everEnqueued.add(url);
     queue.push(url);
@@ -1618,6 +1663,9 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         await new Promise((r) => setTimeout(r, effectiveDelay * index));
       }
       while (!shutdownRequested && withinLimit(processed, config.maxRequests)) {
+        // Yield if stdout is backed up (Rust consuming slower than we produce),
+        // so the outbound buffer can't grow unbounded in the Node heap.
+        await whenStdoutDrained();
         const url = takeNext();
         if (url === undefined) {
           // Queue momentarily empty. If no other worker is mid-URL, the spider
