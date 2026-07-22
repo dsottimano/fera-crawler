@@ -107,10 +107,20 @@ rationale in `docs/vpngate_integration.md`.
 
 - [ ] **Core Web Vitals health card** on `HealthScreen.vue`. Columns + the Slowest
       Pages report exist; a summary card (avg TTFB, % poor LCP/CLS) needs a Rust
-      aggregate over `perf` in `seo_json`.
-- [ ] **Security health card** on `HealthScreen.vue`. Columns + filters + report
-      exist; a card (counts missing HSTS/CSP/X-Frame) needs a Rust aggregate over
-      `securityHeaders`.
+      aggregate over `perf` in `seo_json`. NOTE (2026-07-22): deferred vs. the
+      Security card because LCP/CLS in `seo_json.perf` are 0 unless `captureVitals`
+      was ON for the crawl — so "% poor LCP" would silently read 0% (looks great)
+      on a crawl that never measured it. Needs a decision: gate the LCP/CLS rows on
+      a "vitals captured" denominator (count pages with perf.lcp>0) and/or show a
+      "vitals not captured" state. TTFB is always present (nav timing) so that row
+      is safe. Ask Dave which behavior he wants before building.
+- [x] **Security health card** on `HealthScreen.vue`. DONE (2026-07-22).
+      `aggregate_health_inner` now emits `secHtml` (denominator = HTML pages that
+      recorded a securityHeaders object) + `secMissingHsts/Csp/Xframe` via
+      `json_extract(seo_json,'$.securityHeaders.*') = 0` (same paths as the grid's
+      security filter). New SECURITY HEADERS card drills to the Security tab with
+      `sec:hsts`/`sec:csp`/`sec:xframe`. Rust test
+      `aggregate_health_counts_missing_security_headers`.
 - [ ] **Hreflang return-link validation**. The hreflang column + report list
       alternates; SF's real value is confirming each alternate links back. Needs
       a cross-URL pass after the crawl.

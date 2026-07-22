@@ -44,6 +44,10 @@ interface HealthSnapshot {
   avgResponseTime: number;
   maxResponseTime: number;
   frontier: number;
+  secHtml: number;
+  secMissingHsts: number;
+  secMissingCsp: number;
+  secMissingXframe: number;
 }
 
 const EMPTY: HealthSnapshot = {
@@ -63,6 +67,10 @@ const EMPTY: HealthSnapshot = {
   avgResponseTime: 0,
   maxResponseTime: 0,
   frontier: 0,
+  secHtml: 0,
+  secMissingHsts: 0,
+  secMissingCsp: 0,
+  secMissingXframe: 0,
 };
 
 const health = ref<HealthSnapshot>(EMPTY);
@@ -316,6 +324,18 @@ function emptyTitleSeverity(): Severity {
   if (emptyTitlePct.value >= 10) return "amber";
   return "ok";
 }
+function securitySeverity(): Severity {
+  // Denominator is HTML pages that recorded a securityHeaders object; if none
+  // did, there's nothing to grade. Missing HSTS is the strongest signal
+  // (no forced-HTTPS), so it drives the accent; CSP/X-Frame nudge to amber.
+  const d = health.value.secHtml;
+  if (!d) return "ok";
+  const hstsPct = (health.value.secMissingHsts / d) * 100;
+  const anyPct = (Math.max(health.value.secMissingCsp, health.value.secMissingXframe) / d) * 100;
+  if (hstsPct >= 50) return "red";
+  if (hstsPct >= 10 || anyPct >= 50) return "amber";
+  return "ok";
+}
 function indexabilitySeverity(): Severity {
   if (!health.value.total) return "ok";
   const noindexPct = (health.value.noindex / health.value.total) * 100;
@@ -495,6 +515,31 @@ function maxResponseTime(): string {
             <span class="status-dot status-dot--bad"></span>
             <span class="status-label">All issues</span>
             <span class="status-count">→</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Security headers -->
+      <div class="card" :class="`card--${securitySeverity()}`">
+        <div class="card-title">
+          SECURITY HEADERS
+          <span class="info-tip" data-tip="Share of HTML pages missing key response security headers. Denominator is pages that returned a securityHeaders object — non-HTML resources are excluded. HSTS = Strict-Transport-Security, CSP = Content-Security-Policy.">i</span>
+        </div>
+        <div class="card-body status-mix">
+          <button class="status-row" @click="emit('drill', { tab: 'Security', filterType: 'sec:hsts' })">
+            <span class="status-dot" :class="health.secMissingHsts > 0 ? 'status-dot--bad' : 'status-dot--ok'"></span>
+            <span class="status-label">Missing HSTS</span>
+            <span class="status-count">{{ pctStr(health.secMissingHsts, health.secHtml) }}</span>
+          </button>
+          <button class="status-row" @click="emit('drill', { tab: 'Security', filterType: 'sec:csp' })">
+            <span class="status-dot" :class="health.secMissingCsp > 0 ? 'status-dot--warn' : 'status-dot--ok'"></span>
+            <span class="status-label">Missing CSP</span>
+            <span class="status-count">{{ pctStr(health.secMissingCsp, health.secHtml) }}</span>
+          </button>
+          <button class="status-row" @click="emit('drill', { tab: 'Security', filterType: 'sec:xframe' })">
+            <span class="status-dot" :class="health.secMissingXframe > 0 ? 'status-dot--warn' : 'status-dot--ok'"></span>
+            <span class="status-label">Missing X-Frame-Options</span>
+            <span class="status-count">{{ pctStr(health.secMissingXframe, health.secHtml) }}</span>
           </button>
         </div>
       </div>

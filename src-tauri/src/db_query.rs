@@ -694,6 +694,15 @@ pub struct HealthSnapshot {
     // Pending discovered-but-not-yet-crawled URLs. FOUND = total + frontier,
     // REMAINING = frontier. Survives stop/reload (DB-backed).
     pub frontier: i64,
+    // Security-header coverage. `sec_html` = pages that recorded a
+    // securityHeaders object (the denominator); the `sec_missing_*` counts are
+    // pages that recorded that header as absent. Non-HTML rows (no
+    // securityHeaders in seo_json) are excluded from both, mirroring the grid's
+    // `security_missing` filter semantics.
+    pub sec_html: i64,
+    pub sec_missing_hsts: i64,
+    pub sec_missing_csp: i64,
+    pub sec_missing_xframe: i64,
 }
 
 pub async fn aggregate_health_inner(
@@ -719,7 +728,11 @@ pub async fn aggregate_health_inner(
             SUM(CASE WHEN h1 = '' OR h1 IS NULL THEN 1 ELSE 0 END) AS empty_h1,
             SUM(CASE WHEN title = '' OR title IS NULL THEN 1 ELSE 0 END) AS empty_title,
             COALESCE(AVG(response_time), 0) AS avg_response_time,
-            COALESCE(MAX(response_time), 0) AS max_response_time
+            COALESCE(MAX(response_time), 0) AS max_response_time,
+            SUM(CASE WHEN json_extract(seo_json, '$.securityHeaders.hsts') IS NOT NULL THEN 1 ELSE 0 END) AS sec_html,
+            SUM(CASE WHEN json_extract(seo_json, '$.securityHeaders.hsts') = 0 THEN 1 ELSE 0 END) AS sec_missing_hsts,
+            SUM(CASE WHEN json_extract(seo_json, '$.securityHeaders.csp') = 0 THEN 1 ELSE 0 END) AS sec_missing_csp,
+            SUM(CASE WHEN json_extract(seo_json, '$.securityHeaders.xFrameOptions') = 0 THEN 1 ELSE 0 END) AS sec_missing_xframe
          FROM crawl_results WHERE session_id = ?",
     )
     .bind(session_id)
@@ -753,6 +766,10 @@ pub async fn aggregate_health_inner(
             .unwrap_or(0.0),
         max_response_time: i("max_response_time"),
         frontier,
+        sec_html: i("sec_html"),
+        sec_missing_hsts: i("sec_missing_hsts"),
+        sec_missing_csp: i("sec_missing_csp"),
+        sec_missing_xframe: i("sec_missing_xframe"),
     })
 }
 
@@ -1581,5 +1598,50 @@ mod tests {
         assert_eq!(h.empty_title, 1);
         assert_eq!(h.max_response_time, 800);
         assert!(h.avg_response_time > 0.0);
+        // Shared fixture rows all carry `{}` seo_json — no securityHeaders
+        // recorded, so the coverage denominator and every missing count are 0.
+        assert_eq!(h.sec_html, 0);
+        assert_eq!(h.sec_missing_hsts, 0);
+    }
+
+    #[tokio::test]
+    async fn aggregate_health_counts_missing_security_headers() {
+        let pool = fixture_pool().await;
+        // 3 HTML rows with a securityHeaders object + 1 non-HTML row with none.
+        // Mirrors the json_extract paths the grid's security_missing filter uses.
+        let rows = vec![
+            (
+                "https://s.com/all-present",
+                r#"{"securityHeaders":{"hsts":true,"csp":true,"xFrameOptions":true}}"#,
+            ),
+            (
+                "https://s.com/none-present",
+                r#"{"securityHeaders":{"hsts":false,"csp":false,"xFrameOptions":false}}"#,
+            ),
+            (
+                "https://s.com/hsts-only",
+                r#"{"securityHeaders":{"hsts":true,"csp":false,"xFrameOptions":true}}"#,
+            ),
+            // No securityHeaders → excluded from denominator + all missing counts.
+            ("https://s.com/no-headers", "{}"),
+        ];
+        for (url, seo) in rows {
+            sqlx::query(
+                "INSERT INTO crawl_results (session_id, url, status, resource_type, seo_json)
+                 VALUES (7, ?, 200, 'HTML', ?)",
+            )
+            .bind(url)
+            .bind(seo)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let h = aggregate_health_inner(&pool, 7).await.unwrap();
+        // 3 rows recorded a securityHeaders object; the {}-row is excluded.
+        assert_eq!(h.sec_html, 3);
+        // hsts absent on 1 (none-present); csp absent on 2 (none-present + hsts-only).
+        assert_eq!(h.sec_missing_hsts, 1);
+        assert_eq!(h.sec_missing_csp, 2);
+        assert_eq!(h.sec_missing_xframe, 1);
     }
 }
