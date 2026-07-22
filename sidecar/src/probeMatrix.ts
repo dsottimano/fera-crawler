@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { chromium, type Page } from "patchright";
-import { crawlPage, ensureChromiumExecutable, getBrowserProfileDir, killChromeForProfile } from "./crawler.js";
+import { crawlPage, ensureChromiumExecutable, getBrowserProfileDir, killChromeForProfile, STEALTH_ARGS } from "./crawler.js";
 import { BlockDetector, hostOf, type BlockReason } from "./blockDetector.js";
 import { writeAnyEvent } from "./pipeline.js";
 import {
@@ -154,8 +154,22 @@ async function runRow(
   let blocked = false;
   let reason: BlockReason | null = null;
   let errorMsg: string | undefined;
-  const context = await chromium.launchPersistentContext(userDataDir, {
+
+  // Mirror the LIVE crawler's launch config (crawler.ts buildLaunchOpts) so the
+  // probe tests the SAME browser a real crawl would use. Critically this adds
+  // STEALTH_ARGS — `--disable-blink-features=AutomationControlled` +
+  // `--disable-features=AutomationControlled` hide `navigator.webdriver` and
+  // kill the automation infobar — plus `ignoreDefaultArgs: --enable-automation`.
+  // Without them the probe launched a browser with webdriver=true and the
+  // automation banner ON, i.e. FAR more detectable than the crawl it's meant to
+  // predict — so it reported "all blocked" on sites a real headed crawl (and
+  // the user's own browser) load fine. Headed adds --start-maximized +
+  // viewport:null, same as the crawler.
+  const launchOpts = {
     headless: !cfg.headed,
+    args: cfg.headed ? [...STEALTH_ARGS, "--start-maximized"] : [...STEALTH_ARGS],
+    ignoreDefaultArgs: ["--enable-automation"] as string[],
+    ...(cfg.headed ? { viewport: null as null } : {}),
     ...(executablePath ? { executablePath } : {}),
     ...(userAgent ? { userAgent } : {}),
     ...(headers ? { extraHTTPHeaders: headers } : {}),
@@ -171,10 +185,22 @@ async function runRow(
           },
         }
       : {}),
-  }).catch((err: Error) => {
-    errorMsg = `launch: ${err.message}`;
-    return null;
-  });
+  };
+  const launchOnce = () =>
+    chromium.launchPersistentContext(userDataDir, launchOpts).catch((err: Error) => {
+      errorMsg = `launch: ${err.message}`;
+      return null;
+    });
+  let context = await launchOnce();
+  // Retry once on a transient profile-lock / closed-context error. Headed rows
+  // after a WIPE occasionally race a straggler still holding the SingletonLock
+  // (the "browserContext … " launch error). Kill it and try again before
+  // reporting the row as a launch failure.
+  if (!context && errorMsg && /existing browser session|Target page, context or browser has been closed|browserContext|SingletonLock|ProcessSingleton/i.test(errorMsg)) {
+    await killChromeForProfile(userDataDir);
+    errorMsg = undefined;
+    context = await launchOnce();
+  }
 
   try {
     if (context) {
