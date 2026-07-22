@@ -67,7 +67,11 @@ pub struct DbWriter {
 impl DbWriter {
     /// Push a crawl-result onto the writer's queue. Fire-and-forget: errors
     /// only surface via flush() or via stderr from the writer loop.
-    pub fn enqueue(&self, session_id: i64, value: Value) {
+    pub fn enqueue(&self, session_id: i64, mut value: Value) {
+        // Source-side blanking: content-quality metrics only make sense for a
+        // real 2xx HTML page. Blanking here (the single write path) keeps every
+        // consumer correct at once. See blank_non_content_metrics.
+        blank_non_content_metrics(&mut value);
         self.pending.fetch_add(1, Ordering::Relaxed);
         if self.tx.send(Msg::Row(PendingRow { session_id, value })).is_err() {
             // Receiver gone — undo the count so wait_for_capacity can't wedge.
@@ -532,6 +536,52 @@ fn verror(v: &Value) -> Option<String> {
 // Mirror seoJsonFor() in useDatabase.ts: stash overflow fields as a single
 // JSON blob. Insertion order matches the JS so byte-for-byte round-trips
 // through this writer match the prior code's output.
+/// Screaming-Frog-style source-side blanking of content-quality metrics.
+///
+/// A 3xx redirect row stores its DESTINATION's content (the crawler follows the
+/// redirect for content but records the first-hop status), and non-HTML
+/// resources (JS/CSS/images/PDF) get empty extraction. Leaving these fields
+/// populated makes every duplicate / missing / health metric count rows it
+/// shouldn't — the class of bug behind the false "duplicate title" and the
+/// non-HTML-inflated health cards. Blanking the metric-feeding fields at the
+/// single write path fixes all consumers (grid filters, HEALTH aggregates, JS
+/// reports) at once and can't drift as new consumers are added.
+///
+/// Only a 2xx HTML row keeps its content. Non-metric fields — status,
+/// redirectUrl, redirectChain, contentType, resourceType, responseTime, size,
+/// error, og:image, and the robots/indexability flags (which legitimately
+/// describe the redirect target and drive the intentionally-3xx-aware
+/// Non-Indexable report) — are left intact.
+fn blank_non_content_metrics(value: &mut Value) {
+    let status = value.get("status").and_then(|x| x.as_i64()).unwrap_or(0);
+    let resource = value.get("resourceType").and_then(|x| x.as_str()).unwrap_or("");
+    let is_content_page = (200..300).contains(&status) && resource == "HTML";
+    if is_content_page {
+        return;
+    }
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    // Only overwrite keys that are present, so we never invent fields.
+    let set = |obj: &mut Map<String, Value>, key: &str, blank: Value| {
+        if obj.contains_key(key) {
+            obj.insert(key.to_string(), blank);
+        }
+    };
+    for k in ["title", "h1", "h2", "metaDescription", "canonical", "contentHash"] {
+        set(obj, k, Value::String(String::new()));
+    }
+    for k in ["wordCount", "h1Count", "h2Count", "imagesMissingAlt"] {
+        set(obj, k, Value::Number(0.into()));
+    }
+    for k in ["structuredDataTypes", "hreflang", "missingAltImages"] {
+        set(obj, k, Value::Array(vec![]));
+    }
+    // Null so json_extract('$.securityHeaders.*') returns NULL — excludes the
+    // row from the security health card + grid Security filter.
+    set(obj, "securityHeaders", Value::Null);
+}
+
 fn build_seo_json(v: &Value) -> String {
     let mut m = Map::new();
     let str_or_empty = |key: &str| -> Value {
@@ -718,6 +768,46 @@ mod tests {
             "scraper": {},
             "responseHeaders": {"x-test": "1"}
         })
+    }
+
+    #[test]
+    fn blank_non_content_metrics_gates_by_status_and_resource() {
+        // 2xx HTML page → untouched.
+        let mut ok = json!({
+            "status": 200, "resourceType": "HTML",
+            "title": "Real", "contentHash": "abc", "wordCount": 100,
+            "securityHeaders": {"hsts": true}
+        });
+        blank_non_content_metrics(&mut ok);
+        assert_eq!(ok["title"], "Real");
+        assert_eq!(ok["contentHash"], "abc");
+        assert_eq!(ok["securityHeaders"]["hsts"], true);
+
+        // 3xx redirect (carries destination content) → metric fields blanked,
+        // redirect/status fields preserved.
+        let mut redir = json!({
+            "status": 308, "resourceType": "HTML",
+            "title": "Destination Title", "contentHash": "abc", "wordCount": 100,
+            "h1Count": 2, "structuredDataTypes": ["Article"],
+            "securityHeaders": {"hsts": true}, "redirectUrl": "https://x/dest"
+        });
+        blank_non_content_metrics(&mut redir);
+        assert_eq!(redir["title"], "");
+        assert_eq!(redir["contentHash"], "");
+        assert_eq!(redir["wordCount"], 0);
+        assert_eq!(redir["h1Count"], 0);
+        assert_eq!(redir["structuredDataTypes"], json!([]));
+        assert_eq!(redir["securityHeaders"], Value::Null);
+        assert_eq!(redir["redirectUrl"], "https://x/dest");
+        assert_eq!(redir["status"], 308);
+
+        // 2xx non-HTML resource (empty extraction) → excluded from metrics.
+        let mut js = json!({
+            "status": 200, "resourceType": "JavaScript",
+            "title": "", "securityHeaders": {"hsts": false}
+        });
+        blank_non_content_metrics(&mut js);
+        assert_eq!(js["securityHeaders"], Value::Null);
     }
 
     #[tokio::test]

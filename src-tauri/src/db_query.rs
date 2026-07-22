@@ -243,14 +243,16 @@ pub(crate) fn build_where(
         // Five OR'd issue conditions match the legacy "Issues" tab predicate.
         // Keep the parens — strips ambiguity when this AND's into the wider
         // WHERE clause.
-        out_clauses.push(
-            "(title = '' OR title IS NULL \
-              OR h1 = '' OR h1 IS NULL \
-              OR meta_description = '' OR meta_description IS NULL \
+        // Empty-content issues only apply to content pages (a blanked redirect
+        // or a non-HTML resource isn't a "missing title/h1/meta" issue); status
+        // errors and noindex are issues on any row.
+        out_clauses.push(format!(
+            "(({CONTENT_PAGE} AND (title = '' OR title IS NULL \
+                 OR h1 = '' OR h1 IS NULL \
+                 OR meta_description = '' OR meta_description IS NULL)) \
               OR status >= 400 \
               OR is_noindex = 1)"
-                .to_string(),
-        );
+        ));
     }
     if let Some(true) = filter.errors_only {
         out_clauses.push("(error IS NOT NULL AND error != '')".to_string());
@@ -273,10 +275,10 @@ pub(crate) fn build_where(
         }
     }
     if let Some(true) = filter.has_og_image {
-        out_clauses.push("og_image IS NOT NULL AND og_image != ''".to_string());
+        out_clauses.push(format!("{CONTENT_PAGE} AND og_image IS NOT NULL AND og_image != ''"));
     }
     if let Some(true) = filter.missing_og_image {
-        out_clauses.push("(og_image IS NULL OR og_image = '')".to_string());
+        out_clauses.push(format!("{CONTENT_PAGE} AND (og_image IS NULL OR og_image = '')"));
     }
     if let Some(field) = &filter.missing_field {
         let col = match field.as_str() {
@@ -288,7 +290,9 @@ pub(crate) fn build_where(
             _ => None,
         };
         if let Some(c) = col {
-            out_clauses.push(format!("({} IS NULL OR {} = '')", c, c));
+            // "Missing X" only counts content pages — a blanked redirect or a
+            // non-HTML resource has an empty column but isn't a page missing it.
+            out_clauses.push(format!("{CONTENT_PAGE} AND ({c} IS NULL OR {c} = '')"));
         }
     }
     if let Some(min) = filter.title_length_min {
@@ -367,7 +371,8 @@ pub(crate) fn build_where(
     }
     if let Some(state) = &filter.canonical_state {
         match state.as_str() {
-            "missing" => out_clauses.push("(canonical IS NULL OR canonical = '')".to_string()),
+            "missing" => out_clauses
+                .push(format!("{CONTENT_PAGE} AND (canonical IS NULL OR canonical = '')")),
             "self" => out_clauses.push("canonical = url".to_string()),
             "cross" => out_clauses.push(
                 "canonical IS NOT NULL AND canonical != '' AND canonical != url".to_string(),
@@ -402,10 +407,9 @@ pub(crate) fn build_where(
             "has" => out_clauses.push(
                 "json_array_length(json_extract(seo_json, '$.structuredDataTypes')) > 0".to_string(),
             ),
-            "missing" => out_clauses.push(
-                "COALESCE(json_array_length(json_extract(seo_json, '$.structuredDataTypes')), 0) = 0"
-                    .to_string(),
-            ),
+            "missing" => out_clauses.push(format!(
+                "{CONTENT_PAGE} AND COALESCE(json_array_length(json_extract(seo_json, '$.structuredDataTypes')), 0) = 0"
+            )),
             _ => {}
         }
     }
@@ -454,6 +458,15 @@ fn order_clause(sort: Option<&ResultsSort>) -> String {
 }
 
 // ── Row shape ────────────────────────────────────────────────────────────
+
+/// The rows for which content-quality metrics (missing/duplicate title, h1,
+/// canonical, structured data, …) are meaningful: successful HTML pages. 3xx
+/// redirects, error pages, and non-HTML resources are excluded. Companion to
+/// `db_writer::blank_non_content_metrics`, which zeroes the content fields on
+/// those same non-qualifying rows at write time — so "has X" / "duplicate X"
+/// metrics drop them automatically, while "missing X" metrics (which count
+/// emptiness) need THIS predicate so they don't count the blanked rows.
+const CONTENT_PAGE: &str = "resource_type = 'HTML' AND status >= 200 AND status < 300";
 
 pub(crate) const RESULT_COLUMNS: &str = "id, url, status, title, h1, h2, meta_description, canonical, \
     internal_links, external_links, response_time, content_type, resource_type, size, error, \
@@ -736,10 +749,10 @@ pub async fn aggregate_health_inner(
             SUM(CASE WHEN is_indexable = 1 THEN 1 ELSE 0 END) AS indexable,
             SUM(CASE WHEN is_noindex = 1 THEN 1 ELSE 0 END) AS noindex,
             SUM(CASE WHEN is_nofollow = 1 THEN 1 ELSE 0 END) AS nofollow,
-            SUM(CASE WHEN h1 = '' OR h1 IS NULL THEN 1 ELSE 0 END) AS empty_h1,
-            SUM(CASE WHEN title = '' OR title IS NULL THEN 1 ELSE 0 END) AS empty_title,
-            COALESCE(AVG(response_time), 0) AS avg_response_time,
-            COALESCE(MAX(response_time), 0) AS max_response_time,
+            SUM(CASE WHEN resource_type = 'HTML' AND status >= 200 AND status < 300 AND (h1 = '' OR h1 IS NULL) THEN 1 ELSE 0 END) AS empty_h1,
+            SUM(CASE WHEN resource_type = 'HTML' AND status >= 200 AND status < 300 AND (title = '' OR title IS NULL) THEN 1 ELSE 0 END) AS empty_title,
+            COALESCE(AVG(CASE WHEN status >= 200 AND status < 300 THEN response_time END), 0) AS avg_response_time,
+            COALESCE(MAX(CASE WHEN status >= 200 AND status < 300 THEN response_time END), 0) AS max_response_time,
             SUM(CASE WHEN json_extract(seo_json, '$.securityHeaders.hsts') IS NOT NULL THEN 1 ELSE 0 END) AS sec_html,
             SUM(CASE WHEN json_extract(seo_json, '$.securityHeaders.hsts') = 0 THEN 1 ELSE 0 END) AS sec_missing_hsts,
             SUM(CASE WHEN json_extract(seo_json, '$.securityHeaders.csp') = 0 THEN 1 ELSE 0 END) AS sec_missing_csp,
@@ -1461,34 +1474,33 @@ mod tests {
 
     #[tokio::test]
     async fn issues_only_filter_matches_legacy_predicate() {
-        // Legacy "Issues" tab: !title || !h1 || !meta_description || status >= 400 || isNoindex.
-        // Fixture rows that should match:
-        //   row 2 (h1 = "")                                 ✓
-        //   row 3 (h1 = "" AND status 404)                  ✓
-        //   row 4 (h1 = "" AND status 500)                  ✓
-        //   row 8 (title = "" AND h1 = "")                  ✓
-        //   row 9 (h1 = "")                                 ✓
-        //   row 5 (Pricing Page / "Plans") — no missing fields, status 200, indexable.
-        //     But meta_description = '' (default) → matches.  ✓
-        //   rows 1, 6, 7 — all have h1, no status problem, but meta_description = '' → match.
-        // So all rows that have an empty meta_description match. Fixture
-        // never sets meta_description, which means all rows have ''.
-        // → all 9 rows in session 1 match the issues predicate.
+        // "Issues" tab: empty title/h1/meta ONLY on content pages (HTML 2xx),
+        // OR status >= 400, OR isNoindex. All fixture rows have meta_description
+        // = '' (default), so every CONTENT_PAGE row matches on empty meta; the
+        // non-2xx / non-HTML rows only match if they hit status>=400 / noindex.
+        // Fixture rows:
+        //   row 1 (200 HTML, meta '')            → content-page empty-meta ✓
+        //   row 2 (301 HTML)                     → NOT content-page, not 4xx    ✗
+        //   row 3 (404 HTML)                     → status >= 400                ✓
+        //   row 4 (500 HTML)                     → status >= 400                ✓
+        //   row 5,6,7 (200 HTML, meta '')        → content-page empty-meta ✓ (×3)
+        //   row 8 (204 HTML, empty title/h1)     → content-page (204 is 2xx)    ✓
+        //   row 9 (200 JavaScript)               → NOT content-page (non-HTML)  ✗
+        // → 7 of 9 match (301 redirect and JS resource correctly excluded).
         let pool = fixture_pool().await;
         insert_fixture_rows(&pool).await;
         let f = ResultsFilter { issues_only: Some(true), ..Default::default() };
-        assert_eq!(count_results_inner(&pool, 1, &f).await.unwrap(), 9);
+        assert_eq!(count_results_inner(&pool, 1, &f).await.unwrap(), 7);
 
-        // Force a clean row by inserting one with everything filled.
+        // A fully-clean 200 HTML row doesn't add to the issues count.
         sqlx::query(
-            "INSERT INTO crawl_results (session_id, url, status, title, h1, meta_description, is_indexable)
-             VALUES (1, 'https://clean.com', 200, 'OK', 'OK', 'present', 1)"
+            "INSERT INTO crawl_results (session_id, url, status, title, h1, meta_description, resource_type, is_indexable)
+             VALUES (1, 'https://clean.com', 200, 'OK', 'OK', 'present', 'HTML', 1)"
         )
         .execute(&pool)
         .await
         .unwrap();
-        // Issues count unchanged (10 rows, 9 issues, 1 clean).
-        assert_eq!(count_results_inner(&pool, 1, &f).await.unwrap(), 9);
+        assert_eq!(count_results_inner(&pool, 1, &f).await.unwrap(), 7);
     }
 
     #[tokio::test]
@@ -1641,13 +1653,16 @@ mod tests {
         assert_eq!(h.indexable, 5);
         assert_eq!(h.noindex, 1);
         assert_eq!(h.nofollow, 1);
-        // Empty h1 rows: 2, 3, 5 (Plans), 6, 8, 9 → wait, let me check fixture.
-        // h1 values in fixture: "Hello", "", "", "", "Plans", "Big Heading", "About Us", "", ""
-        // Empty: rows 2,3,4,8,9 → 5 rows.
-        assert_eq!(h.empty_h1, 5);
-        // Empty title: only row 8 → 1.
+        // empty_h1 now gates on CONTENT_PAGE (HTML + 2xx). Of the empty-h1 rows
+        // (2=301, 3=404, 4=500, 8=204, 9=JS-200): only row 8 (204 HTML) qualifies
+        // as a content page. The 301/404/500 (non-2xx) and the JavaScript row are
+        // excluded — they aren't pages "missing" an h1.
+        assert_eq!(h.empty_h1, 1);
+        // Empty title among content pages: only row 8 (204 HTML) → 1.
         assert_eq!(h.empty_title, 1);
-        assert_eq!(h.max_response_time, 800);
+        // max_response_time now gates on 2xx: row 4 (500, 800ms) is excluded, so
+        // the slowest 2xx page is row 6 (450ms) — no longer a block-stub's timing.
+        assert_eq!(h.max_response_time, 450);
         assert!(h.avg_response_time > 0.0);
         // Shared fixture rows all carry `{}` seo_json — no securityHeaders
         // recorded, so the coverage denominator and every missing count are 0.
