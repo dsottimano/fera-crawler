@@ -57,6 +57,23 @@ rationale in `docs/vpngate_integration.md`.
 - [ ] **Proxy password is stored plaintext** in the profile `config_json` (like
       every other setting). Add masking / secret handling if that's not acceptable.
 
+## Crawl realism / anti-bot behavior (2026-07-22 session)
+
+- [x] **Unify concurrency + pacing across headed/headless**. DONE. Headed no
+      longer hard-forces 1 tab — `effectiveConcurrency = config.concurrency` so
+      headed opens N tabs (one window, multiple tabs) like headless. The per-host
+      rate limiter (min/max delay + per-host concurrency) already governed both
+      modes; this removes the last asymmetry. `effectiveDelay` (startup stagger,
+      default 0) now applies uniformly too.
+- [x] **Human-like interaction**. DONE. New `sidecar/src/humanize.ts`
+      (`humanizePage`): 2–4 stepped mouse moves, 1–2 scroll steps, 400–1500ms
+      reading dwell per page (~+1–1.5s/page). Runs after extraction, best-effort
+      (never fails the crawl), works headless too (CDP dispatches the events).
+      Gated by a new `performance.humanize` toggle (default ON), wired through all
+      layers: schema → types → payload → `start_crawl --humanize` → sidecar
+      config → `crawlPage` opts. NOT applied to the probe matrix (stays fast).
+      Turn off for throughput-first crawls.
+
 ## Crawl trust: queue visibility + repeat-on-resume
 
 - [ ] **Surface the crawl queue (pending frontier)**. The pending set already

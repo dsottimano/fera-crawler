@@ -164,6 +164,12 @@ export const SCHEMA: SettingsSchema = {
         label: "Warm up sessions before deep-linking",
         help: "Visit each origin's homepage for ~2.5s before deep-linking so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm) establish. Adds a few seconds per crawl, helps a lot against adaptive bot walls.",
       },
+      humanize: {
+        type: "boolean",
+        default: true,
+        label: "Human-like interaction (mouse, scroll, dwell)",
+        help: "Emit a few mouse moves, a scroll or two, and a short randomized reading dwell on each loaded page. Behavioral anti-bot walls (DataDome, PerimeterX, Akamai BMP) flag zero-interaction navigate-and-jump crawls even at polite pacing. Applies to headed AND headless. Adds ~1–1.5s per page — turn off for throughput-first crawls where blocking isn't a concern.",
+      },
       autoProbeOnBlock: {
         type: "boolean",
         default: true,

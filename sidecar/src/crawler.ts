@@ -35,6 +35,7 @@ import {
   type StealthPatchConfig,
 } from "./stealth.js";
 import { PerHostRateLimiter, parseRetryAfter } from "./rate-limiter.js";
+import { humanizePage } from "./humanize.js";
 import { classifyResource } from "./utils.js";
 import { RobotsCache } from "./robots.js";
 import { discoverSitemapUrls } from "./sitemap.js";
@@ -740,6 +741,10 @@ interface CrawlPageOpts {
   // Navigation timeout (ms) for page.goto. Defaults to 30000 when unset so
   // direct crawlPage callers (probe matrix, tests) keep prior behavior.
   navTimeout?: number;
+  // Run light human-like interaction (mouse/scroll/dwell) on the loaded page
+  // before returning. Only the crawl worker sets this — the probe matrix and
+  // tests call crawlPage without it, so they stay fast. See humanize.ts.
+  humanize?: boolean;
 }
 
 export async function crawlPage(
@@ -920,6 +925,14 @@ export async function crawlPage(
     try {
       perf = await page.evaluate(READ_PERF_SCRIPT) as typeof perf;
     } catch {}
+
+    // Human-like interaction on the loaded page (mouse/scroll/dwell). Runs
+    // after extraction so the DOM read isn't perturbed by lazy-loaded content
+    // a scroll might trigger. Best-effort — never throws. Only the crawl
+    // worker opts in; the probe matrix keeps navigating fast.
+    if (opts?.humanize) {
+      await humanizePage(page);
+    }
 
     // Collect the og:image result kicked off earlier (overlapped the work above).
     if (ogImagePromise) {
@@ -1326,6 +1339,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     ...(config.scraperRules?.length ? { scraperRules: config.scraperRules } : {}),
     ...(config.captureVitals ? { captureVitals: true } : {}),
     ...(config.navTimeout ? { navTimeout: config.navTimeout } : {}),
+    ...(config.humanize ? { humanize: true } : {}),
   };
 
   const visited = new Set<string>();
@@ -1553,16 +1567,15 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   }
   setQueueSize(queueSize());
 
-  const effectiveConcurrency = headless ? config.concurrency : 1;
-  // Global staggered delay only for headless multi-tab mode (it staggers
-  // parallel request starts so concurrency=N doesn't fire N requests in
-  // the same millisecond). In headed mode there's only one tab and the
-  // per-host rate limiter (acquire() inside crawlWithPolicy) is the
-  // single source of pacing — adding a redundant JS-level sleep silently
-  // floored the user's perHostDelay setting at 1000ms, which is what
-  // made headed mode "instant" relative to a 3000ms user config: the
-  // user expected 3s/req, got 1s/req because the floor capped them.
-  const effectiveDelay = headless ? (config.delay ?? 0) : 0;
+  // Concurrency now applies uniformly to both modes — headed opens N visible
+  // tabs just like headless (user request 2026-07-22). The per-host rate
+  // limiter (acquire() inside crawlWithPolicy) is the single source of pacing
+  // in BOTH modes, so min/max per-host delay + per-host concurrency govern
+  // headed identically. `delay` here is only the one-time worker-START stagger
+  // (delay * index at worker spawn), which keeps N tabs from firing their
+  // first request in the same millisecond; it is NOT a per-request floor.
+  const effectiveConcurrency = config.concurrency;
+  const effectiveDelay = config.delay ?? 0;
 
   /**
    * Crawl a URL with per-host rate limiting + one retry on 429/503 with
@@ -1777,8 +1790,10 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     };
 
     // One page per worker, created once and reused for the worker's lifetime.
-    // Headed mode is single-worker and reuses the existing context page (the
-    // sign-in tab) rather than opening a new one.
+    // Both modes open N tabs. Headed reuses the existing context page (the
+    // sign-in tab) as worker 0 so any in-page state survives, closes any other
+    // stray tabs, then opens the rest. Persistent context shares cookies across
+    // tabs, so the extra headed tabs inherit the logged-in session.
     const pages: Page[] = [];
     if (!headless) {
       const existingPages = context.pages();
@@ -1786,6 +1801,7 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
       for (let i = 1; i < existingPages.length; i++) {
         await existingPages[i].close().catch(() => {});
       }
+      for (let i = pages.length; i < N; i++) pages.push(await context.newPage());
     } else {
       for (let i = 0; i < N; i++) pages.push(await context.newPage());
     }

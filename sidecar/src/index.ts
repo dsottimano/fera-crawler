@@ -170,6 +170,7 @@ if (command === "open-browser") {
   const navTimeout = navTimeoutRaw ? parseInt(navTimeoutRaw, 10) : undefined;
   const blockResources = hasFlag("--block-resources");
   const sessionWarmup = hasFlag("--session-warmup");
+  const humanize = hasFlag("--humanize");
   setDebugEnabled(hasFlag("--debug-log"));
   const sessionIdRaw = getFlag("--session-id", "");
   const sessionId = sessionIdRaw ? parseInt(sessionIdRaw, 10) : undefined;
@@ -221,6 +222,7 @@ if (command === "open-browser") {
     ...(navTimeout !== undefined && !Number.isNaN(navTimeout) ? { navTimeout } : {}),
     ...(blockResources ? { blockResources } : {}),
     ...(sessionWarmup ? { sessionWarmup } : {}),
+    ...(humanize ? { humanize } : {}),
     ...(excludeUrls?.length ? { excludeUrls } : {}),
     ...(sessionId !== undefined && !Number.isNaN(sessionId) ? { sessionId } : {}),
     ...(proxyServer ? { proxyServer } : {}),

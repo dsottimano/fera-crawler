@@ -28,6 +28,7 @@ export interface StartCrawlPayload {
   navTimeout: number;
   blockResources: boolean;
   sessionWarmup: boolean | null;
+  humanize: boolean | null;
   excludeUrls: string[] | null;
   debugLog: boolean;
   proxyServer: string | null;
@@ -87,6 +88,7 @@ export function buildStartCrawlPayload(
     navTimeout: s.performance.navTimeout,
     blockResources: s.performance.blockResources,
     sessionWarmup: s.performance.sessionWarmup || null,
+    humanize: s.performance.humanize || null,
     excludeUrls: excludeUrlsArr.length ? excludeUrlsArr : null,
     debugLog: s.advanced.debugLog,
     proxyServer: s.connection.proxyServer.trim() || null,

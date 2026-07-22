@@ -288,6 +288,7 @@ pub async fn start_crawl(
     nav_timeout: Option<u32>,
     block_resources: Option<bool>,
     session_warmup: Option<bool>,
+    humanize: Option<bool>,
     exclude_urls: Option<Vec<String>>,
     debug_log: Option<bool>,
     proxy_server: Option<String>,
@@ -423,6 +424,10 @@ pub async fn start_crawl(
 
     if let Some(true) = session_warmup {
         args.push("--session-warmup".to_string());
+    }
+
+    if let Some(true) = humanize {
+        args.push("--humanize".to_string());
     }
 
     // Upstream proxy — routes all crawler browser traffic through it. Empty

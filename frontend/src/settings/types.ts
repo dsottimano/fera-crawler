@@ -48,6 +48,11 @@ export interface SettingsValues {
     // and frees its host-concurrency slot; lower = dead pages fail fast.
     navTimeout: number;
     sessionWarmup: boolean;
+    // Emit light human-like interaction (mouse moves, a scroll or two, a short
+    // reading dwell) on each loaded page. Defeats behavioral anti-bot walls
+    // that flag zero-interaction crawls. Applies to headed AND headless. Adds
+    // ~1–1.5s/page — turn off for throughput-first crawls.
+    humanize: boolean;
     // When a host gets gated by the block detector, automatically run the
     // probe matrix and apply the first winning row's settings if found.
     // Skipped if a manual probe is already running, or if this host has

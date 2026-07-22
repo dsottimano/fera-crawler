@@ -168,6 +168,12 @@ export interface CrawlConfig {
   // loop, so Akamai/Cloudflare challenge cookies (_abck, ak_bmsc, __cf_bm)
   // can establish. Non-fatal if any warmup fails.
   sessionWarmup?: boolean;
+  // Emit light human-like interaction (a few mouse moves, a scroll or two, a
+  // short reading dwell) on each loaded page before moving on. Defeats
+  // behavioral anti-bot walls that flag zero-interaction navigate→extract→jump
+  // loops. Applies to both headed and headless. Adds ~1–1.5s/page — disable
+  // for large throughput-first crawls. See humanize.ts.
+  humanize?: boolean;
   // URLs to skip — pre-seed the visited set so resume after stop doesn't
   // re-walk pages the frontend already has. Spider-mode start URL is never
   // skipped (we still need its links for discovery).
