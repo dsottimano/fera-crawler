@@ -510,6 +510,18 @@ onMounted(() => {
   table = new Tabulator(tableRef.value, {
     height: "100%",
     layout: "fitDataStretch",
+    // Column widths are measured once on the first data load and then frozen.
+    // Without this, every progressive page fetch and every ~1/s live-crawl
+    // reload re-measures fitDataStretch and shifts column widths — that's the
+    // horizontal jitter during a crawl. Default is already false, but we pin
+    // it so the behavior is explicit and can't regress.
+    layoutColumnsOnNewData: false,
+    // Kill the "Loading" overlay entirely. In remote+progressiveLoad mode it
+    // flashed a centered "Loading" box over the grid on EVERY page fetch and
+    // on every live-crawl setData() tick (~1/s). The data comes from local
+    // SQLite via Rust in a few ms, so old rows stay visible under the swap —
+    // the overlay was pure jank with nothing to cover. See dataLoader docs.
+    dataLoader: false,
     // Phase-4 remote mode: Tabulator asks Rust for the visible window via
     // ajaxRequestFunc. We piggyback on its ajax pipeline (URL is unused —
     // every fetch routes through the func).
@@ -520,7 +532,9 @@ onMounted(() => {
     paginationSize: 500,
     progressiveLoad: "scroll",
     progressiveLoadDelay: 200,
-    progressiveLoadScrollMargin: 300,
+    // Prefetch the next page well before the scroll reaches the end (was 300px)
+    // so fast scrolling doesn't stall at the boundary waiting on the fetch.
+    progressiveLoadScrollMargin: 800,
     sortMode: "remote",
     selectableRows: true,
     rowHeader: { formatter: "rownum", hozAlign: "center", width: 40, resizable: false, frozen: true },
@@ -615,28 +629,22 @@ function refresh() {
   void table.setData();
 }
 
-// Live (crawl-progress) refreshes arrive ~2×/sec. A full setData() reload on
-// every tick blanks the table, re-measures fitDataStretch column widths, and
-// resets scroll — that repeated flash is the flickering during a crawl. So we
-// (a) coalesce ticks into at most one reload per LIVE_REFRESH_MS, and (b)
-// restore the scroll position after the reload so live rows don't yank the
-// viewport back to the top. User-initiated refreshes (tab/filter/search/
-// session) stay instant via refresh() above.
+// Live (crawl-progress) refreshes arrive ~2×/sec. We coalesce them into at
+// most one reload per LIVE_REFRESH_MS and use replaceData() (NOT setData()):
+// replaceData runs the ajax pipeline in SILENT mode — it swaps the rows in
+// place without resetting scroll, re-showing the loader, or resetting the
+// progressive page window. Combined with dataLoader:false and
+// layoutColumnsOnNewData:false, a live tick now updates the visible rows with
+// no overlay, no column shift, and no scroll jump. User-initiated refreshes
+// (tab/filter/search/session) still use setData() via refresh() so they
+// correctly reset to the top of the new result set.
 const LIVE_REFRESH_MS = 1000;
 let liveTimer: ReturnType<typeof setTimeout> | null = null;
 let livePending = false;
 
-function scrollHolder(): HTMLElement | null {
-  return (table?.element.querySelector(".tabulator-tableholder") as HTMLElement) ?? null;
-}
-
 function liveReload() {
   if (!table) return;
-  const top = scrollHolder()?.scrollTop ?? 0;
-  void table.setData().then(() => {
-    const holder = scrollHolder();
-    if (holder && top > 0) holder.scrollTop = top;
-  });
+  void table.replaceData();
 }
 
 function liveRefresh() {
