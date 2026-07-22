@@ -344,12 +344,23 @@ pub(crate) fn build_where(
             _ => None,
         };
         if let Some(c) = col {
+            // Only 2xx pages participate in duplicate detection (matches
+            // Screaming Frog). A 3xx redirect row carries the TITLE of its
+            // destination (the crawler follows the redirect for content but
+            // records the first-hop status), so a redirect and its 200 target
+            // would otherwise always look like a "duplicate" — a false positive
+            // that also drags the legitimate 200 target into the duplicate set.
+            // Gate BOTH the outer row and the EXISTS partner on 2xx so only
+            // genuine same-title 200 pages match.
             out_clauses.push(format!(
-                "{c} != '' AND {c} IS NOT NULL AND EXISTS \
+                "{c} != '' AND {c} IS NOT NULL \
+                 AND crawl_results.status >= 200 AND crawl_results.status < 300 \
+                 AND EXISTS \
                  (SELECT 1 FROM crawl_results r2 \
                     WHERE r2.session_id = crawl_results.session_id \
                       AND r2.{c} = crawl_results.{c} \
                       AND r2.rowid != crawl_results.rowid \
+                      AND r2.status >= 200 AND r2.status < 300 \
                     LIMIT 1)",
             ));
         }
@@ -1223,6 +1234,46 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let count = count_results_inner(&pool, 1, &f).await.unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_title_filter_ignores_redirects() {
+        let pool = fixture_pool().await;
+        // Session 9 mirrors the babbel case: two genuine 200 dups, plus a 200
+        // page whose only same-title twin is a 3xx redirect that carries the
+        // destination's title (first-hop status recorded, content followed).
+        let rows = vec![
+            ("https://x.com/terms", 200, "Terms | X"), // genuine dup A
+            ("https://x.com/mobile-terms", 200, "Terms | X"), // genuine dup B
+            ("https://x.com/target", 200, "Only Here"), // 200 redirect target
+            ("https://x.com/redirect", 308, "Only Here"), // 3xx carrying target's title
+        ];
+        for (url, status, title) in rows {
+            sqlx::query(
+                "INSERT INTO crawl_results (session_id, url, status, title, resource_type)
+                 VALUES (9, ?, ?, ?, 'HTML')",
+            )
+            .bind(url)
+            .bind(status)
+            .bind(title)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let f = ResultsFilter {
+            duplicate_field: Some("title".into()),
+            ..Default::default()
+        };
+        let out = query_results_inner(&pool, 9, 0, 100, &f, None).await.unwrap();
+        // Only the two genuine-dup 200 pages. The 3xx redirect is excluded, and
+        // so is its 200 target (whose only same-title twin was that redirect).
+        let urls: Vec<String> = out
+            .iter()
+            .map(|r| r["url"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(out.len(), 2, "got {urls:?}");
+        assert!(urls.contains(&"https://x.com/terms".to_string()));
+        assert!(urls.contains(&"https://x.com/mobile-terms".to_string()));
     }
 
     #[tokio::test]
