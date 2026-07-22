@@ -66,7 +66,17 @@ if (command === "open-browser") {
     process.exit(1);
   }
   const browserProfile = getFlag("--browser-profile", "");
-  runProbeMatrix(sampleUrl, browserProfile || undefined)
+  // Same upstream proxy the live crawl uses, so the probe verdict reflects the
+  // real network path. Absent flags → direct (undefined proxy).
+  const probeProxyServer = getFlag("--proxy-server", "");
+  const probeProxy = probeProxyServer
+    ? {
+        server: probeProxyServer,
+        username: getFlag("--proxy-username", "") || undefined,
+        password: getFlag("--proxy-password", "") || undefined,
+      }
+    : undefined;
+  runProbeMatrix(sampleUrl, browserProfile || undefined, undefined, probeProxy)
     .then(() => process.exit(0))
     .catch((err) => {
       console.error("Probe matrix error:", err);

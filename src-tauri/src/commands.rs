@@ -108,12 +108,18 @@ struct CrawlCtx {
 /// pending-host queue and drains it after each probe completes.
 pub struct ProbeState {
     pub running: AtomicBool,
+    /// Upstream proxy of the currently-active crawl, captured at `start_crawl`
+    /// as `(server, username, password)`. The Rust-side auto-reprobe path
+    /// (`re-probe-requested`) has no access to frontend settings, so it reads
+    /// this to egress the same network path the crawl uses. `None` = direct.
+    pub crawl_proxy: Mutex<Option<(String, Option<String>, Option<String>)>>,
 }
 
 impl Default for ProbeState {
     fn default() -> Self {
         Self {
             running: AtomicBool::new(false),
+            crawl_proxy: Mutex::new(None),
         }
     }
 }
@@ -422,6 +428,21 @@ pub async fn start_crawl(
     // Upstream proxy — routes all crawler browser traffic through it. Empty
     // string is treated as "no proxy" so a cleared setting doesn't pass a
     // bogus server. Cross-OS, unprivileged (Chromium-level, no TUN/root).
+    // Capture it into ProbeState so the Rust-side auto-reprobe egresses the
+    // same path (see ProbeState::crawl_proxy).
+    let active_proxy = proxy_server
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            (
+                s.to_string(),
+                proxy_username.clone().filter(|u| !u.is_empty()),
+                proxy_password.clone().filter(|p| !p.is_empty()),
+            )
+        });
+    if let Some(probe_state) = app.try_state::<ProbeState>() {
+        *lock_or_recover(&probe_state.crawl_proxy) = active_proxy;
+    }
     if let Some(server) = proxy_server {
         if !server.trim().is_empty() {
             args.push("--proxy-server".to_string());
@@ -772,8 +793,18 @@ fn route_sidecar_stdout(app: &AppHandle, line: &str, ctx: Option<CrawlCtx>) {
                         AUTO_REPROBE_LAST_MONO_MS.store(now, Ordering::SeqCst);
                         let app_clone = app.clone();
                         let url = sample_url.to_string();
+                        // Reuse the active crawl's proxy so the auto-reprobe
+                        // tests the same network path a proxied crawl uses.
+                        let (p_server, p_user, p_pass) = app
+                            .try_state::<ProbeState>()
+                            .and_then(|s| lock_or_recover(&s.crawl_proxy).clone())
+                            .map(|(s, u, p)| (Some(s), u, p))
+                            .unwrap_or((None, None, None));
                         tauri::async_runtime::spawn(async move {
-                            if let Err(e) = run_probe_matrix(app_clone.clone(), url).await {
+                            if let Err(e) =
+                                run_probe_matrix(app_clone.clone(), url, p_server, p_user, p_pass)
+                                    .await
+                            {
                                 let _ = app_clone.emit(
                                     "sidecar-log",
                                     serde_json::json!({
@@ -1412,7 +1443,13 @@ pub async fn stop_host(app: AppHandle, host: String) -> Result<(), String> {
 /// hosts blocking nearly simultaneously) used to spawn a second sidecar
 /// that fought the first over the shared browser profile.
 #[tauri::command]
-pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), String> {
+pub async fn run_probe_matrix(
+    app: AppHandle,
+    sample_url: String,
+    proxy_server: Option<String>,
+    proxy_username: Option<String>,
+    proxy_password: Option<String>,
+) -> Result<(), String> {
     let probe_state: State<ProbeState> = app.state();
     if probe_state
         .running
@@ -1435,12 +1472,34 @@ pub async fn run_probe_matrix(app: AppHandle, sample_url: String) -> Result<(), 
         .to_string_lossy()
         .to_string();
 
-    let args = vec![
+    let mut args = vec![
         "probe-matrix".to_string(),
         sample_url,
         "--browser-profile".to_string(),
         probe_profile,
     ];
+
+    // Thread the live crawl's upstream proxy into the probe so it tests the
+    // same network path a proxied crawl would take (empty string = no proxy).
+    // Mirrors the flag handling in start_crawl.
+    if let Some(server) = proxy_server {
+        if !server.trim().is_empty() {
+            args.push("--proxy-server".to_string());
+            args.push(server);
+            if let Some(user) = proxy_username {
+                if !user.is_empty() {
+                    args.push("--proxy-username".to_string());
+                    args.push(user);
+                }
+            }
+            if let Some(pass) = proxy_password {
+                if !pass.is_empty() {
+                    args.push("--proxy-password".to_string());
+                    args.push(pass);
+                }
+            }
+        }
+    }
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
     // Helper to release the probe lock — called from every exit path so a

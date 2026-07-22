@@ -149,6 +149,23 @@ function drainPendingAutoProbe() {
 const explainerOpen = ref(false);
 const probeApplyInFlight = ref(false);
 
+// The active profile's upstream proxy, shaped as run_probe_matrix args so the
+// probe egresses the same path a proxied crawl would. Trimmed/empty → omitted
+// (Rust treats a missing/empty server as "direct"). Mirrors buildStartCrawlPayload.
+const { settings: probeSettings } = useSettings();
+function probeProxyArgs(): {
+  proxyServer: string | null;
+  proxyUsername: string | null;
+  proxyPassword: string | null;
+} {
+  const c = probeSettings.value.connection;
+  return {
+    proxyServer: c.proxyServer.trim() || null,
+    proxyUsername: c.proxyUsername.trim() || null,
+    proxyPassword: c.proxyPassword || null,
+  };
+}
+
 async function openProbe(info: BlockInfo) {
   // Single-flight guard: the Rust side now rejects a second probe matrix
   // while one is in flight, but we surface the constraint earlier so the
@@ -170,7 +187,7 @@ async function openProbe(info: BlockInfo) {
   probeRunning.value = true;
   probeOpen.value = true;
   try {
-    await invoke("run_probe_matrix", { sampleUrl: probeSampleUrl.value });
+    await invoke("run_probe_matrix", { sampleUrl: probeSampleUrl.value, ...probeProxyArgs() });
   } catch (err) {
     console.error("run_probe_matrix failed", err);
     probeRunning.value = false;
@@ -210,7 +227,7 @@ async function startAutoProbe(info: BlockInfo) {
   // crawl resumes.
   probeOpen.value = true;
   try {
-    await invoke("run_probe_matrix", { sampleUrl: probeSampleUrl.value });
+    await invoke("run_probe_matrix", { sampleUrl: probeSampleUrl.value, ...probeProxyArgs() });
   } catch (err) {
     console.error("auto-probe run_probe_matrix failed", err);
     probeRunning.value = false;

@@ -39,19 +39,21 @@ rationale in `docs/vpngate_integration.md`.
       datacenter/volunteer IPs Akamai/DataDome blanket-block — good for
       geo-blocks/soft-rate-limits, weak vs. commercial WAFs (use a residential
       proxy via the Connection tab for those).
-- [ ] **Probe matrix ignores the proxy**. `run_probe_matrix` → `probeMatrix.ts`
-      `runRow` does NOT thread `connection.proxy*` into its `launchPersistentContext`.
-      So with a proxy set, the probe tests *direct* and can report "all failed"
-      while a proxied crawl would work. Thread the same proxy args through.
+- [x] **Probe matrix ignores the proxy**. ~~`run_probe_matrix` → `probeMatrix.ts`
+      `runRow` does NOT thread `connection.proxy*` into its `launchPersistentContext`.~~
+      DONE (2026-07-22). Threaded `connection.proxy*` end-to-end: BlockAlert →
+      `run_probe_matrix` (new proxy_* params) → sidecar `probe-matrix` flags →
+      `runProbeMatrix`/`runRow` `launchPersistentContext.proxy`. The Rust-side
+      auto-reprobe (`re-probe-requested`) reads the active crawl's proxy from
+      new `ProbeState::crawl_proxy` (captured at `start_crawl`).
 - [ ] **VPNGate picker UI**. Connection-tab list (country / score / speedMbps)
       calling `vpngate_servers`; on connect, drive `vpn_connect` (above). Not built
       — a picker with no working tunnel would be misleading, so deferred with it.
-- [ ] **Probe speed cuts** (offered, deferred). Probe page-load uses Chromium's
-      default **30s** nav timeout (`probeMatrix.ts` `crawlPage` call, no opts) —
-      cut to ~10s so a hang doesn't burn 30s. And the headed rows carry the full
-      per-host pacing pause (up to 15s); a single pre-request pause is a weak proxy
-      for real pacing — cap headed rows to ~2–3s. Together these shave most of the
-      ~1min "all failed" probe.
+- [x] **Probe speed cuts** (offered, deferred). DONE (2026-07-22). `crawlPage` in
+      `runRow` now passes `{ navTimeout: 10000 }` (was Chromium's 30s default), and
+      headed rows cap their pre-request pause at 2.5s (`Math.min(perHostDelayMs,
+      2500)` when `cfg.headed`). Together these shave most of the ~1min "all
+      failed" probe.
 - [ ] **Proxy password is stored plaintext** in the profile `config_json` (like
       every other setting). Add masking / secret handling if that's not acceptable.
 

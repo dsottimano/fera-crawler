@@ -19,6 +19,15 @@ const RESIDENTIAL_UA =
 
 export type StealthTier = "off" | "tier-1" | "tier-2";
 
+// Upstream proxy applied to every probe row's browser, mirroring the live
+// crawl's `connection.proxy*`. Without this the probe tests DIRECT egress and
+// can report "all failed" while a proxied crawl would succeed (and vice-versa).
+export interface ProbeProxy {
+  server: string;
+  username?: string;
+  password?: string;
+}
+
 export interface ProbeRowConfig {
   row: number;
   stealth: StealthTier;
@@ -80,6 +89,7 @@ async function runRow(
   sampleUrl: string,
   cfg: ProbeRowConfig,
   baseProfileDir: string,
+  proxy?: ProbeProxy,
 ): Promise<RowOutcome> {
   const started = Date.now();
   const patches = patchesFor(cfg.stealth);
@@ -149,6 +159,18 @@ async function runRow(
     ...(executablePath ? { executablePath } : {}),
     ...(userAgent ? { userAgent } : {}),
     ...(headers ? { extraHTTPHeaders: headers } : {}),
+    // Route probe egress through the same upstream proxy the live crawl uses,
+    // so the probe verdict reflects the network path the crawl will actually
+    // take. socks5:// carries no in-band auth, so user/pass go separately.
+    ...(proxy
+      ? {
+          proxy: {
+            server: proxy.server,
+            ...(proxy.username ? { username: proxy.username } : {}),
+            ...(proxy.password ? { password: proxy.password } : {}),
+          },
+        }
+      : {}),
   }).catch((err: Error) => {
     errorMsg = `launch: ${err.message}`;
     return null;
@@ -170,12 +192,19 @@ async function runRow(
         }
       }
 
-      // Simulate per-host delay as a pre-request pause.
-      await new Promise((r) => setTimeout(r, cfg.perHostDelayMs));
+      // Simulate per-host delay as a pre-request pause. On the slow headed
+      // last-resort rows (10–15s pacing) a single pre-request pause is a weak
+      // stand-in for real per-request pacing anyway, so cap it at 2.5s — this
+      // shaves most of the wasted time off an "all failed" probe without
+      // changing which lever (headed) those rows actually test.
+      const pauseMs = cfg.headed ? Math.min(cfg.perHostDelayMs, 2500) : cfg.perHostDelayMs;
+      await new Promise((r) => setTimeout(r, pauseMs));
 
       const page: Page = await context.newPage();
       try {
-        const { result } = await crawlPage(page, sampleUrl);
+        // 10s nav timeout (vs. Chromium's 30s default): a hung load on a
+        // blocking host should fail fast so the matrix moves to the next row.
+        const { result } = await crawlPage(page, sampleUrl, { navTimeout: 10000 });
         status = result.status;
         title = result.title;
       } finally {
@@ -238,6 +267,7 @@ export async function runProbeMatrix(
   sampleUrl: string,
   baseProfileDir?: string,
   matrix: ProbeRowConfig[] = DEFAULT_MATRIX,
+  proxy?: ProbeProxy,
 ): Promise<void> {
   const profileDir = getBrowserProfileDir(baseProfileDir);
 
@@ -293,7 +323,7 @@ export async function runProbeMatrix(
       continue;
     }
 
-    const outcome = await runRow(sampleUrl, cfg, profileDir);
+    const outcome = await runRow(sampleUrl, cfg, profileDir, proxy);
     // Early exit: first row that returns a real 200 wins. Saves up to ~30s
     // (rows 3-7 are progressively slower at 5-6s each). User can re-probe
     // via the BlockAlert if the wall comes back, which means this row's
