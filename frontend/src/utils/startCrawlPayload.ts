@@ -30,6 +30,9 @@ export interface StartCrawlPayload {
   sessionWarmup: boolean | null;
   excludeUrls: string[] | null;
   debugLog: boolean;
+  proxyServer: string | null;
+  proxyUsername: string | null;
+  proxyPassword: string | null;
   [k: string]: unknown;
 }
 
@@ -86,5 +89,8 @@ export function buildStartCrawlPayload(
     sessionWarmup: s.performance.sessionWarmup || null,
     excludeUrls: excludeUrlsArr.length ? excludeUrlsArr : null,
     debugLog: s.advanced.debugLog,
+    proxyServer: s.connection.proxyServer.trim() || null,
+    proxyUsername: s.connection.proxyUsername.trim() || null,
+    proxyPassword: s.connection.proxyPassword || null,
   };
 }

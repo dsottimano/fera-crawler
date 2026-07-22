@@ -32,7 +32,7 @@ import type { CrawlResult } from "./types/crawl";
 
 const url = ref("");
 const { config } = useConfig();
-const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession } = useCrawl();
+const { crawling, stopped, currentSessionId, crawlProgress, startCrawl, stopCrawl, clearResults, loadSession, adoptRunningCrawl } = useCrawl();
 const { saveCrawl, openCrawl, exportCsv, exportBundle, exportFilteredCsv } = useFileOps();
 const { profileData } = useBrowser();
 const { start: startDebugListeners, latestMetric } = useDebug();
@@ -71,6 +71,15 @@ onMounted(async () => {
     await initSettings();
   } catch (e) {
     console.error("Settings init error:", e);
+  }
+  // A crawl that outlived a webview reload is still running in the backend but
+  // the reloaded UI owns no session. Re-adopt it so the URL/health/grid track
+  // the real crawl instead of showing phantom stats with an empty URL bar.
+  try {
+    const adopted = await adoptRunningCrawl();
+    if (adopted?.startUrl) url.value = adopted.startUrl;
+  } catch (e) {
+    console.error("Adopt running crawl error:", e);
   }
   window.addEventListener("keydown", onGlobalKeydown);
 

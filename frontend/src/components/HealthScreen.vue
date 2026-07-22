@@ -246,7 +246,11 @@ const heroStatus = computed(() => {
   return "READY";
 });
 const heroRowCount = computed(() => props.crawling ? crawlProgress.value.rowCount : health.value.total);
-const heroErrorCount = computed(() => props.crawling ? crawlProgress.value.errorCount : health.value.errors);
+// Always the DB-truth distinct-URL count (health refreshes ~every 300ms during
+// a crawl via scheduleRefresh). The live crawlProgress.errorCount counts every
+// failed *attempt* including retries, so on a blocked crawl it balloons past
+// the page count — a hero number larger than total pages reads as broken.
+const heroErrorCount = computed(() => health.value.errors);
 // FOUND = crawled + pending frontier; REMAINING = pending frontier. Both
 // DB-backed (health.frontier), so they're correct on a stopped/reloaded
 // session — answering "did the crawl find more than it crawled?".
@@ -375,7 +379,7 @@ function maxResponseTime(): string {
         <div class="hero-stat">
           <div class="hero-stat-label">
             ERRORS
-            <span class="info-tip" :data-tip="props.crawling ? 'Live: every failed fetch attempt the sidecar emits. A retried URL counts each failed try here, so this is usually higher than the DB-truth count below.' : 'URLs whose final persisted result was a request failure (network error, timeout, page-closed, etc.).'">i</span>
+            <span class="info-tip" data-tip="Distinct URLs whose final result was a request failure — no HTTP status came back (network error, timeout, page-closed, or an anti-bot block-stub). Always ≤ total pages. 4xx/5xx are separate — those got a real response.">i</span>
           </div>
           <div class="hero-stat-value" :class="{ 'hero-stat-value--bad': heroErrorCount > 0 }">{{ heroErrorCount.toLocaleString() }}</div>
         </div>

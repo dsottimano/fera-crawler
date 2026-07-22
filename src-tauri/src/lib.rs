@@ -221,6 +221,8 @@ pub fn run() {
             commands::dump_profile,
             commands::open_inspector,
             commands::debug_snapshot,
+            commands::active_crawl,
+            commands::vpngate_servers,
             commands::kill_sidecar,
             commands::wipe_browser_profile,
             commands::get_session_image_stats,

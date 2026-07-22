@@ -62,6 +62,14 @@ export interface SettingsValues {
   authentication: {
     headless: boolean;
   };
+  connection: {
+    // Upstream proxy for all crawler traffic. "" = direct. scheme://host:port
+    // (socks5/http/https). Cross-OS, unprivileged (Chromium-level). Also the
+    // plug-point for a local VPNGate→SOCKS bridge.
+    proxyServer: string;
+    proxyUsername: string;
+    proxyPassword: string;
+  };
   storage: {
     retentionDays: number;
   };

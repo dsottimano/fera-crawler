@@ -17,6 +17,7 @@ export interface ResultsFilter {
   emptyScraperRule?: string;
   resourceType?: string;
   issuesOnly?: boolean;
+  errorsOnly?: boolean;
   urlIn?: string[];
   hasOgImage?: boolean;
   missingOgImage?: boolean;
@@ -87,6 +88,7 @@ const HTML_ONLY_TABS = new Set([
 export const TAB_FILTERS: Record<string, FilterOption[]> = {
   Internal: [
     { label: "All", value: "all" },
+    { label: "Errors / blocked (req-fail)", value: "reqfail" },
     { label: "HTML", value: "type:HTML" },
     { label: "JavaScript", value: "type:JavaScript" },
     { label: "CSS", value: "type:CSS" },
@@ -185,6 +187,9 @@ export const TAB_FILTERS: Record<string, FilterOption[]> = {
 // behavior (HEALTH drill-through tokens) when not.
 function applyTabFilter(token: string, f: ResultsFilter, tab: string): boolean {
   if (token === "all") return true;
+  // reqfail — rows whose final result was a request failure / block-stub
+  // (no HTTP status). Matches the ERRORS card's predicate.
+  if (token === "reqfail") { f.errorsOnly = true; return true; }
   // type:HTML / type:JavaScript / …
   if (token.startsWith("type:")) {
     f.resourceType = token.slice(5);

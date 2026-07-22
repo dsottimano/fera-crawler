@@ -100,6 +100,11 @@ pub struct ResultsFilter {
     /// True → "Issues" tab equivalent: rows missing title/h1/meta-description
     /// OR status >= 400 OR is_noindex. None → no filter.
     pub issues_only: Option<bool>,
+    /// True → only rows whose final result was a request failure (no HTTP
+    /// status: network error, timeout, page-closed, or anti-bot block-stub).
+    /// Same predicate as aggregate_health's `errors` count, so the grid's
+    /// Filter Total matches the ERRORS card.
+    pub errors_only: Option<bool>,
     /// Restrict to a specific URL set — used by the "Recrawl Queue" tab,
     /// which is bounded by an in-memory list rather than a row property.
     pub url_in: Option<Vec<String>>,
@@ -246,6 +251,9 @@ pub(crate) fn build_where(
               OR is_noindex = 1)"
                 .to_string(),
         );
+    }
+    if let Some(true) = filter.errors_only {
+        out_clauses.push("(error IS NOT NULL AND error != '')".to_string());
     }
     if let Some(urls) = &filter.url_in {
         if urls.is_empty() {

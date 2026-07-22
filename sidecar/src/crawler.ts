@@ -1176,6 +1176,19 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         }),
     ...(stealthEnabled && effectiveUa ? { userAgent: effectiveUa } : {}),
     ...(stealthEnabled && mergedHeaders ? { extraHTTPHeaders: mergedHeaders } : {}),
+    // Upstream proxy for all traffic — Chromium routes every request through
+    // it. Applies regardless of stealth (proxy egress is orthogonal to
+    // fingerprint). socks5:// carries no auth in-band, so username/password
+    // are passed separately when present.
+    ...(config.proxyServer
+      ? {
+          proxy: {
+            server: config.proxyServer,
+            ...(config.proxyUsername ? { username: config.proxyUsername } : {}),
+            ...(config.proxyPassword ? { password: config.proxyPassword } : {}),
+          },
+        }
+      : {}),
   });
   let launchOpts = buildLaunchOpts(executablePath);
 

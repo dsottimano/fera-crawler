@@ -86,6 +86,31 @@ export const SCHEMA: SettingsSchema = {
       },
     },
   },
+  connection: {
+    label: "Connection",
+    items: {
+      proxyServer: {
+        type: "string",
+        default: "",
+        label: "Proxy server",
+        help: "Route ALL crawler traffic through an upstream proxy. Format: scheme://host:port — e.g. socks5://127.0.0.1:1080, http://proxy.example.com:8080. Cross-platform and needs no admin/root (Chromium-level, no VPN driver). Use a residential/mobile proxy to get past commercial WAFs (Akamai, DataDome) that block datacenter IPs. This is also the plug-point for a local VPNGate→SOCKS bridge (socks5://127.0.0.1:PORT). Empty = direct connection.",
+      },
+      proxyUsername: {
+        type: "string",
+        default: "",
+        advanced: true,
+        label: "Proxy username",
+        help: "For authenticated proxies. Leave empty for open/unauthenticated proxies.",
+      },
+      proxyPassword: {
+        type: "string",
+        default: "",
+        advanced: true,
+        label: "Proxy password",
+        help: "Stored in the profile in plain text (like every other setting). For authenticated proxies.",
+      },
+    },
+  },
   performance: {
     label: "Performance",
     items: {
@@ -174,9 +199,9 @@ export const SCHEMA: SettingsSchema = {
     items: {
       headless: {
         type: "boolean",
-        default: false,
+        default: true,
         label: "Headless mode",
-        help: "Headless is faster but easier for anti-bot systems to detect. Leave OFF against hardened targets (Akamai, Cloudflare, DataDome); flip ON for speed on permissive sites.",
+        help: "Headless is faster but easier for anti-bot systems to detect. ON by default for speed; flip OFF against hardened targets (Akamai, Cloudflare, DataDome).",
       },
     },
   },

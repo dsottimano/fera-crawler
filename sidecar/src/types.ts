@@ -176,4 +176,13 @@ export interface CrawlConfig {
   // directory so deleting a session can rm -rf its images. 0 / undefined =
   // unattached crawl (no og:image download).
   sessionId?: number;
+  // Upstream proxy for ALL browser traffic. Passed straight to Chromium via
+  // Playwright/Patchright's `proxy` launch option — cross-OS and unprivileged
+  // (no TUN, no root). Format: scheme://host:port (socks5://, http://,
+  // https://). Enables residential/mobile-proxy egress (the reliable way past
+  // commercial WAFs like Akamai/DataDome) and is the plug-point a local
+  // VPNGate→SOCKS bridge connects to (socks5://127.0.0.1:PORT). Empty = direct.
+  proxyServer?: string;
+  proxyUsername?: string;
+  proxyPassword?: string;
 }

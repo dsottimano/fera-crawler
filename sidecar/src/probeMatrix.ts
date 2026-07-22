@@ -248,8 +248,51 @@ export async function runProbeMatrix(
     rows: matrix.length,
   });
 
+  // A "hard" HTTP block is one where the server answered with a block status
+  // instead of failing to connect — the fingerprint got far enough to be
+  // judged. When pacing escalation + a profile wipe (rows 1-3) all return the
+  // SAME hard status, it's an IP/behavioral wall that more headless
+  // permutations (fresh profile, residential UA) can't move.
+  const isHardHttpBlock = (s: number) => s === 403 || s === 429 || (s >= 500 && s < 600);
+  const SKIP_AFTER_STREAK = 3;
+  let hardBlockStreak = 0;
+  let hardBlockStatus = 0;
+
   let winningRow: number | null = null;
   for (const cfg of matrix) {
+    // Fast-track to the headed last-resort rows: once we've seen SKIP_AFTER_STREAK
+    // consecutive identical hard blocks from the headless pacing/wipe rows, skip
+    // the remaining *headless* permutations (fresh profile / residential UA) —
+    // they change fingerprint details a consistent IP-level 403 doesn't care
+    // about. Headed rows are NEVER skipped: a visible browser is the one
+    // genuinely different lever and sometimes beats walls the matrix otherwise
+    // declares unbeatable (memory: feedback_block_recovery). Emit a skipped
+    // marker so the UI shows the row was intentionally passed over, not lost.
+    if (!cfg.headed && hardBlockStreak >= SKIP_AFTER_STREAK) {
+      writeAnyEvent({
+        type: "probe-result",
+        ts: Date.now(),
+        sampleUrl,
+        row: cfg.row,
+        config: {
+          stealth: cfg.stealth,
+          rate: `${cfg.perHostDelayMs}ms`,
+          warmup: cfg.warmup,
+          freshProfile: cfg.freshProfile,
+          residentialUa: cfg.residentialUa,
+          headed: cfg.headed,
+          wipeBaseProfile: cfg.wipeBaseProfile,
+        },
+        status: 0,
+        title: "",
+        blocked: true,
+        reason: null,
+        skipped: true,
+        durationMs: 0,
+      });
+      continue;
+    }
+
     const outcome = await runRow(sampleUrl, cfg, profileDir);
     // Early exit: first row that returns a real 200 wins. Saves up to ~30s
     // (rows 3-7 are progressively slower at 5-6s each). User can re-probe
@@ -258,6 +301,23 @@ export async function runProbeMatrix(
     if (!outcome.blocked) {
       winningRow = cfg.row;
       break;
+    }
+
+    // Track the consecutive-identical-hard-block streak on headless rows only.
+    // A soft/launch/timeout failure breaks the streak — that's not the
+    // "consistent IP-level 403" signal that justifies skipping ahead.
+    if (!cfg.headed) {
+      if (isHardHttpBlock(outcome.status)) {
+        if (outcome.status === hardBlockStatus) {
+          hardBlockStreak++;
+        } else {
+          hardBlockStatus = outcome.status;
+          hardBlockStreak = 1;
+        }
+      } else {
+        hardBlockStreak = 0;
+        hardBlockStatus = 0;
+      }
     }
   }
 

@@ -47,6 +47,10 @@ interface ProbeRow {
   reason: string | null;
   error?: string;
   durationMs: number;
+  // True → row intentionally skipped (not run). The matrix fast-tracks past
+  // redundant headless permutations once pacing + a wipe returned identical
+  // hard blocks, jumping straight to the headed last-resort rows.
+  skipped?: boolean;
 }
 
 const blocks = ref<Map<string, BlockInfo>>(new Map());
@@ -75,6 +79,11 @@ const firstSuccessRow = computed(() => probeRows.value.find((r) => !r.blocked));
 // no longer signals completion.
 const probeFinished = ref(false);
 const allFailed = computed(() => probeFinished.value && !firstSuccessRow.value);
+// Rows actually run and blocked vs. rows skipped by the fast-track. Kept
+// separate so the "all failed" summary doesn't claim we tested configs we
+// deliberately passed over.
+const testedBlockedCount = computed(() => probeRows.value.filter((r) => r.blocked && !r.skipped).length);
+const skippedCount = computed(() => probeRows.value.filter((r) => r.skipped).length);
 
 function reasonSummary(reasons: Record<string, number>): string {
   return Object.entries(reasons)
@@ -441,6 +450,14 @@ onUnmounted(() => {
       <div class="probe-sample">
         Sample URL: <span class="mono">{{ probeSampleUrl }}</span>
       </div>
+      <div v-if="probeRunning" class="probe-checking">
+        <span class="spinner"></span>
+        <span>
+          Checking site access — testing stealth configs against <strong>{{ probeHost }}</strong>.
+          A browser window may open on its own for the headed tests; that's expected —
+          leave it alone, it closes automatically.
+        </span>
+      </div>
       <div class="probe-explainer">
         <button class="probe-explainer-toggle" type="button" @click="explainerOpen = !explainerOpen">
           {{ explainerOpen ? "▾" : "▸" }} What do these tiers and knobs mean?
@@ -485,7 +502,8 @@ onUnmounted(() => {
           class="probe-trow"
           :class="{
             'row-success': probeRows[n - 1] && !probeRows[n - 1].blocked,
-            'row-blocked': probeRows[n - 1] && probeRows[n - 1].blocked,
+            'row-blocked': probeRows[n - 1] && probeRows[n - 1].blocked && !probeRows[n - 1].skipped,
+            'row-skipped': probeRows[n - 1] && probeRows[n - 1].skipped,
           }"
         >
           <div class="c-num">{{ n }}</div>
@@ -500,8 +518,9 @@ onUnmounted(() => {
             </div>
             <div class="c-status">{{ probeRows[n - 1].status || "—" }}</div>
             <div class="c-title mono">{{ probeRows[n - 1].title || "—" }}</div>
-            <div class="c-result" :title="probeRows[n - 1].error ?? ''">
-              <template v-if="!probeRows[n - 1].blocked">✓ real 200</template>
+            <div class="c-result" :title="probeRows[n - 1].skipped ? 'Fast-tracked: pacing + a profile wipe returned identical hard blocks, so this headless permutation was skipped in favor of the headed rows.' : (probeRows[n - 1].error ?? '')">
+              <span v-if="probeRows[n - 1].skipped" class="c-result-skip">↷ skipped</span>
+              <template v-else-if="!probeRows[n - 1].blocked">✓ real 200</template>
               <template v-else>
                 ✗ {{ reasonLabel[probeRows[n - 1].reason ?? ""] ?? probeRows[n - 1].reason ?? "blocked" }}
                 <span v-if="probeRows[n - 1].error" class="c-result-detail">— {{ shortenError(probeRows[n - 1].error!) }}</span>
@@ -553,7 +572,9 @@ onUnmounted(() => {
       </div>
 
       <div v-else-if="allFailed" class="probe-outcome probe-outcome-fail">
-        <div class="probe-outcome-title">All {{ probeRowsExpected }} configs were blocked.</div>
+        <div class="probe-outcome-title">
+          All {{ testedBlockedCount }} tested configs were blocked<template v-if="skippedCount"> ({{ skippedCount }} skipped — identical hard blocks meant more headless variants couldn't help, so we jumped to the headed rows)</template>.
+        </div>
         <div class="probe-outcome-body">
           This may be an IP-level ban. Open the sample URL in your regular browser.
           If it loads fine there but not here, it's a fingerprint issue — try again later
@@ -731,6 +752,21 @@ onUnmounted(() => {
   color: #ffffff;
 }
 
+.probe-checking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  background: rgba(86, 156, 214, 0.08);
+  border-bottom: 1px solid rgba(86, 156, 214, 0.18);
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.8);
+}
+.probe-checking .spinner {
+  flex-shrink: 0;
+}
+
 .probe-explainer {
   padding: 0 20px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
@@ -818,6 +854,16 @@ onUnmounted(() => {
 
 .probe-trow.row-blocked .c-result {
   color: #f44747;
+}
+
+/* Intentionally-skipped row — muted so it reads as "passed over", not
+   "failed". The result cell shows "↷ skipped". */
+.probe-trow.row-skipped {
+  opacity: 0.5;
+}
+.c-result-skip {
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: 600;
 }
 
 /* WIPE badge in the config column — destructive op, deserves a callout

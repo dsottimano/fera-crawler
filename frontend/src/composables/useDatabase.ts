@@ -197,13 +197,15 @@ export function useDatabase() {
     return mergeWithDefaults({ inputs: obj, crawling: { mode: inferredMode } });
   }
 
-  async function getSessionStatus(sessionId: number): Promise<{ completed_at: string | null }> {
+  async function getSessionStatus(
+    sessionId: number,
+  ): Promise<{ completed_at: string | null; start_url: string }> {
     const d = await getDb();
-    const rows = await d.select<{ completed_at: string | null }[]>(
-      "SELECT completed_at FROM crawl_sessions WHERE id = $1",
+    const rows = await d.select<{ completed_at: string | null; start_url: string }[]>(
+      "SELECT completed_at, start_url FROM crawl_sessions WHERE id = $1",
       [sessionId]
     );
-    return rows.length > 0 ? rows[0] : { completed_at: null };
+    return rows.length > 0 ? rows[0] : { completed_at: null, start_url: "" };
   }
 
   async function updateSessionConfig(sessionId: number, snapshot: SettingsValues): Promise<void> {

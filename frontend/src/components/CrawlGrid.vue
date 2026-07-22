@@ -556,6 +556,10 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (liveTimer != null) {
+    clearTimeout(liveTimer);
+    liveTimer = null;
+  }
   if (table) {
     table.destroy();
     table = null;
@@ -611,6 +615,46 @@ function refresh() {
   void table.setData();
 }
 
+// Live (crawl-progress) refreshes arrive ~2×/sec. A full setData() reload on
+// every tick blanks the table, re-measures fitDataStretch column widths, and
+// resets scroll — that repeated flash is the flickering during a crawl. So we
+// (a) coalesce ticks into at most one reload per LIVE_REFRESH_MS, and (b)
+// restore the scroll position after the reload so live rows don't yank the
+// viewport back to the top. User-initiated refreshes (tab/filter/search/
+// session) stay instant via refresh() above.
+const LIVE_REFRESH_MS = 1000;
+let liveTimer: ReturnType<typeof setTimeout> | null = null;
+let livePending = false;
+
+function scrollHolder(): HTMLElement | null {
+  return (table?.element.querySelector(".tabulator-tableholder") as HTMLElement) ?? null;
+}
+
+function liveReload() {
+  if (!table) return;
+  const top = scrollHolder()?.scrollTop ?? 0;
+  void table.setData().then(() => {
+    const holder = scrollHolder();
+    if (holder && top > 0) holder.scrollTop = top;
+  });
+}
+
+function liveRefresh() {
+  if (!table) return;
+  if (liveTimer != null) {
+    livePending = true;
+    return;
+  }
+  liveReload();
+  liveTimer = setTimeout(() => {
+    liveTimer = null;
+    if (livePending) {
+      livePending = false;
+      liveRefresh();
+    }
+  }, LIVE_REFRESH_MS);
+}
+
 watch(() => props.activeTab, (tab) => {
   if (!table) return;
   table.setColumns(getColumns(tab));
@@ -618,7 +662,7 @@ watch(() => props.activeTab, (tab) => {
 });
 watch(() => props.filterType, refresh);
 watch(() => props.searchQuery, refresh);
-watch(() => props.refreshKey, refresh);
+watch(() => props.refreshKey, liveRefresh);
 watch(() => props.sessionId, refresh);
 watch(() => config.recrawlQueue.length, refresh);
 watch(() => props.selectAll, () => {

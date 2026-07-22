@@ -26,6 +26,7 @@ const CRAWLING_SUBGROUPS: CrawlingSubgroup[] = [
   {
     heading: "Mode & scope",
     items: [
+      { bucket: "authentication", key: "headless" },
       { bucket: "crawling", key: "mode" },
       { bucket: "crawling", key: "maxRequests" },
       { bucket: "crawling", key: "respectRobots" },
@@ -50,7 +51,6 @@ const CRAWLING_SUBGROUPS: CrawlingSubgroup[] = [
     items: [
       { bucket: "performance", key: "sessionWarmup" },
       { bucket: "performance", key: "autoProbeOnBlock" },
-      { bucket: "authentication", key: "headless" },
     ],
     action: "wipe",
   },

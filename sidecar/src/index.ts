@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { runCrawler, openBrowser, dumpProfile } from "./crawler.js";
 import { openInspector } from "./inspector.js";
 import { runProbeMatrix } from "./probeMatrix.js";
+import { fetchVpnGateServers } from "./vpngate.js";
 import type { CrawlConfig } from "./types.js";
 import { startMetricEmitter, stopMetricEmitter, log, setDebugEnabled } from "./observability.js";
 
@@ -69,6 +70,21 @@ if (command === "open-browser") {
     .then(() => process.exit(0))
     .catch((err) => {
       console.error("Probe matrix error:", err);
+      process.exit(1);
+    });
+} else if (command === "vpngate") {
+  // One-shot: fetch the VPNGate relay list and print it as a single JSON
+  // array to stdout. No browser, no events — the Rust side collects stdout
+  // and parses it. Proves the "it's just a GET" point for the list half.
+  fetchVpnGateServers()
+    .then((servers) => {
+      // Write-then-exit in the flush callback: exiting immediately after an
+      // async pipe write can truncate the JSON. Trailing newline so the
+      // Rust line-reader emits the final chunk.
+      process.stdout.write(JSON.stringify(servers) + "\n", () => process.exit(0));
+    })
+    .catch((err) => {
+      console.error("VPNGate fetch error:", err?.message ?? err);
       process.exit(1);
     });
 } else if (command === "crawl") {
@@ -148,6 +164,10 @@ if (command === "open-browser") {
   const sessionIdRaw = getFlag("--session-id", "");
   const sessionId = sessionIdRaw ? parseInt(sessionIdRaw, 10) : undefined;
 
+  const proxyServer = getFlag("--proxy-server", "");
+  const proxyUsername = getFlag("--proxy-username", "");
+  const proxyPassword = getFlag("--proxy-password", "");
+
   const excludeUrlsFile = getFlag("--exclude-urls-file", "");
   let excludeUrls: string[] | undefined;
   if (excludeUrlsFile) {
@@ -193,6 +213,9 @@ if (command === "open-browser") {
     ...(sessionWarmup ? { sessionWarmup } : {}),
     ...(excludeUrls?.length ? { excludeUrls } : {}),
     ...(sessionId !== undefined && !Number.isNaN(sessionId) ? { sessionId } : {}),
+    ...(proxyServer ? { proxyServer } : {}),
+    ...(proxyUsername ? { proxyUsername } : {}),
+    ...(proxyPassword ? { proxyPassword } : {}),
   };
 
   startMetricEmitter(1000);

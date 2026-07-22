@@ -393,6 +393,105 @@ export function useCrawl() {
     return snapshot;
   }
 
+  // Finalize a crawl we adopted on boot (see adoptRunningCrawl). Mirrors the
+  // completion decision in startCrawl's crawl-complete closure, minus the
+  // per-call context we don't have for an adopted crawl (recrawl-queue drain,
+  // the live settings object). interrupted is always false here: if the user
+  // hits STOP, stopCrawl() runs its own path and cleanup() drops this listener
+  // before the sidecar's crawl-complete lands.
+  async function finalizeAdopted(sessionId: number) {
+    crawling.value = false;
+    let rowCount = crawlProgress.value.rowCount;
+    let errorCount = crawlProgress.value.errorCount;
+    try {
+      const h = await invoke<HealthSnapshot>("aggregate_health", { sessionId });
+      rowCount = h.total;
+      errorCount = h.errors + h.status4xx + h.status5xx + h.statusOther;
+    } catch (e) {
+      console.error("aggregate_health on adopt-complete failed:", e);
+    }
+    let retryableCount = 0;
+    try {
+      retryableCount = (await invoke<string[]>("get_retryable_urls", { sessionId })).length;
+    } catch (e) {
+      console.error("get_retryable_urls on adopt-complete failed:", e);
+    }
+    const decision = decideCompletion({
+      rowCount,
+      errorCount,
+      listTotal: pinnedSettings.value?.inputs.urls.length ?? 0,
+      interrupted: false,
+      retryableCount,
+    });
+    try {
+      if (decision.isStopped) stopped.value = true;
+      else await completeSession(sessionId);
+    } catch (e) {
+      console.error("DB session complete on adopt failed:", e);
+    }
+    cleanup();
+  }
+
+  // Re-adopt a crawl that outlived a webview reload. The Rust backend + sidecar
+  // survive a frontend reload; Vue state doesn't. Without this, the reloaded UI
+  // owns no session yet still receives the live crawl-progress firehose (a
+  // global listener), painting phantom counts with an empty URL and all-zero
+  // health cards. Returns the session's start URL so the caller can refill the
+  // URL input. No-op if we already own a session or nothing is running.
+  async function adoptRunningCrawl(): Promise<{ startUrl: string } | null> {
+    if (currentSessionId.value != null) return null;
+    let info: { running: boolean; sessionId: number };
+    try {
+      info = await invoke<{ running: boolean; sessionId: number }>("active_crawl");
+    } catch (e) {
+      console.error("active_crawl failed:", e);
+      return null;
+    }
+    if (!info.running || info.sessionId <= 0) return null;
+
+    const sessionId = info.sessionId;
+    currentSessionId.value = sessionId;
+    pinnedSettings.value = await loadSessionConfig(sessionId);
+
+    // Backfill live counts so cards aren't 0 until the next progress tick.
+    try {
+      const h = await invoke<HealthSnapshot>("aggregate_health", { sessionId });
+      crawlProgress.value = {
+        rowCount: h.total,
+        errorCount: h.errors + h.status4xx + h.status5xx + h.statusOther,
+        lastUrl: "",
+        latestStatuses: [],
+      };
+    } catch (e) {
+      console.error("aggregate_health on adopt failed:", e);
+    }
+
+    crawling.value = true;
+    stopped.value = false;
+    userStopped = false;
+
+    // The sidecar's natural termination still emits crawl-complete; wire a
+    // listener so the adopted crawl finalizes instead of hanging in "crawling".
+    cleanup();
+    unlistenComplete = await listen<void>("crawl-complete", () => {
+      void finalizeAdopted(sessionId);
+    });
+
+    // Close the race where the crawl finished between active_crawl and the
+    // listener registration above (its crawl-complete would be missed, leaving
+    // the UI stuck in "crawling"). finalizeAdopted is idempotent — a completed
+    // session's UPDATE and stopped flag are harmless to re-apply.
+    try {
+      const still = await invoke<{ running: boolean }>("active_crawl");
+      if (!still.running) void finalizeAdopted(sessionId);
+    } catch (e) {
+      console.error("active_crawl recheck failed:", e);
+    }
+
+    const status = await getSessionStatus(sessionId);
+    return { startUrl: status.start_url };
+  }
+
   function cleanup() {
     if (unlistenComplete) {
       unlistenComplete();
@@ -410,5 +509,6 @@ export function useCrawl() {
     stopCrawl,
     clearResults,
     loadSession,
+    adoptRunningCrawl,
   };
 }

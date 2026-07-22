@@ -284,6 +284,9 @@ pub async fn start_crawl(
     session_warmup: Option<bool>,
     exclude_urls: Option<Vec<String>>,
     debug_log: Option<bool>,
+    proxy_server: Option<String>,
+    proxy_username: Option<String>,
+    proxy_password: Option<String>,
 ) -> Result<(), String> {
     let state: State<CrawlChild> = app.state();
 
@@ -414,6 +417,28 @@ pub async fn start_crawl(
 
     if let Some(true) = session_warmup {
         args.push("--session-warmup".to_string());
+    }
+
+    // Upstream proxy — routes all crawler browser traffic through it. Empty
+    // string is treated as "no proxy" so a cleared setting doesn't pass a
+    // bogus server. Cross-OS, unprivileged (Chromium-level, no TUN/root).
+    if let Some(server) = proxy_server {
+        if !server.trim().is_empty() {
+            args.push("--proxy-server".to_string());
+            args.push(server);
+            if let Some(user) = proxy_username {
+                if !user.is_empty() {
+                    args.push("--proxy-username".to_string());
+                    args.push(user);
+                }
+            }
+            if let Some(pass) = proxy_password {
+                if !pass.is_empty() {
+                    args.push("--proxy-password".to_string());
+                    args.push(pass);
+                }
+            }
+        }
     }
 
     if let Some(true) = debug_log {
@@ -896,6 +921,67 @@ fn descendant_pids(root: i32) -> Vec<i32> {
 #[cfg(not(target_os = "linux"))]
 fn descendant_pids(_root: i32) -> Vec<i32> {
     Vec::new()
+}
+
+/// Fetches the VPNGate public relay list via the sidecar (Node `fetch` — no
+/// new Rust HTTP dep) and returns it as a JSON array. Pure GET + base64
+/// decode, cross-OS and unprivileged. This is only the *list* half; actually
+/// tunneling through a chosen server needs the userspace OpenVPN→SOCKS bridge
+/// documented in docs/vpngate_integration.md, whose local port is then set as
+/// the crawler's `connection.proxyServer`.
+#[tauri::command]
+pub async fn vpngate_servers(app: AppHandle) -> Result<serde_json::Value, String> {
+    let shell = app.shell();
+    let mut cmd = shell
+        .sidecar("fera-crawler")
+        .map_err(|e| format!("Failed to create sidecar command: {e}"))?
+        .args(["vpngate"]);
+    if let Some(res_dir) = resource_dir(&app) {
+        cmd = cmd.env("FERA_RESOURCES_DIR", res_dir);
+    }
+    let (mut rx, _child) = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn vpngate: {e}"))?;
+
+    use tauri_plugin_shell::process::CommandEvent;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stderr = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stdout(line) => buf.extend_from_slice(&line),
+            CommandEvent::Stderr(line) => stderr.push_str(&String::from_utf8_lossy(&line)),
+            CommandEvent::Terminated(_) => break,
+            _ => {}
+        }
+    }
+
+    if buf.is_empty() {
+        return Err(if stderr.trim().is_empty() {
+            "VPNGate returned no data".to_string()
+        } else {
+            stderr.trim().to_string()
+        });
+    }
+    let text = String::from_utf8_lossy(&buf);
+    serde_json::from_str::<serde_json::Value>(text.trim())
+        .map_err(|e| format!("Failed to parse VPNGate response: {e}"))
+}
+
+/// Reports whether a crawl is currently running in the backend and, if so,
+/// which DB session it's writing to. The frontend calls this on boot: the
+/// Rust process and its sidecar outlive a webview reload, but Vue state does
+/// not, so after a reload the UI can lose its handle on a crawl that's still
+/// running. This lets the frontend re-adopt that session instead of painting
+/// phantom crawl-progress into a session-less shell.
+#[tauri::command]
+pub fn active_crawl(app: AppHandle) -> serde_json::Value {
+    let state: State<CrawlChild> = app.state();
+    let pid = state.pid.load(Ordering::SeqCst);
+    let session_id = state.session_id.load(Ordering::SeqCst);
+    serde_json::json!({
+        "running": pid > 0 && session_id > 0,
+        "sessionId": session_id,
+    })
 }
 
 #[tauri::command]
