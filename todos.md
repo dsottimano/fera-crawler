@@ -52,135 +52,45 @@ row carries its *destination's* content (title/h1/meta/canonical/wordCount/
 contentHash/…) while keeping the first-hop status, and non-HTML resources still
 get empty extraction fields.
 
-**The common tell:** a predicate that keys off a bare column being empty/NULL
-(`title=''`, `canonical IS NULL`) is NOT status/resource-safe; one that keys off
-a JSON value being `>0`/`=0` usually IS (non-HTML rows have no `seo_json` entry →
-NULL, excluded). Standard fix for the unsafe ones: add
-`AND resource_type='HTML' AND status>=200 AND status<300`.
+**MOSTLY FIXED (2026-07-22, `63e36c4`) — source-side blank + missing-metric
+gates.** Dave chose the source-side strategy. Implemented in two halves:
+(1) `db_writer::blank_non_content_metrics` blanks metric fields on every
+non-2xx / non-HTML row at the single write path — fixes all "has X"/"duplicate
+X" consumers at once (dup title/body reports, dup/multiple-h1/has-SD grid
+filters, security health card + grid Security filter, hreflang & images-missing-
+alt reports). (2) `db_query` gates the "missing X" family on a shared
+`CONTENT_PAGE` predicate (blanking can't fix counts-of-emptiness): `empty_h1`/
+`empty_title`, `missing_field`, `canonical=missing`, `structured_data=missing`,
+`issues_only`, `og_image`, and avg/max response-time. All items below that were
+checkboxes are now covered — only the graph-topology item remains.
 
-_From the `db_query.rs` sweep (2026-07-22). Frontend-report + crawler-extraction
-findings append below when those audits land._
+**Fixed by `63e36c4`** (source-side blank in `db_writer` + `CONTENT_PAGE` gates
+in `db_query`), verified by the 3-way audit:
+- Duplicate title/meta/h1 + duplicate-body REPORTS (`ReportPanel` `duplicatesBy`
+  / `duplicateBodies`) — blanked fields drop out of their `if(!key)continue`
+  guards; no frontend change needed.
+- Grid duplicate / multiple-h1 / has-structured-data / has-og-image filters.
+- Security health card + grid Security filter (securityHeaders→null → excluded;
+  the "three security views disagree" issue is resolved — all now HTML+2xx).
+- Hreflang + images-missing-alt reports (arrays→[] → excluded).
+- "Missing X" family gated: `empty_h1`/`empty_title` health, `missing_field`,
+  `canonical=missing`, `structured_data=missing`, `issues_only`, `og_image`.
+- avg/max response-time gated on 2xx (slowest-page card can't show a block stub).
 
-- [ ] **HIGH — health `empty_h1` / `empty_title` count non-HTML + non-2xx**
-      (`db_query.rs:739-740`). Same class as the duplicate fix, unfixed here. A
-      JS/CSS/image row (no h1) and every 3xx/404/500 row inflate the "missing
-      h1/title" HEALTH cards. Fix: gate each `SUM(CASE …)` on
-      `resource_type='HTML' AND status BETWEEN 200 AND 299`.
-- [ ] **HIGH — grid "Missing title/h1/h2/meta" (`missing_field`) ungated**
-      (`db_query.rs:~291`). Drill-through counterpart of the above — flags every
-      non-HTML resource + redirect/error row. Fix: same HTML+2xx gate on the
-      content columns.
-- [ ] **HIGH — "Missing canonical" (`canonical_state="missing"`) counts every
-      non-HTML + non-2xx row** (`db_query.rs:370`, bare `canonical IS NULL OR
-      canonical=''`). Every script/stylesheet/image + redirect/error flagged.
-      Fix: `AND resource_type='HTML' AND status BETWEEN 200 AND 299`. (`self`/
-      `cross` are already safe — they require canonical present.)
-- [ ] **HIGH — "Missing structured data" (`structured_data="missing"`) counts
-      every non-HTML + non-2xx row** (`db_query.rs:405-408`). Same shape. Fix:
-      same HTML+2xx gate.
-- [ ] **MEDIUM — health `avg_response_time` / `max_response_time` include
-      errors/redirects** (`db_query.rs:741-742`). The "slowest page" MAX can point
-      at a 500 block-stub; fast 3xx (50ms) deflate the average. Fix:
-      `AVG(CASE WHEN status BETWEEN 200 AND 299 THEN response_time END)` + same
-      guard on MAX (NULLs ignored by both aggregates).
-- [ ] **DECISION — `issues_only` (Issues tab) empty-content ORs ungated**
-      (`db_query.rs:247-249`). Non-HTML assets (empty title/h1/meta) dominate the
-      Issues count. May be an intentional catch-all — decide: if unintended, wrap
-      the three empty-content ORs in `AND resource_type='HTML' AND status<400`.
-- [ ] **LOW/strictness — status-gate the JSON-keyed filters too**: `security_missing`
-      (`:397`), `images_missing_alt` (`:413`), `h1_state="multiple"` (`:417`) are
-      HTML-safe (JSON NULL excluded) but NOT status-gated — a 3xx that followed to
-      content and recorded first-hop headers/JSON can slip in. Add
-      `AND status BETWEEN 200 AND 299` only if you want strict 2xx semantics.
-      Also `missing_og_image`/`has_og_image` (`:276-279`) rely on the frontend
-      always pairing an HTML gate — fragile if reused elsewhere.
+_Already-correct, untouched: Broken Links (3xx not broken), Missing Metadata /
+Security / Structured Data / Directives / Sitemap Coverage reports (already
+HTML+2xx-gated), Non-Indexable (includes 3xx/4xx by design), status buckets,
+`aggregate_resource_types`._
 
-- [ ] **MEDIUM — SECURITY health card + grid Security filter count non-HTML +
-      redirects** (`db_query.rs:743-746` `sec_html`/`sec_missing_*`; grid Security
-      tab not in `HTML_ONLY_TABS`). CORRECTION to an earlier "already-correct"
-      note: `auditSecurityHeaders(responseHeaders)` runs on EVERY response
-      (`crawler.ts:918`), so a JS/CSS/image row DOES carry a `securityHeaders`
-      object (its own response's) → `json_extract … IS NOT NULL`/`= 0` counts it.
-      A 3xx row carries the destination's headers. So the health card (shipped
-      2026-07-22) and the grid Security filter both inflate; ReportPanel's
-      `securityIssues` is correctly HTML+2xx-gated (`ReportPanel.vue:143-152`) →
-      **the three security views disagree.** Fix: gate all three the same
-      (HTML+2xx).
-- [ ] **META — grid filters and reports disagree.** The ReportPanel reports gate
-      several metrics on `resourceType==='HTML'` (+2xx) while the equivalent grid
-      filters / HEALTH aggregates don't (security above; `issues_only`/`missing_field`
-      per the Rust sweep). Same site, same question, different answers depending on
-      where you look. Whatever gate we pick must be applied consistently across
-      grid filter + HEALTH aggregate + report for each metric.
-
-_Confirmed already-correct (no action): `duplicate_field` (the fix),
-`canonical_state` self/cross, status buckets, `aggregate_resource_types`._
-
-**From the `crawler.ts` extraction sweep (2026-07-22) — root cause + the fix
-decision.** `crawlPage` (`:750`) runs `page.goto` (follows redirects) +
-`EXTRACT_SEO_SCRIPT` unconditionally, with NO content-type/HEAD pre-check, then
-records the first-hop status (`:813`). Consequences:
-- A **3xx row** stores title/h1/meta/canonical/wordCount/**contentHash**/
-  structuredDataTypes/hreflang/imagesMissingAlt/outlinks/securityHeaders of its
-  **destination**, under the redirect's URL + first-hop status.
-- A **non-HTML resource** (anchor-discovered PDF/JS/CSS/image) is fully navigated
-  and records empty title/h1/meta — and a text resource (JS/CSS opened in
-  Chromium's source viewer) even gets a non-empty `wordCount` → a spurious
-  `contentHash` that can group it in the body-dup report.
-
-- [ ] **DECISION (Dave) — fix at the source vs. per-consumer.** Current state is
-      whack-a-mole: the title-dup consumer got the 2xx gate, the body-dup consumer
-      + HEALTH counts + grid filters did not, and each new consumer must re-remember
-      the rule (one already forgot). **Audit recommendation: source-side blanking**
-      — when `status` is not 2xx OR `resourceType !== 'HTML'`, blank the
-      metric-feeding fields (title/h1/h2/meta/canonical/wordCount/contentHash/
-      structuredDataTypes/imagesMissingAlt) at write time in `crawlPage`/`db_writer`.
-      Every consumer (grid, HEALTH, reports) becomes correct at once and can't
-      regress. **Tradeoff:** a 3xx/non-HTML row would then show a BLANK title in the
-      DATA grid instead of the destination's title — some users like seeing the
-      destination title as context on a redirect row. Alternative: keep raw content
-      for *display* but stop it feeding metrics via one shared 2xx-HTML predicate
-      reused by every consumer (more code, preserves the grid context). Pick one
-      before fixing the individual items above — it decides whether they're ~15
-      consumer-side gates or one source-side change.
-- [ ] **Most-urgent standalone fix regardless of the decision:** gate
-      `duplicateBodies` (`ReportPanel.vue:83-92`) on 2xx-HTML — it's the direct
-      contentHash twin of the title-dup bug already fixed in Rust, and currently
-      groups every redirect with its target as "identical content."
-
-**From the `ReportPanel.vue` sweep (2026-07-22).** The JS reports run over the
-full unfiltered `query_all_results` set, so they're the second home of this bug —
-notably the duplicate REPORTS still have the exact bug the grid FILTER fix
-(`bd182ff`) closed. Standard fix: gate the aggregation loop/filter on
-`r.resourceType === "HTML" && r.status >= 200 && r.status < 300`.
-
-- [ ] **HIGH — Duplicate Titles / Meta / H1 *report* groups redirects with their
-      targets** (`ReportPanel.vue:67-76` `duplicatesBy`, rendered ~368-376). No
-      status/resource gate — a 3xx row carries the destination's title/desc/h1, so
-      redirect+target always form a false 2-member duplicate group. Same bug as the
-      grid filter, still live in the "authoritative" duplicate report.
-- [ ] **HIGH — Duplicate Body Content report groups redirects with targets**
-      (`ReportPanel.vue:83-92` `duplicateBodies`). The redirect row's `contentHash`
-      is the followed destination's hash → byte-identical to the target → every
-      redirect pairs with its target as "Identical content." Fix: same 2xx-HTML gate.
-- [ ] **MEDIUM — Hreflang report lists redirect rows with the destination's
-      alternates** (`ReportPanel.vue:156-160` `hreflangPages`). 3xx inherits the
-      destination's hreflang array → misattributed rows. Fix: add the 2xx-HTML gate.
-- [ ] **MEDIUM — Images-Missing-Alt report lists redirect rows with the
-      destination's images** (`ReportPanel.vue:163-168`). Redirect carries the
-      destination's `imagesMissingAlt`/`missingAltImages`. Fix: add the 2xx-HTML gate.
-- [ ] **LOW — Orphan / PageRank link graph includes redirect/error/non-HTML nodes**
+- [ ] **LOW — Orphan / PageRank link graph includes redirect nodes**
       (`ReportPanel.vue:215-237` `linkGraph`). A 2xx page linked only via a
       redirecting URL (`http://x` → 301 → `https://x`) gets `inDegree=0` → falsely
-      flagged orphan; redirect nodes also carry the destination's outlinks, distorting
-      PageRank. Subtler — no clean one-liner; needs redirect-target resolution in the
-      graph. Note: `orphanPages` already restricts its *output* to 2xx HTML.
-
-_Confirmed already-correct reports (no action): Broken Links (3xx explicitly NOT
-broken), Missing Metadata, Security, Structured Data, Directives, Sitemap Coverage
-(status-aware), Non-Indexable (includes 3xx/4xx by design + labels the reason),
-Page Speed (row's own first-hop timing). `gridFilter.ts`/`CrawlGrid.vue` have no
-client-side miscomputation — they rely on the Rust 2xx enforcement above._
+      flagged orphan; redirect nodes also carry the destination's outlinks,
+      distorting PageRank. NOT fixed by the blanking pass — needs redirect-target
+      resolution in the graph (resolve each edge's URL through the redirect chain
+      before counting in-degree), not a status gate. `orphanPages` already
+      restricts its *output* to 2xx HTML, so the blast radius is a subset of
+      orphan false-positives on sites with internal redirects.
 
 ---
 
