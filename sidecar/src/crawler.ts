@@ -50,6 +50,13 @@ let browserInstallPromise: Promise<string | undefined> | null = null;
 // route handler does an O(1) Set lookup instead of allocating per request.
 const BLOCKED_RESOURCE_TYPES = new Set(["image", "media", "font"]);
 
+// Chromium net error produced by `route.abort("blockedbyclient")`. Aborting
+// with the default code yields a bare ERR_FAILED, which is indistinguishable
+// from a real CORS/network failure — so blocked subresources used to be
+// recorded as the site's own consoleErrors/failedRequests (~90% of both).
+// Aborting with this distinct code lets the collectors drop only our aborts.
+const SELF_ABORT_MARKER = "ERR_BLOCKED_BY_CLIENT";
+
 // Image extensions trusted verbatim when naming a downloaded og:image.
 // Hoisted to module scope so it isn't re-allocated on every og:image download.
 const KNOWN_IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg"]);
@@ -436,10 +443,26 @@ function parseRobotsDirectives(metaRobots: string, metaGooglebot: string, xRobot
 // ── SEO extraction script (string to avoid tsx/esbuild __name injection) ──
 // This runs inside the browser via page.evaluate(). It must be plain JS as a
 // string so that esbuild does not transform it or inject __name() helpers.
-const EXTRACT_SEO_SCRIPT = `(() => {
+// `__SCOPE_JSON__` is substituted by extractScriptFor() with the crawl's scope
+// base, so link classification and the crawl frontier agree on what counts as
+// "this site" — a page's own hostname can't decide that, because a cross-host
+// redirect silently moves it. The scope is baked into the string rather than
+// passed as an evaluate() argument: Playwright treats a string pageFunction as
+// a bare expression and drops the arg, which silently yields an undefined
+// SCOPE rather than an error.
+const EXTRACT_SEO_SCRIPT = `((SCOPE) => {
   var _m = function(a, v) {
     var el = document.querySelector("meta[" + a + '="' + v + '"]');
     return el ? (el.getAttribute("content") || "").trim() : "";
+  };
+
+  // Empty base → legacy same-host-as-this-page behavior. Otherwise a host is
+  // in scope if it IS the base or sits under it ("babbel.com" covers
+  // "www.babbel.com" and "it.babbel.com", but never "notbabbel.com").
+  var _inScope = function(h) {
+    var b = SCOPE && SCOPE.base;
+    if (!b) return h === location.hostname;
+    return h === b || (h.length > b.length && h.slice(-(b.length + 1)) === "." + b);
   };
 
   var title = (document.querySelector("title") || {}).textContent || "";
@@ -560,7 +583,7 @@ const EXTRACT_SEO_SCRIPT = `(() => {
         outlinksSet[h] = 1;
         allOutlinks.push(h);
       }
-      if (href.hostname === location.hostname) {
+      if (_inScope(href.hostname)) {
         internal++;
         if (internalUrls.length < OUTLINK_CAP) internalUrls.push(h);
       } else {
@@ -603,7 +626,20 @@ const EXTRACT_SEO_SCRIPT = `(() => {
     hreflang: hreflang,
     structuredDataTypes: structuredDataTypes,
   };
-})()`;
+})(__SCOPE_JSON__)`;
+
+// Scope is fixed for a whole crawl, so the substituted script is built once per
+// distinct base rather than per page.
+const extractScriptCache = new Map<string, string>();
+function extractScriptFor(scope: ScopeArg): string {
+  const cached = extractScriptCache.get(scope.base);
+  if (cached) return cached;
+  // Function replacer: a literal replacement would let `$&`-style sequences in
+  // the JSON be reinterpreted as substitution patterns.
+  const built = EXTRACT_SEO_SCRIPT.replace("__SCOPE_JSON__", () => JSON.stringify(scope));
+  extractScriptCache.set(scope.base, built);
+  return built;
+}
 
 // ── Core Web Vitals init script ──
 // Installed once per context. Buffers LCP and CLS observations on window.__feraVitals
@@ -700,16 +736,44 @@ function extractPhaseTimings(response: any): PhaseTimings | null {
   return { dns, tcp, tls, ttfb, download, total: dns + tcp + tls + ttfb + download, reused };
 }
 
+/** Scope base handed to EXTRACT_SEO_SCRIPT. Empty base = same-host-as-page. */
+export interface ScopeArg {
+  base: string;
+}
+
+/**
+ * Derives the scope base from the seed URL. `domain` strips one leading `www.`
+ * so seeding either `babbel.com` or `www.babbel.com` yields base `babbel.com`,
+ * putting every `*.babbel.com` host in scope.
+ *
+ * The seed supplies the registrable domain, so no public-suffix list is needed:
+ * seeding `www.example.co.uk` gives base `example.co.uk`, where naively taking
+ * the last two labels would give `co.uk` and pull in the entire TLD.
+ */
+export function scopeBaseFor(seedUrl: string, scope: CrawlScope | undefined): ScopeArg {
+  if (scope !== "domain") return { base: "" };
+  try {
+    const host = new URL(seedUrl).hostname.toLowerCase();
+    return { base: host.startsWith("www.") ? host.slice(4) : host };
+  } catch {
+    return { base: "" };
+  }
+}
+
 // Walks Playwright's HTTP redirect chain back to the originating request and
-// returns both the URL chain and the *first* hop's status code. SEO crawlers
+// returns the URL chain plus the *first* hop's status and headers. SEO crawlers
 // label a redirected URL by its first response (e.g. `301`), not the final
 // destination's 200 — so we override `status` with `firstStatus` when the
-// chain is non-empty.
+// chain is non-empty. Everything else on the row (body, DOM, perf) belongs to
+// the destination, so the first hop's own headers — `location`, `server`,
+// cache directives — would otherwise be unrecoverable; `firstHeaders` keeps
+// them. The chain terminates at the final URL so it reads origin → destination.
 async function captureRedirectInfo(
   finalResponse: any,
-): Promise<{ chain: string[]; firstStatus: number }> {
+): Promise<{ chain: string[]; firstStatus: number; firstHeaders: Record<string, string> }> {
   const chain: string[] = [];
   let firstStatus = 0;
+  let firstHeaders: Record<string, string> = {};
   let firstReq: any = null;
   try {
     const seen = new Set<string>();
@@ -725,9 +789,16 @@ async function captureRedirectInfo(
     if (firstReq) {
       const firstResp = await firstReq.response();
       firstStatus = firstResp?.status() ?? 0;
+      if (firstResp) {
+        firstHeaders = await firstResp
+          .allHeaders()
+          .catch(() => firstResp.headers() as Record<string, string>);
+      }
+      const finalUrl = finalResponse?.url?.();
+      if (finalUrl && !seen.has(finalUrl)) chain.push(finalUrl);
     }
   } catch {}
-  return { chain, firstStatus };
+  return { chain, firstStatus, firstHeaders };
 }
 
 // ── Main page crawl ──
@@ -745,6 +816,9 @@ interface CrawlPageOpts {
   // before returning. Only the crawl worker sets this — the probe matrix and
   // tests call crawlPage without it, so they stay fast. See humanize.ts.
   humanize?: boolean;
+  // Which hosts count as "this site" for link classification and enqueueing.
+  // Omitted (probe matrix, direct callers) → same-host-as-page.
+  scope?: ScopeArg;
 }
 
 export async function crawlPage(
@@ -764,23 +838,41 @@ export async function crawlPage(
   const jsErrors: string[] = [];
   const consoleErrors: string[] = [];
   const failedRequests: string[] = [];
+  // A single broken subresource can surface on both the requestfailed and the
+  // response path (and Chrome's preload scanner can request it twice), which
+  // double-counted it in the export. Record each URL once.
+  const seenFailed = new Set<string>();
+  const pushFailed = (u: string) => {
+    if (failedRequests.length >= 100 || seenFailed.has(u)) return;
+    seenFailed.add(u);
+    failedRequests.push(u);
+  };
   const onPageError = (err: Error) => {
     if (jsErrors.length < 50) jsErrors.push(err.message);
   };
   const onConsole = (msg: any) => {
-    if (msg.type() === "error" && consoleErrors.length < 50) {
-      consoleErrors.push(msg.text());
-    }
+    if (msg.type() !== "error" || consoleErrors.length >= 50) return;
+    const text = msg.text();
+    // Our own blockResources aborts surface here as a console error. They're
+    // tagged ERR_BLOCKED_BY_CLIENT (see the route handler) precisely so they
+    // can be dropped without also hiding genuine ERR_FAILED (CORS, etc).
+    if (text.includes(SELF_ABORT_MARKER)) return;
+    consoleErrors.push(text);
   };
   const onRequestFailed = (req: any) => {
-    if (failedRequests.length < 100) failedRequests.push(req.url());
+    // Same self-inflicted-abort filter, read from the failure text rather than
+    // the resource type so it stays correct if the blocked set ever changes.
+    try {
+      if (req.failure()?.errorText?.includes(SELF_ABORT_MARKER)) return;
+    } catch {}
+    pushFailed(req.url());
   };
   // Capture HTTP 4xx/5xx subresources (not network failures, which fire above).
   const onResponse = (resp: any) => {
     try {
       const s = resp.status();
-      if (s >= 400 && resp.url() !== url && failedRequests.length < 100) {
-        failedRequests.push(resp.url());
+      if (s >= 400 && resp.url() !== url) {
+        pushFailed(resp.url());
       }
     } catch {}
   };
@@ -806,10 +898,10 @@ export async function crawlPage(
       response
         ? response.allHeaders().catch(() => response.headers())
         : Promise.resolve({} as Record<string, string>),
-      page.evaluate(EXTRACT_SEO_SCRIPT) as Promise<any>,
+      page.evaluate(extractScriptFor(opts?.scope ?? { base: "" })) as Promise<any>,
     ]);
 
-    const { chain: redirectChain, firstStatus } = redirectInfo;
+    const { chain: redirectChain, firstStatus, firstHeaders: redirectHeaders } = redirectInfo;
     status = firstStatus > 0 ? firstStatus : (response?.status() ?? 0);
 
     // Per-request phase timings, ephemeral. The Network Live Map listens
@@ -839,7 +931,11 @@ export async function crawlPage(
     if (response) {
       responseHeaders = headers;
       contentType = responseHeaders["content-type"] ?? "";
-      serverHeader = responseHeaders["server"] ?? undefined;
+      // `status` is the first hop's, so `server` must be too — otherwise a 3xx
+      // row reports the destination's server (often blank) for a response it
+      // never describes. Non-redirect rows are unaffected: firstHeaders is {}.
+      serverHeader =
+        (firstStatus > 0 ? redirectHeaders["server"] : responseHeaders["server"]) ?? undefined;
 
       const finalUrl = page.url();
       if (finalUrl !== url) redirectUrl = finalUrl;
@@ -996,6 +1092,7 @@ export async function crawlPage(
         metaTags: data.metaTags,
         scraper,
         redirectChain,
+        redirectHeaders,
         hreflang: data.hreflang ?? [],
         structuredDataTypes: data.structuredDataTypes ?? [],
         securityHeaders,
@@ -1178,7 +1275,10 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   const buildLaunchOpts = (browserPath?: string) => ({
     headless,
     ...(browserPath ? { executablePath: browserPath } : {}),
-    args: headless ? STEALTH_ARGS : [...STEALTH_ARGS, "--start-maximized"],
+    // Headed: a fixed desktop-sized window (NOT --start-maximized, which
+    // forces a full-screen foregrounded window). It stays visible — see the
+    // note where the tabs are opened for why it isn't minimized.
+    args: headless ? STEALTH_ARGS : [...STEALTH_ARGS, "--window-size=1366,900"],
     ignoreDefaultArgs: ["--enable-automation"] as string[],
     ...(stealthEnabled
       ? (headless ? {} : { viewport: null as null })
@@ -1277,7 +1377,9 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   if (config.blockResources && !config.captureVitals) {
     await context.route("**/*", (route) => {
       if (BLOCKED_RESOURCE_TYPES.has(route.request().resourceType())) {
-        return route.abort();
+        // "blockedbyclient" (not the default abort) so the resulting net error
+        // is attributable to us — see SELF_ABORT_MARKER.
+        return route.abort("blockedbyclient");
       }
       return route.continue();
     });
@@ -1334,12 +1436,19 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     ogImageDownloadDir = path.join(userDataDir, "..", "og-images", String(config.sessionId));
     fs.mkdirSync(ogImageDownloadDir, { recursive: true });
   }
+  // Default to domain scope: see CrawlConfig.scope for why host scope is opt-in.
+  // ensureProtocol first: a bare `example.com` makes `new URL()` throw inside
+  // scopeBaseFor, which silently degrades domain scope to legacy host-of-page.
+  const scopeArg = scopeBaseFor(ensureProtocol(config.startUrl), config.scope ?? "domain");
+  log("info", "crawl scope", { scope: config.scope ?? "domain", base: scopeArg.base });
+
   const crawlPageOpts: CrawlPageOpts = {
     ...(config.downloadOgImage ? { downloadOgImage: true, downloadDir: ogImageDownloadDir, userAgent: config.userAgent } : {}),
     ...(config.scraperRules?.length ? { scraperRules: config.scraperRules } : {}),
     ...(config.captureVitals ? { captureVitals: true } : {}),
     ...(config.navTimeout ? { navTimeout: config.navTimeout } : {}),
     ...(config.humanize ? { humanize: true } : {}),
+    scope: scopeArg,
   };
 
   const visited = new Set<string>();
@@ -1502,8 +1611,12 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
   process.stdin.on("data", onStdinData);
   process.stdin.resume();
 
-  // Robots.txt cache (only when respecting robots — null otherwise for zero overhead)
-  const robotsCache = config.respectRobots ? new RobotsCache(config.userAgent) : null;
+  // Robots.txt cache. Needed for sitemap discovery too (robots.txt is where
+  // `Sitemap:` lines live), so it's built when *either* consumer is on — but
+  // only `respectRobots` may gate crawling, see the isAllowed check below.
+  const discoverSitemap = config.discoverSitemap ?? true;
+  const robotsCache =
+    config.respectRobots || discoverSitemap ? new RobotsCache(config.userAgent) : null;
 
   if (config.mode === "list" && config.urls?.length) {
     for (const u of config.urls) enqueueNew(ensureProtocol(u));
@@ -1511,31 +1624,49 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     const startUrl = ensureProtocol(config.startUrl);
     enqueueNew(startUrl);
 
+    // Resolve the seed's post-redirect URL once, before anything derives from
+    // it. A non-www start URL (or vice versa) commonly 301s to the canonical
+    // host, and TWO things break if we keep using the typed one:
+    //   - scope base: every link on the destination host falls out of scope,
+    //     so the spider stops after the seed with internalLinks: 0;
+    //   - sitemap filter: every <loc> lives on the canonical origin and gets
+    //     rejected, draining the queue after one URL.
+    const requestedOrigin = new URL(startUrl).origin;
+    let origin = requestedOrigin;
+    let resolvedStart = startUrl;
+    if (scopeArg.base || discoverSitemap) {
+      try {
+        const resp = await fetch(startUrl, {
+          signal: AbortSignal.timeout(8000),
+          headers: { "User-Agent": config.userAgent },
+          redirect: "follow",
+        });
+        resolvedStart = resp.url || startUrl;
+        const finalOrigin = new URL(resolvedStart).origin;
+        if (finalOrigin !== requestedOrigin) {
+          origin = finalOrigin;
+          log("info", "start url redirected", { from: requestedOrigin, to: origin });
+        }
+      } catch {
+        // Resolution failed (timeout/network) — fall back to the typed origin.
+      }
+      // Rebase scope onto the destination. Mutating in place is deliberate:
+      // `crawlPageOpts.scope` holds this same object, and extractScriptFor()
+      // reads `.base` per call, so the browser-side predicate picks it up.
+      const rescoped = scopeBaseFor(resolvedStart, config.scope ?? "domain");
+      if (rescoped.base !== scopeArg.base) {
+        log("info", "crawl scope rebased after redirect", {
+          from: scopeArg.base,
+          to: rescoped.base,
+        });
+        scopeArg.base = rescoped.base;
+      }
+    }
+
     // Sitemap discovery — fetch on spider start, seed queue, and track inSitemap flags.
-    if (config.respectRobots) {
+    if (discoverSitemap) {
       phase("sitemap-discovery");
       try {
-        const requestedOrigin = new URL(startUrl).origin;
-        // Resolve the post-redirect origin: a non-www start URL (or vice versa)
-        // commonly 301s to the canonical host, and every sitemap <loc> lives on
-        // that canonical origin. Filtering against the literal typed origin then
-        // rejects all of them, draining the queue after one URL. Follow the
-        // redirect once and use the final origin for the queue filter.
-        let origin = requestedOrigin;
-        try {
-          const resp = await fetch(startUrl, {
-            signal: AbortSignal.timeout(8000),
-            headers: { "User-Agent": config.userAgent },
-            redirect: "follow",
-          });
-          const finalOrigin = new URL(resp.url).origin;
-          if (finalOrigin !== requestedOrigin) {
-            origin = finalOrigin;
-            log("info", "start url redirected", { from: requestedOrigin, to: origin });
-          }
-        } catch {
-          // Resolution failed (timeout/network) — fall back to the typed origin.
-        }
         const fromRobots = await robotsCache!.getSitemaps(origin);
         log("info", "sitemaps declared in robots.txt", { count: fromRobots.length, origin });
         const discovered = await discoverSitemapUrls(origin, fromRobots, config.userAgent);
@@ -1761,7 +1892,9 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
         activeWorkers++;
         setInFlight(activeWorkers);
         try {
-          if (robotsCache && !(await robotsCache.isAllowed(url))) {
+          // `config.respectRobots` — NOT just `robotsCache` — decides whether
+          // robots blocks a fetch: the cache also exists for sitemap-only runs.
+          if (config.respectRobots && robotsCache && !(await robotsCache.isAllowed(url))) {
             writeLine(makeBlockedResult(url, sitemapUrls.has(url)));
             processed++;
             continue;
@@ -1805,6 +1938,14 @@ export async function runCrawler(config: CrawlConfig): Promise<void> {
     } else {
       for (let i = 0; i < N; i++) pages.push(await context.newPage());
     }
+
+    // The headed window is deliberately left visible. Minimizing it made every
+    // worker tab a hidden renderer (document.hidden=true), and Chromium then
+    // throttles timers, stops requestAnimationFrame and defers paints — so
+    // LCP/CLS observations may never fire and rAF/IntersectionObserver content
+    // never renders before extraction, skewing wordCount/contentHash against
+    // the headless run. Headed is also the manual-unblock path: the user has to
+    // be able to see a captcha or sign-in wall to solve it.
 
     await Promise.all(pages.map((page, i) => worker(i, page)));
   } finally {

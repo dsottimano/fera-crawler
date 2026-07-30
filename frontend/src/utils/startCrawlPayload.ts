@@ -17,6 +17,7 @@ export interface StartCrawlPayload {
   delay: number;
   customHeaders: string | null;
   mode: "spider" | "list";
+  scope: "domain" | "host";
   urls: string[] | null;
   headless: boolean;
   downloadOgImage: boolean | null;
@@ -70,11 +71,13 @@ export function buildStartCrawlPayload(
     concurrency: s.crawling.concurrency,
     userAgent: stealthUa || null,
     respectRobots: s.crawling.respectRobots,
+    discoverSitemap: s.crawling.discoverSitemap,
     delay: s.crawling.delay,
     customHeaders: Object.keys(inputs.customHeaders).length
       ? JSON.stringify(inputs.customHeaders)
       : null,
     mode,
+    scope: s.crawling.scope,
     urls: urls.length ? [...urls] : null,
     headless: s.authentication.headless,
     downloadOgImage: s.extraction.downloadOgImage || null,

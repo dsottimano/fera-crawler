@@ -28,6 +28,7 @@ const CRAWLING_SUBGROUPS: CrawlingSubgroup[] = [
     items: [
       { bucket: "authentication", key: "headless" },
       { bucket: "crawling", key: "mode" },
+      { bucket: "crawling", key: "scope" },
       { bucket: "crawling", key: "maxRequests" },
       { bucket: "crawling", key: "respectRobots" },
       { bucket: "crawling", key: "discoverSitemap" },

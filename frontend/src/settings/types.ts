@@ -29,6 +29,7 @@ export interface StealthPatches {
 export interface SettingsValues {
   crawling: {
     mode: "spider" | "list";
+    scope: "domain" | "host";
     concurrency: number;
     maxRequests: number;
     delay: number;

@@ -50,6 +50,13 @@ export const SCHEMA: SettingsSchema = {
         options: ["spider", "list"] as const,
         label: "Crawl mode",
       },
+      scope: {
+        type: "enum",
+        default: "domain",
+        options: ["domain", "host"] as const,
+        label: "Crawl scope",
+        help: "Which hosts the spider may follow links onto. 'domain' covers every subdomain of the seed — crawling babbel.com also crawls www., it., fr., my. — which is usually what you want, since localized content and blogs commonly live on their own subdomain. 'host' restricts to the host each page resolved to; note that a cross-host redirect still moves that host, so 'host' is tighter but not airtight. Scope also decides what counts as an internal vs external link in the grid.",
+      },
       concurrency: {
         type: "number",
         default: 5,

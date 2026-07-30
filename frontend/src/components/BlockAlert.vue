@@ -289,12 +289,14 @@ async function applyRowAndResume(row: ProbeRow) {
 
     await patch("performance", "sessionWarmup", !!cfg.warmup);
 
-    // Tier-3 (headed) rows mean "the wall only lets us through with a visible
-    // browser". Honor that on the live crawl; otherwise leave headless as the
-    // user had it, since headed mode is intrusive (visible window).
-    if (cfg.headed) {
-      await patch("authentication", "headless", false);
-    }
+    // Intentionally do NOT touch authentication.headless. The probe tests both
+    // headed and headless rows to find what beats the wall, but the user's
+    // headed/headless choice for the live crawl is always respected — even when
+    // only a headed row won. Silently flipping to headed overrode an explicit
+    // "Headless = ON" every resume on headed-only walls (e.g. bravotv) and
+    // popped a visible browser in the user's face. If a headed-only winner is
+    // applied as headless and still gets blocked, the block banner reappears and
+    // the user can flip Headless off manually. (2026-07-23, user request.)
 
     // The probe ran in a fresh isolated context — its "real 200" verdict is
     // only reproducible on the live crawl if the live profile is also clean.

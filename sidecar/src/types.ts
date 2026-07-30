@@ -82,8 +82,14 @@ export interface CrawlResult {
   // Scraper
   scraper: Record<string, { value: string; appears: boolean }>;
 
-  // Redirect chain (multi-hop capture; empty for non-redirected requests)
+  // Redirect chain, origin → destination (empty for non-redirected requests)
   redirectChain: string[];
+
+  // Headers of the *first* hop, i.e. the response `status` refers to. Every
+  // other field on a redirected row describes the destination, so this is the
+  // only place `location` and the redirect's own cache/server headers survive.
+  // Empty for non-redirected requests.
+  redirectHeaders?: Record<string, string>;
 
   // hreflang alternates: [{ lang: "en-us", href: "..." }]
   hreflang: Array<{ lang: string; href: string }>;
@@ -128,12 +134,27 @@ export interface CrawlResult {
   };
 }
 
+/**
+ * Which hosts a spider crawl may follow links onto.
+ * - `domain`: every host under the seed's domain — seeding `babbel.com` covers
+ *   `www.`, `it.`, `fr.`, `my.` …
+ * - `host`: only the host the page itself resolved to.
+ */
+export type CrawlScope = "domain" | "host";
+
 export interface CrawlConfig {
   startUrl: string;
+  // Defaults to "domain". A site's content routinely lives across subdomains
+  // (localized magazines, blogs), and a host-scoped crawl reports them as
+  // external while a single cross-host redirect can still drag the crawler
+  // onto one — so host scope is opt-in, not the default.
+  scope?: CrawlScope;
   maxRequests: number;
   concurrency: number;
   userAgent?: string;
   respectRobots?: boolean;
+  /** Seed the queue from robots-declared sitemaps + /sitemap.xml. Defaults on. */
+  discoverSitemap?: boolean;
   delay?: number;
   customHeaders?: Record<string, string>;
   mode: "spider" | "list";

@@ -20,17 +20,28 @@ routes.set("/redirect-301", (_req, res) => {
   res.end();
 });
 
+// Cross-hostname redirect: localhost -> 127.0.0.1, same server. Lets a test
+// exercise a seed that lands on a different host than the one typed, which is
+// what rebases the crawl's scope base.
+routes.set("/redirect-cross-host", (_req, res) => {
+  res.writeHead(301, { Location: "http://127.0.0.1:5000/" });
+  res.end();
+});
+
 // Multi-hop redirect chain: /chain-a -> /chain-b -> /chain-c -> /
+// Each hop carries a distinct X-Hop/Server so a test can tell *which* hop's
+// headers were captured — the destination ("/", served statically) sends
+// neither, so reading them off the final response yields nothing.
 routes.set("/chain-a", (_req, res) => {
-  res.writeHead(301, { Location: "/chain-b" });
+  res.writeHead(301, { Location: "/chain-b", "X-Hop": "a", Server: "hop-a-server" });
   res.end();
 });
 routes.set("/chain-b", (_req, res) => {
-  res.writeHead(302, { Location: "/chain-c" });
+  res.writeHead(302, { Location: "/chain-c", "X-Hop": "b", Server: "hop-b-server" });
   res.end();
 });
 routes.set("/chain-c", (_req, res) => {
-  res.writeHead(301, { Location: "/" });
+  res.writeHead(301, { Location: "/", "X-Hop": "c", Server: "hop-c-server" });
   res.end();
 });
 
@@ -47,7 +58,11 @@ routes.set("/page-with-errors", (_req, res) => {
     <script type="application/ld+json">{"@type":["WebSite","Organization"]}</script>
     </head><body>
     <h1>Error page</h1>
+    <!-- An image is a blocked resource type when blockResources is on, so it
+         must NOT be reported as a failed request. A script is not blocked, so
+         its genuine 404 must be. The pair guards both halves. -->
     <img src="/does-not-exist.png">
+    <script src="/does-not-exist.js"></script>
     <script>
       console.error("this is a console error");
       throw new Error("boom from inline script");

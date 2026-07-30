@@ -113,6 +113,8 @@ if (command === "open-browser") {
   const concurrency = parseInt(getFlag("--concurrency", "5"), 10);
   const userAgent = getFlag("--user-agent", "");
   const respectRobots = hasFlag("--respect-robots");
+  // Opt-out: absent flag means discovery stays on, matching the UI default.
+  const discoverSitemap = !hasFlag("--no-discover-sitemap");
   const delay = parseInt(getFlag("--delay", "0"), 10);
   const customHeadersRaw = getFlag("--custom-headers", "");
   const mode = getFlag("--mode", "spider") as "spider" | "list";
@@ -166,6 +168,10 @@ if (command === "open-browser") {
   const perHostDelayMax = perHostDelayMaxRaw ? parseInt(perHostDelayMaxRaw, 10) : undefined;
   const perHostConcurrencyRaw = getFlag("--per-host-concurrency", "");
   const perHostConcurrency = perHostConcurrencyRaw ? parseInt(perHostConcurrencyRaw, 10) : undefined;
+  // Anything other than an explicit "host" leaves scope unset, so runCrawler
+  // applies its "domain" default rather than a silently different one here.
+  const scopeRaw = getFlag("--scope", "");
+  const scope = scopeRaw === "host" || scopeRaw === "domain" ? scopeRaw : undefined;
   const navTimeoutRaw = getFlag("--nav-timeout", "");
   const navTimeout = navTimeoutRaw ? parseInt(navTimeoutRaw, 10) : undefined;
   const blockResources = hasFlag("--block-resources");
@@ -208,6 +214,7 @@ if (command === "open-browser") {
     headless,
     ...(userAgent ? { userAgent } : {}),
     ...(respectRobots ? { respectRobots } : {}),
+    discoverSitemap,
     ...(delay > 0 ? { delay } : {}),
     ...(customHeaders ? { customHeaders } : {}),
     ...(urls ? { urls } : {}),
@@ -220,6 +227,7 @@ if (command === "open-browser") {
     ...(perHostDelayMax !== undefined && !Number.isNaN(perHostDelayMax) ? { perHostDelayMax } : {}),
     ...(perHostConcurrency !== undefined && !Number.isNaN(perHostConcurrency) ? { perHostConcurrency } : {}),
     ...(navTimeout !== undefined && !Number.isNaN(navTimeout) ? { navTimeout } : {}),
+    ...(scope ? { scope } : {}),
     ...(blockResources ? { blockResources } : {}),
     ...(sessionWarmup ? { sessionWarmup } : {}),
     ...(humanize ? { humanize } : {}),

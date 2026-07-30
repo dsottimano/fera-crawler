@@ -46,6 +46,7 @@ const customHeaderCount = computed(() => Object.keys(config.customHeaders).lengt
       <section class="config-card">
         <div class="config-card-title">CRAWL</div>
         <div class="config-row"><span class="config-label">Mode</span><span class="config-value">{{ settings.crawling.mode }}</span></div>
+        <div v-if="settings.crawling.mode === 'spider'" class="config-row"><span class="config-label">Scope</span><span class="config-value">{{ settings.crawling.scope === 'domain' ? 'All subdomains' : 'Single host' }}</span></div>
         <div v-if="settings.crawling.mode === 'list'" class="config-row"><span class="config-label">List size</span><span class="config-value">{{ config.urls.length.toLocaleString() }} URLs</span></div>
         <div class="config-row"><span class="config-label">Concurrency</span><span class="config-value">{{ settings.crawling.concurrency }}</span></div>
         <div class="config-row"><span class="config-label">Max requests</span><span class="config-value">{{ settings.crawling.maxRequests || '∞' }}</span></div>

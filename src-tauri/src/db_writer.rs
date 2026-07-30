@@ -375,7 +375,8 @@ async fn write_frontier(pool: &SqlitePool, batch: &[(i64, String)]) -> Result<()
             .join(",");
         let sql = format!(
             "INSERT OR IGNORE INTO crawl_frontier (session_id, url)
-             SELECT v.c0, v.c1 FROM (VALUES {}) AS v(c0, c1)
+             WITH v(c0, c1) AS (VALUES {})
+             SELECT v.c0, v.c1 FROM v
              WHERE NOT EXISTS (
                  SELECT 1 FROM crawl_results r WHERE r.session_id = v.c0 AND r.url = v.c1
              )",
@@ -639,6 +640,7 @@ fn build_seo_json(v: &Value) -> String {
     let arr = |key: &str| -> Value { v.get(key).cloned().unwrap_or(Value::Array(vec![])) };
     let obj = |key: &str| -> Value { v.get(key).cloned().unwrap_or(Value::Object(Map::new())) };
     m.insert("redirectChain".into(), arr("redirectChain"));
+    m.insert("redirectHeaders".into(), obj("redirectHeaders"));
     m.insert("hreflang".into(), arr("hreflang"));
     m.insert("structuredDataTypes".into(), arr("structuredDataTypes"));
     m.insert("securityHeaders".into(), obj("securityHeaders"));
@@ -649,6 +651,13 @@ fn build_seo_json(v: &Value) -> String {
     m.insert(
         "inSitemap".into(),
         v.get("inSitemap").cloned().unwrap_or(Value::Bool(false)),
+    );
+    // Set by makeBlockedResult in the sidecar; was dropped here, so a
+    // robots.txt-disallowed URL was indistinguishable from any other status-0
+    // row in the export.
+    m.insert(
+        "blockedByRobots".into(),
+        v.get("blockedByRobots").cloned().unwrap_or(Value::Bool(false)),
     );
     m.insert("h1Count".into(), i64_or_zero("h1Count"));
     m.insert("h2Count".into(), i64_or_zero("h2Count"));
@@ -1000,6 +1009,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count.0, 100);
+    }
+
+    // Pins the frontier insert's SQL shape. The `VALUES ...` list has to be
+    // introduced by a CTE — SQLite rejects `FROM (VALUES (..)) AS v(c0,c1)`
+    // with a syntax error, and because write errors are only logged, that
+    // failure is silent: no discovered URL ever persists, so FOUND/NOT-CRAWLED
+    // reads 0 and resume has nothing to re-seed from.
+    #[tokio::test]
+    async fn write_frontier_persists_and_skips_crawled() {
+        let pool = fresh_pool().await;
+        write_batch(
+            &pool,
+            &[PendingRow {
+                session_id: 1,
+                value: sample("https://a"),
+            }],
+        )
+        .await
+        .expect("seed crawled row");
+
+        write_frontier(
+            &pool,
+            &[
+                (1, "https://pending".to_string()),
+                (1, "https://a".to_string()),  // already crawled → skipped
+                (1, "https://pending".to_string()), // dupe → PK-ignored
+                (2, "https://a".to_string()),  // other session → kept
+            ],
+        )
+        .await
+        .expect("frontier insert must execute");
+
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT session_id, url FROM crawl_frontier ORDER BY session_id, url")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, "https://pending".to_string()),
+                (2, "https://a".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]

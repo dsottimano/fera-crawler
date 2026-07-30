@@ -68,8 +68,10 @@ export async function runCrawlerProcess(args: string[]): Promise<CrawlResult[]> 
           try {
             const obj = JSON.parse(line);
             // Skip observability events (log/metric/phase) — they share stdout
-            // with CrawlResults but carry a `type` discriminator.
-            if (obj && typeof obj === "object" && "type" in obj) continue;
+            // with CrawlResults but carry a `type` discriminator. Sidecar
+            // notifications (`sitemap-discovered`, ...) use `event` instead,
+            // and counting those as results inflates every length assertion.
+            if (obj && typeof obj === "object" && ("type" in obj || "event" in obj)) continue;
             results.push(obj);
           } catch {
             // skip non-JSON lines

@@ -273,9 +273,11 @@ pub async fn start_crawl(
     concurrency: u32,
     user_agent: Option<String>,
     respect_robots: Option<bool>,
+    discover_sitemap: Option<bool>,
     delay: Option<u32>,
     custom_headers: Option<String>,
     mode: Option<String>,
+    scope: Option<String>,
     urls: Option<Vec<String>>,
     headless: Option<bool>,
     download_og_image: Option<bool>,
@@ -334,6 +336,13 @@ pub async fn start_crawl(
     // Sidecar treats `--respect-robots` as a presence flag (on when present).
     if let Some(true) = respect_robots {
         args.push("--respect-robots".to_string());
+    }
+
+    // Sitemap discovery defaults ON, so this is an opt-OUT flag — a caller that
+    // never sends the field (CLI/MCP) keeps discovery rather than silently
+    // losing its seed URLs.
+    if let Some(false) = discover_sitemap {
+        args.push("--no-discover-sitemap".to_string());
     }
 
     if let Some(d) = delay {
@@ -415,6 +424,16 @@ pub async fn start_crawl(
     if let Some(t) = nav_timeout {
         args.push("--nav-timeout".to_string());
         args.push(t.to_string());
+    }
+
+    // Only the two known values are forwarded; anything else is dropped so the
+    // sidecar falls back to its own default instead of a typo silently
+    // narrowing the crawl.
+    if let Some(s) = scope.as_deref() {
+        if s == "host" || s == "domain" {
+            args.push("--scope".to_string());
+            args.push(s.to_string());
+        }
     }
 
     // Presence flag (sidecar treats it as on-when-present), like capture-vitals.
@@ -1620,17 +1639,14 @@ async fn run_csv_export(
         .ok_or_else(|| "DbReadPool state missing".to_string())?;
     let pool = pool_state.pool().await?;
 
-    let raw_file = std::fs::File::create(&dest_path)
-        .map_err(|e| format!("create {dest_path}: {e}"))?;
-    // 1 MiB BufWriter — csv::Writer issues many small writes and the
-    // syscall-per-write cost dominates on big sessions otherwise.
-    let buf = std::io::BufWriter::with_capacity(1 << 20, raw_file);
+    // Writes the main CSV plus one companion file per unbounded relation
+    // (outlinks / failed requests / console), named off the chosen stem.
     let app_for_cb = app.clone();
-    let prog = crate::exporter::write_csv_streaming(
+    let (prog, files) = crate::exporter::write_flat_export(
         pool,
         session_id,
         filter.as_ref(),
-        buf,
+        std::path::Path::new(&dest_path),
         move |p, phase| emit_export_progress(&app_for_cb, p, phase),
     )
     .await?;
@@ -1638,6 +1654,7 @@ async fn run_csv_export(
     Ok(serde_json::json!({
         "rowsWritten": prog.rows_written,
         "bytesWritten": prog.bytes_written,
+        "files": files.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
     }))
 }
 
@@ -1675,13 +1692,32 @@ pub async fn export_bundle(
     let pool = pool_state.pool().await?;
     let og_dir = og_images_dir_for_session(&app, session_id);
 
-    let file = std::fs::File::create(&dest_path)
-        .map_err(|e| format!("create {dest_path}: {e}"))?;
+    // Build into a `.part` sibling and rename on success, so a failure
+    // partway through (disk full, io error) leaves any previous export at
+    // `dest_path` intact rather than replacing it with a truncated zip.
+    let part_path = format!("{dest_path}.part");
+    let file = std::fs::File::create(&part_path)
+        .map_err(|e| format!("create {part_path}: {e}"))?;
     let app_for_cb = app.clone();
-    let prog = crate::exporter::write_bundle(pool, session_id, &og_dir, file, move |p, phase| {
-        emit_export_progress(&app_for_cb, p, phase);
-    })
-    .await?;
+    let prog = match crate::exporter::write_bundle(
+        pool,
+        session_id,
+        &og_dir,
+        file,
+        move |p, phase| {
+            emit_export_progress(&app_for_cb, p, phase);
+        },
+    )
+    .await
+    {
+        Ok(prog) => prog,
+        Err(e) => {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(e);
+        }
+    };
+    std::fs::rename(&part_path, &dest_path)
+        .map_err(|e| format!("finalize {dest_path}: {e}"))?;
     Ok(serde_json::json!({
         "rowsWritten": prog.rows_written,
         "imagesWritten": prog.images_written,
