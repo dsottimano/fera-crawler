@@ -1650,7 +1650,8 @@ async fn run_csv_export(
         move |p, phase| emit_export_progress(&app_for_cb, p, phase),
     )
     .await?;
-    emit_export_progress(&app, &prog, crate::exporter::ExportPhase::Done);
+    // `write_flat_export` already emits Done — a second one just re-arms the
+    // frontend's clear timer.
     Ok(serde_json::json!({
         "rowsWritten": prog.rows_written,
         "bytesWritten": prog.bytes_written,

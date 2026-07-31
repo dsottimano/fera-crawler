@@ -988,6 +988,25 @@ mod tests {
         assert_eq!(parsed["securityHeaders"], json!({}));
         assert_eq!(parsed["perf"], json!({}));
         assert_eq!(parsed["jsErrors"], json!([]));
+        // Both of these are sourced from seo_json, not from a table column —
+        // drop either insert and the export silently reports every page as
+        // not-blocked with no redirect headers.
+        assert_eq!(parsed["redirectHeaders"], json!({}));
+        assert_eq!(parsed["blockedByRobots"], json!(false));
+    }
+
+    // The values must survive, not just the defaults.
+    #[test]
+    fn build_seo_json_preserves_redirect_headers_and_robots_block() {
+        let v = json!({
+            "url": "x",
+            "redirectHeaders": {"location": "/next", "server": "nginx"},
+            "blockedByRobots": true,
+        });
+        let parsed: Value = serde_json::from_str(&build_seo_json(&v)).unwrap();
+        assert_eq!(parsed["redirectHeaders"]["location"], "/next");
+        assert_eq!(parsed["redirectHeaders"]["server"], "nginx");
+        assert_eq!(parsed["blockedByRobots"], json!(true));
     }
 
     #[tokio::test]

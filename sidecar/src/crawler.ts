@@ -450,6 +450,15 @@ function parseRobotsDirectives(metaRobots: string, metaGooglebot: string, xRobot
 // passed as an evaluate() argument: Playwright treats a string pageFunction as
 // a bare expression and drops the arg, which silently yields an undefined
 // SCOPE rather than an error.
+// The in-scope predicate's source, kept as its own constant so the unit test
+// can build the REAL function out of it instead of re-typing a copy that can
+// drift. Closes over `SCOPE` and `location` from the script it's spliced into.
+export const IN_SCOPE_SRC = `function(h) {
+    var b = SCOPE && SCOPE.base;
+    if (!b) return h === location.hostname;
+    return h === b || (h.length > b.length && h.slice(-(b.length + 1)) === "." + b);
+  }`;
+
 const EXTRACT_SEO_SCRIPT = `((SCOPE) => {
   var _m = function(a, v) {
     var el = document.querySelector("meta[" + a + '="' + v + '"]');
@@ -459,11 +468,7 @@ const EXTRACT_SEO_SCRIPT = `((SCOPE) => {
   // Empty base → legacy same-host-as-this-page behavior. Otherwise a host is
   // in scope if it IS the base or sits under it ("babbel.com" covers
   // "www.babbel.com" and "it.babbel.com", but never "notbabbel.com").
-  var _inScope = function(h) {
-    var b = SCOPE && SCOPE.base;
-    if (!b) return h === location.hostname;
-    return h === b || (h.length > b.length && h.slice(-(b.length + 1)) === "." + b);
-  };
+  var _inScope = ${IN_SCOPE_SRC};
 
   var title = (document.querySelector("title") || {}).textContent || "";
   title = title.trim();

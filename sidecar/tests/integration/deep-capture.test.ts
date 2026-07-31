@@ -52,7 +52,10 @@ describe("deep capture: redirect chain, hreflang, structured data, security head
     const r = results[0];
     expect(r.status).toBe(200);
     expect(r.redirectChain).toEqual([]);
-    expect(r.redirectHeaders ?? {}).toEqual({});
+    // Asserted without a `?? {}` fallback on purpose: the field must actually
+    // be emitted as {}, since a missing key would pass that fallback while the
+    // Rust side stores its own default and the regression goes unnoticed.
+    expect(r.redirectHeaders).toEqual({});
   });
 
   it("captures hreflang, structured data @types, and JS/console errors + failed requests", async () => {

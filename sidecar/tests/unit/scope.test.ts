@@ -1,16 +1,20 @@
 import { describe, it, expect } from "vitest";
-import { scopeBaseFor } from "../../src/crawler.js";
+import { scopeBaseFor, IN_SCOPE_SRC } from "../../src/crawler.js";
 
-// Mirrors the `_inScope` predicate embedded in EXTRACT_SEO_SCRIPT. The real one
-// runs inside the browser as a string, so it can't be imported; keeping an
-// executable copy here pins the suffix-matching rules the crawl frontier and
-// the internal/external link counts both depend on.
+// Compiles the SHIPPED predicate source — the same string spliced into
+// EXTRACT_SEO_SCRIPT — rather than a hand-copied duplicate, so loosening the
+// real one (e.g. to a bare endsWith) fails here. It closes over `SCOPE` and
+// `location`, which the browser supplies and we inject.
+//
+// `new Function` is safe here and only here: IN_SCOPE_SRC is a compile-time
+// constant from our own module, never input, and this is test-only code.
 function inScope(host: string, base: string, pageHost: string): boolean {
-  if (!base) return host === pageHost;
-  return (
-    host === base ||
-    (host.length > base.length && host.slice(-(base.length + 1)) === "." + base)
-  );
+  const build = new Function(
+    "SCOPE",
+    "location",
+    `return ${IN_SCOPE_SRC};`,
+  ) as (scope: { base: string }, loc: { hostname: string }) => (h: string) => boolean;
+  return build({ base }, { hostname: pageHost })(host);
 }
 
 describe("scopeBaseFor", () => {

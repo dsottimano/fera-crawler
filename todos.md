@@ -7,6 +7,95 @@ theme; each open item says what/where/why.
 
 ---
 
+## Shipped — 2026-07-30 session (4-agent full review of the working diff)
+
+Reviewed the uncommitted scope/exporter/deep-capture work before landing it;
+five blockers + six follow-ups fixed in `74460e1` and the commit after it.
+
+- **Scope frozen before the seed redirect** — the base came from the *typed*
+  URL, so a seed that 301s to another registrable domain put every link out of
+  scope and the spider stopped after one page (`internalLinks: 0`). Now the
+  seed's post-redirect URL is resolved once and `scopeArg.base` is rebased in
+  place. Regression test uses a `localhost` → `127.0.0.1` fixture redirect and
+  was confirmed to fail without the fix.
+- **`crawling.discoverSitemap` was a dead toggle** — UI-only, with discovery
+  actually gated on `respectRobots` (so robots-off silently killed sitemaps).
+  Wired payload → `commands.rs` → sidecar as an opt-OUT flag; the robots cache
+  is built for either consumer and only `respectRobots` may block a fetch.
+- **`crawl_frontier` insert had no test** — the `VALUES` form SQLite rejects
+  made every frontier write fail, and errors there are only `eprintln!`'d, so
+  nothing persisted and resume had nothing to re-seed from. Test confirmed to
+  fail on the old SQL with `near "(": syntax error`.
+- **Bundle export aborted past 4 GiB** — `large_file` was never set and entries
+  are `Stored`, so the raw CSV size tripped zip64.
+- **Mid-export failure destroyed the previous export** — `File::create`
+  truncated the destination up front. Both paths now stream into `.part`
+  siblings and rename only after every stream finishes.
+- **CSV formula injection** — crawled titles/meta/response headers reach cells
+  verbatim; values leading with `=`/`+`/`-`/`@`/tab/CR are now apostrophe-
+  prefixed, with numbers exempt so numeric columns stay numeric.
+- **No UTF-8 BOM** — Excel on Windows mojibaked every non-ASCII title.
+- **`bytesWritten` always 0** for CSV exports; now summed from the finalized
+  files. Duplicate `Done` event from `run_csv_export` removed.
+- **Headed crawl minimized its window** — hidden renderers throttle timers and
+  rAF, so LCP/CLS could never fire and rAF-gated content didn't render before
+  extraction; it also hid the captcha headed mode exists to let you solve.
+  Window now stays visible (Dave's call).
+- **Test-integrity fixes** — `tests/helpers.ts` counted `event`-discriminated
+  lines as crawl results; `scope.test.ts` tested a hand-copied duplicate of
+  `_inScope` (now compiles the shipped `IN_SCOPE_SRC`, confirmed to catch a
+  loosened predicate); `redirectHeaders`/`blockedByRobots` had zero assertions
+  despite being the diff's actual bug fixes; a `?? {}` fallback masked the
+  regression its own test existed to catch.
+
+## Open — from the 2026-07-30 review (not yet done)
+
+- **Blocking I/O on the tokio runtime** (`exporter.rs` row loop + og-image
+  walk, called straight from `#[tauri::command] async fn`). A multi-GB image
+  walk pins a worker for minutes and stalls the DbWriter flush during a live
+  crawl. Real fix = split the sqlx row stream from the blocking file/zip writes
+  (channel between an async reader and a `spawn_blocking` writer), plus `Send`
+  bounds on `write_stream`'s writer and progress callback. Deliberately not
+  bundled with the `.part`/4-GiB work — wants its own pass.
+- **Companion CSVs overwrite without a prompt.** The save dialog confirms one
+  path; `-outlinks` / `-failed-requests` / `-console` are written beside it. The
+  `.part` work protects the *failure* case only — a successful export still
+  clobbers same-named files.
+- **Export progress counter resets per stream.** `write_stream` starts a fresh
+  `ExportProgress` per call with the same `on_progress`, so the UI climbs 0→N
+  four times; `discover_schema` takes no callback at all, so the whole first
+  pass shows nothing.
+- **`flat_record` is O(n·m) with a `String` alloc per comparison** — ~40 headers
+  × ~40 columns ≈ 1600 `to_lowercase()` allocs per row (~1.6B on a 1M-row
+  crawl). Pre-build one lowercased map per row.
+- **`host` scope still drifts on redirect.** It resolves to "same host as the
+  page landed on", so a page that 301s to `cdn.partner.com` makes that host's
+  links internal — the exact bug fixed for `domain` scope, left for `host`.
+- **Scope applies in list mode**, anchored to `urls[0]`, while the UI hides the
+  Scope row for list mode and describes it as spider-only. A mixed-host URL list
+  gets `internal=0` on most rows.
+- **Sitemap seeding ignores scope** — only URLs whose origin exactly matches the
+  seed are enqueued, so under `domain` scope sibling-subdomain sitemap URLs are
+  dropped at seed time and arrive only via links. Nothing logs the rejected
+  count.
+- **`www.`-only stripping in `scopeBaseFor`** — seeding `it.babbel.com` gives
+  base `it.babbel.com`, so `www.babbel.com` reads as external, contradicting the
+  help text's "covers every subdomain of the seed".
+- **Two headers differing only in case collapse** — `discover_schema` lowercases
+  into one column but `flat_record` uses `.find()`, so `X-Cache` + `x-cache`
+  exports one value and drops the other (the meta path joins instead).
+- **`redirectChain` drops the destination when the chain revisits a URL**
+  (A→B→A yields `[A, B]`), breaking the origin→destination invariant.
+- **`--scope` has no end-to-end test** — flag parsing, Rust forwarding, and
+  classification under domain scope are all untested; a flag-name typo on
+  either side ships green. Same for `discoverSitemap` (the localhost fixture
+  serves no sitemap, so a meaningful test needs a fixture sitemap first).
+- **`jsErrors` has zero real coverage** — the one test is `it.skip`'d on a
+  documented Patchright limitation (no `Runtime.enable`).
+- **`performance.closeOnExtract` is still a dead setting** (known, pre-existing).
+
+---
+
 ## Shipped — 2026-07-22 session
 
 - **Probe: threaded the proxy** end-to-end (BlockAlert → `run_probe_matrix`
